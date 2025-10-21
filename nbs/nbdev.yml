@@ -1,0 +1,9 @@
+project:
+  output-dir: _docs
+
+website:
+  title: "cjm-plugin-system"
+  site-url: "https://cj-mills.github.io/cjm-plugin-system"
+  description: "Generic plugin system with discovery, configuration validation, and runtime management for extensible Python applications."
+  repo-branch: main
+  repo-url: "https://github.com/cj-mills/cjm-plugin-system"
