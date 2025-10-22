@@ -31,12 +31,12 @@ class PluginManager:
     - Plugin enable/disable/reload
     - Streaming support detection
     
+    The manager automatically uses the entry_point_group defined in the plugin interface.
+    
     Example:
         >>> # For a transcription plugin system
-        >>> manager = PluginManager(
-        ...     plugin_interface=TranscriptionPlugin,
-        ...     entry_point_group="transcription.plugins"
-        ... )
+        >>> manager = PluginManager(plugin_interface=TranscriptionPlugin)
+        >>> # entry_point_group is automatically "transcription.plugins"
         >>> manager.discover_plugins()
         >>> manager.load_plugin(plugin_meta, config={"model": "base"})
     """
@@ -44,16 +44,23 @@ class PluginManager:
     def __init__(
         self, 
         plugin_interface: Type[PluginInterface] = PluginInterface,  # The base class/interface plugins must implement
-        entry_point_group: str = "plugins"  # The entry point group name for plugin discovery
+        entry_point_group: Optional[str] = None  # Optional override for entry point group name
     ):
         """Initialize the plugin manager.
         
         Args:
             plugin_interface: The plugin interface class that plugins must implement
-            entry_point_group: Entry point group name for discovering installed plugins
+            entry_point_group: Optional override for entry point group name.
+                             If not provided, uses plugin_interface.entry_point_group
         """
         self.plugin_interface = plugin_interface
-        self.entry_point_group = entry_point_group
+        
+        # Use entry_point_group from plugin interface if not explicitly provided
+        if entry_point_group is None:
+            self.entry_point_group = plugin_interface.entry_point_group
+        else:
+            self.entry_point_group = entry_point_group
+            
         self.entry_points = []
         self.discovered = []
         self.plugins: Dict[str, PluginMeta] = {}

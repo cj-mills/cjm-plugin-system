@@ -14,12 +14,19 @@ from ..utils.validation import validate_config, extract_defaults
 # %% ../../nbs/core/interface.ipynb 5
 class PluginInterface(ABC):
     """Generic plugin interface that all plugins must implement.
-    
+
     This is a domain-agnostic base class. Domain-specific plugin systems
     should subclass this interface and add their specific requirements.
-    
+
+    **Important:** Domain-specific interfaces (direct subclasses of PluginInterface)
+    MUST define the `entry_point_group` class attribute. This requirement is enforced
+    at class definition time.
+
     Example:
         >>> class TranscriptionPlugin(PluginInterface):
+        ...     '''Transcription plugin interface.'''
+        ...     entry_point_group = "transcription.plugins"  # Required!
+        ...
         ...     @property
         ...     @abstractmethod
         ...     def supported_formats(self) -> List[str]:
@@ -34,7 +41,31 @@ class PluginInterface(ABC):
         ...     ) -> TranscriptionResult:
         ...         '''Transcribe audio to text.'''
         ...         pass
+        ...
+        >>> # Concrete plugins inherit entry_point_group automatically
+        >>> class WhisperPlugin(TranscriptionPlugin):
+        ...     # No need to define entry_point_group - inherited from TranscriptionPlugin
+        ...     pass
     """
+
+    # Must be overridden by domain-specific interfaces
+    entry_point_group: str = None
+    
+    def __init_subclass__(cls, **kwargs):
+        """Enforce that domain-specific interfaces define entry_point_group."""
+        super().__init_subclass__(**kwargs)
+        
+        # Check if this is a direct subclass of PluginInterface
+        # (i.e., a domain-specific interface like TranscriptionPlugin)
+        if PluginInterface in cls.__bases__:
+            # Domain-specific interfaces must define entry_point_group
+            if not hasattr(cls, 'entry_point_group') or cls.entry_point_group is None:
+                raise TypeError(
+                    f"Domain-specific interface '{cls.__name__}' must define "
+                    f"'entry_point_group' class attribute. Example:\n"
+                    f"    class {cls.__name__}(PluginInterface):\n"
+                    f"        entry_point_group = 'your.plugins'"
+                )
     
     @property
     @abstractmethod
