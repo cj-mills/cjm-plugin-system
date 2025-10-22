@@ -122,8 +122,15 @@ class PluginInterface(ABC):
     This is a domain-agnostic base class. Domain-specific plugin systems
     should subclass this interface and add their specific requirements.
     
+    **Important:** Domain-specific interfaces (direct subclasses of PluginInterface)
+    MUST define the `entry_point_group` class attribute. This requirement is enforced
+    at class definition time.
+    
     Example:
         >>> class TranscriptionPlugin(PluginInterface):
+        ...     '''Transcription plugin interface.'''
+        ...     entry_point_group = "transcription.plugins"  # Required!
+        ...
         ...     @property
         ...     @abstractmethod
         ...     def supported_formats(self) -> List[str]:
@@ -138,6 +145,11 @@ class PluginInterface(ABC):
         ...     ) -> TranscriptionResult:
         ...         '''Transcribe audio to text.'''
         ...         pass
+        ...
+        >>> # Concrete plugins inherit entry_point_group automatically
+        >>> class WhisperPlugin(TranscriptionPlugin):
+        ...     # No need to define entry_point_group - inherited from TranscriptionPlugin
+        ...     pass
     """
     
     def name(
@@ -453,7 +465,7 @@ class PluginManager:
     def __init__(
         self, 
         plugin_interface: Type[PluginInterface] = PluginInterface,  # The base class/interface plugins must implement
-        entry_point_group: str = "plugins"  # The entry point group name for plugin discovery
+        entry_point_group: Optional[str] = None  # Optional override for entry point group name
     )
     """
     Manages plugin discovery, loading, and lifecycle.
@@ -466,12 +478,12 @@ class PluginManager:
     - Plugin enable/disable/reload
     - Streaming support detection
     
+    The manager automatically uses the entry_point_group defined in the plugin interface.
+    
     Example:
         >>> # For a transcription plugin system
-        >>> manager = PluginManager(
-        ...     plugin_interface=TranscriptionPlugin,
-        ...     entry_point_group="transcription.plugins"
-        ... )
+        >>> manager = PluginManager(plugin_interface=TranscriptionPlugin)
+        >>> # entry_point_group is automatically "transcription.plugins"
         >>> manager.discover_plugins()
         >>> manager.load_plugin(plugin_meta, config={"model": "base"})
     """
@@ -479,13 +491,14 @@ class PluginManager:
     def __init__(
             self, 
             plugin_interface: Type[PluginInterface] = PluginInterface,  # The base class/interface plugins must implement
-            entry_point_group: str = "plugins"  # The entry point group name for plugin discovery
+            entry_point_group: Optional[str] = None  # Optional override for entry point group name
         )
         "Initialize the plugin manager.
 
 Args:
     plugin_interface: The plugin interface class that plugins must implement
-    entry_point_group: Entry point group name for discovering installed plugins"
+    entry_point_group: Optional override for entry point group name.
+                     If not provided, uses plugin_interface.entry_point_group"
     
     def get_entry_points(self) -> importlib.metadata.EntryPoints:
             """Get plugin entry points from installed packages.
