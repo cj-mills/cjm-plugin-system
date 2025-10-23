@@ -62,205 +62,103 @@ from cjm_plugin_system.core.interface import (
 #### Functions
 
 ``` python
-def PluginInterface_supports_streaming(self) -> bool:
-    """Check if this plugin supports streaming execution.
-    
-    Returns:
-        True if execute_stream is implemented and streaming is supported
-    """
+def PluginInterface_supports_streaming(self) -> bool: # True if execute_stream is implemented
+    """Check if this plugin supports streaming execution."""
     # Default: check if execute_stream is overridden from the base class
-    """
-    Check if this plugin supports streaming execution.
-    
-    Returns:
-        True if execute_stream is implemented and streaming is supported
-    """
+    "Check if this plugin supports streaming execution."
 ```
 
 ``` python
 def PluginInterface_execute_stream(
     self,
-    *args,  # Arguments for plugin execution
-    **kwargs  # Keyword arguments for plugin execution
-) -> Generator[Any, None, Any]:  # Yields partial results, returns final result
-    """
-    Stream execution results chunk by chunk.
-    
-    Default implementation falls back to execute() without streaming.
-    Plugins can override this to provide real streaming capabilities.
-    
-    Args:
-        *args: Positional arguments to pass to the plugin
-        **kwargs: Keyword arguments to pass to the plugin
-        
-    Yields:
-        Partial results as they become available (type depends on plugin)
-        
-    Returns:
-        Final complete result
-        
-    Example:
-        >>> # Stream results in real-time
-        >>> for chunk in plugin.execute_stream(input_data):
-        ...     print(chunk, end="", flush=True)
-        >>> 
-        >>> # Or collect all chunks and get final result
-        >>> generator = plugin.execute_stream(input_data)
-        >>> chunks = []
-        >>> for chunk in generator:
-        ...     chunks.append(chunk)
-    """
+    *args, # Arguments for plugin execution
+    **kwargs # Keyword arguments for plugin execution
+) -> Generator[Any, None, Any]: # Yields partial results, returns final result
+    "Stream execution results chunk by chunk."
 ```
 
 #### Classes
 
 ``` python
 class PluginInterface(ABC):
-    """
-    Generic plugin interface that all plugins must implement.
+    "Generic plugin interface that all plugins must implement."
     
-    This is a domain-agnostic base class. Domain-specific plugin systems
-    should subclass this interface and add their specific requirements.
+    def name(self) -> str: # Unique identifier for this plugin
+            """Unique plugin identifier."""
+            pass
     
-    **Important:** Domain-specific interfaces (direct subclasses of PluginInterface)
-    MUST define the `entry_point_group` class attribute. This requirement is enforced
-    at class definition time.
-    
-    Example:
-        >>> class TranscriptionPlugin(PluginInterface):
-        ...     '''Transcription plugin interface.'''
-        ...     entry_point_group = "transcription.plugins"  # Required!
-        ...
-        ...     @property
-        ...     @abstractmethod
-        ...     def supported_formats(self) -> List[str]:
-        ...         '''Audio formats this plugin supports.'''
-        ...         pass
-        ...
-        ...     @abstractmethod
-        ...     def execute(
-        ...         self,
-        ...         audio: Union[AudioData, str, Path],
-        ...         **kwargs
-        ...     ) -> TranscriptionResult:
-        ...         '''Transcribe audio to text.'''
-        ...         pass
-        ...
-        >>> # Concrete plugins inherit entry_point_group automatically
-        >>> class WhisperPlugin(TranscriptionPlugin):
-        ...     # No need to define entry_point_group - inherited from TranscriptionPlugin
-        ...     pass
-    """
-    
-    def name(
-            self
-        ) -> str:  # The unique identifier for this plugin
+        @property
+        @abstractmethod
+        def version(self) -> str: # Semantic version string (e.g., "1.0.0")
         "Unique plugin identifier."
     
-    def version(
-            self
-        ) -> str:  # The semantic version string (e.g., "1.0.0")
+    def version(self) -> str: # Semantic version string (e.g., "1.0.0")
+            """Plugin version."""
+            pass
+    
+        @abstractmethod
+        def initialize(
+            self,
+            config:Optional[Dict[str, Any]]=None # Configuration dictionary for plugin-specific settings
+        ) -> None
         "Plugin version."
     
     def initialize(
             self,
-            config: Optional[Dict[str, Any]] = None  # Configuration dictionary for plugin-specific settings
+            config:Optional[Dict[str, Any]]=None # Configuration dictionary for plugin-specific settings
         ) -> None
-        "Initialize the plugin with configuration.
-
-Args:
-    config: Optional configuration dictionary. If not provided,
-           defaults from the schema will be used."
+        "Initialize the plugin with configuration."
     
     def execute(
             self,
             *args,
             **kwargs
-        ) -> Any:  # Returns plugin-specific output
-        "Execute the plugin's main functionality.
-
-The signature and return type of this method should be defined
-by domain-specific plugin interfaces."
+        ) -> Any: # Plugin-specific output
+        "Execute the plugin's main functionality."
     
-    def is_available(
-            self
-        ) -> bool:  # True if all required dependencies are available
-        "Check if the plugin's dependencies are available.
-
-Returns:
-    True if the plugin can be used, False if dependencies are missing."
+    def is_available(self) -> bool: # True if all required dependencies are available
+            """Check if the plugin's dependencies are available."""
+            pass
     
-    def get_config_schema(
-        ) -> Dict[str, Any]:  # JSON Schema describing configuration options
-        "Return JSON Schema describing the plugin's configuration options.
-
-The schema should follow JSON Schema Draft 7 specification.
-This enables automatic UI generation and validation.
-
-Returns:
-    Dictionary containing a JSON Schema
+        @staticmethod
+        @abstractmethod
+        def get_config_schema() -> Dict[str, Any]: # JSON Schema describing configuration options
+        "Check if the plugin's dependencies are available."
     
-Example:
-    >>> @staticmethod
-    >>> def get_config_schema() -> Dict[str, Any]:
-    ...     return {
-    ...         "type": "object",
-    ...         "properties": {
-    ...             "model": {
-    ...                 "type": "string",
-    ...                 "enum": ["tiny", "base", "small"],
-    ...                 "default": "base",
-    ...                 "description": "Model size to use"
-    ...             }
-    ...         },
-    ...         "required": ["model"]
-    ...     }"
+    def get_config_schema() -> Dict[str, Any]: # JSON Schema describing configuration options
+            """Return JSON Schema describing the plugin's configuration options."""
+            pass
     
-    def get_current_config(
-            self
-        ) -> Dict[str, Any]:  # Current configuration state
-        "Return the current configuration state.
-
-This should return the actual configuration being used by the plugin,
-which may include defaults not explicitly set by the user.
-
-Returns:
-    Dictionary containing current configuration values"
+        @abstractmethod
+        def get_current_config(self) -> Dict[str, Any]: # Current configuration state
+        "Return JSON Schema describing the plugin's configuration options."
+    
+    def get_current_config(self) -> Dict[str, Any]: # Current configuration state
+            """Return the current configuration state."""
+            pass
+    
+        def validate_config(
+            self,
+            config:Dict[str, Any] # Configuration to validate
+        ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+        "Return the current configuration state."
     
     def validate_config(
             self,
-            config: Dict[str, Any]  # Configuration to validate
-        ) -> Tuple[bool, Optional[str]]:  # (is_valid, error_message)
-        "Validate a configuration dictionary against the schema.
-
-Uses the plugin's schema from `get_config_schema()` to validate
-the provided configuration.
-
-Args:
-    config: Configuration dictionary to validate
+            config:Dict[str, Any] # Configuration to validate
+        ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+        "Validate a configuration dictionary against the schema."
     
-Returns:
-    Tuple of (is_valid, error_message).
-    If valid, error_message is None."
+    def get_config_defaults(self) -> Dict[str, Any]: # Default values from schema
+            """Extract default values from the configuration schema."""
+            schema = self.get_config_schema()
+            return extract_defaults(schema)
     
-    def get_config_defaults(
-            self
-        ) -> Dict[str, Any]:  # Default values from schema
-        "Extract default values from the configuration schema.
-
-Returns a dictionary of default values for all properties
-that have defaults defined in the schema.
-
-Returns:
-    Dictionary of default configuration values"
+        def cleanup(self) -> None
+        "Extract default values from the configuration schema."
     
-    def cleanup(
-            self
-        ) -> None
-        "Optional cleanup when plugin is unloaded.
-
-Override this method to perform any necessary cleanup,
-such as releasing resources or closing connections."
+    def cleanup(self) -> None
+        "Optional cleanup when plugin is unloaded."
 ```
 
 ### Plugin Manager (`manager.ipynb`)
@@ -289,173 +187,77 @@ from cjm_plugin_system.core.manager import (
 ``` python
 def get_plugin_config_schema(
     self,
-    plugin_name: str  # Name of the plugin
-) -> Optional[Dict[str, Any]]:  # Configuration schema or None if plugin not found
-    """
-    Get the configuration schema for a plugin.
-    
-    Returns the JSON Schema that describes all configuration options
-    available for the specified plugin.
-    
-    Args:
-        plugin_name: Name of the plugin
-        
-    Returns:
-        JSON Schema dictionary or None if plugin not found
-    """
+    plugin_name:str # Name of the plugin
+) -> Optional[Dict[str, Any]]: # Configuration schema or None if plugin not found
+    "Get the configuration schema for a plugin."
 ```
 
 ``` python
 def get_plugin_config(
     self,
-    plugin_name: str  # Name of the plugin
-) -> Optional[Dict[str, Any]]:  # Current configuration or None if plugin not found
-    """
-    Get the current configuration of a plugin.
-    
-    Returns the actual configuration values being used by the plugin,
-    including any defaults.
-    
-    Args:
-        plugin_name: Name of the plugin
-        
-    Returns:
-        Configuration dictionary or None if plugin not found
-    """
+    plugin_name:str # Name of the plugin
+) -> Optional[Dict[str, Any]]: # Current configuration or None if plugin not found
+    "Get the current configuration of a plugin."
 ```
 
 ``` python
 def update_plugin_config(
     self,
-    plugin_name: str,  # Name of the plugin
-    config: Dict[str, Any],  # New configuration
-    merge: bool = True  # Whether to merge with existing config or replace entirely
-) -> bool:  # True if successful, False otherwise
-    """
-    Update a plugin's configuration and reinitialize it.
-    
-    Args:
-        plugin_name: Name of the plugin to update
-        config: New configuration dictionary
-        merge: If True, merge with existing config. If False, replace entirely.
-    
-    Returns:
-        True if configuration was successfully updated, False otherwise.
-    """
+    plugin_name:str, # Name of the plugin
+    config:Dict[str, Any], # New configuration
+    merge:bool=True # Whether to merge with existing config or replace entirely
+) -> bool: # True if successful, False otherwise
+    "Update a plugin's configuration and reinitialize it."
 ```
 
 ``` python
 def validate_plugin_config(
     self,
-    plugin_name: str,  # Name of the plugin
-    config: Dict[str, Any]  # Configuration to validate
-) -> Tuple[bool, Optional[str]]:  # (is_valid, error_message)
-    """
-    Validate a configuration dictionary for a plugin without applying it.
-    
-    Args:
-        plugin_name: Name of the plugin
-        config: Configuration to validate
-        
-    Returns:
-        Tuple of (is_valid, error_message). If valid, error_message is None.
-    """
+    plugin_name:str, # Name of the plugin
+    config:Dict[str, Any] # Configuration to validate
+) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+    "Validate a configuration dictionary for a plugin without applying it."
 ```
 
 ``` python
 def get_all_plugin_schemas(
     self
-) -> Dict[str, Dict[str, Any]]:  # Dictionary mapping plugin names to their schemas
-    """
-    Get configuration schemas for all loaded plugins.
-    
-    Returns a dictionary where keys are plugin names and values are
-    their configuration schemas.
-    
-    Returns:
-        Dictionary of plugin schemas
-    """
+) -> Dict[str, Dict[str, Any]]: # Dictionary mapping plugin names to their schemas
+    "Get configuration schemas for all loaded plugins."
 ```
 
 ``` python
 def reload_plugin(
     self,
-    plugin_name: str,  # Name of the plugin to reload
-    config: Optional[Dict[str, Any]] = None  # Optional new configuration
-) -> bool:  # True if successful, False otherwise
-    """
-    Reload a plugin with optional new configuration.
-    
-    This is useful when you want to completely restart a plugin,
-    for example after updating its code during development.
-    
-    Args:
-        plugin_name: Name of the plugin to reload
-        config: Optional new configuration
-        
-    Returns:
-        True if successful, False otherwise
-    """
+    plugin_name:str, # Name of the plugin to reload
+    config:Optional[Dict[str, Any]]=None # Optional new configuration
+) -> bool: # True if successful, False otherwise
+    "Reload a plugin with optional new configuration."
 ```
 
 ``` python
 def execute_plugin_stream(
     self,
-    plugin_name: str,  # Name of the plugin to execute
-    *args,  # Arguments to pass to the plugin
-    **kwargs  # Keyword arguments to pass to the plugin
-) -> Generator[Any, None, Any]:  # Generator yielding partial results, returns final result
-    """
-    Execute a plugin with streaming support if available.
-    
-    This method will use the plugin's execute_stream method if the plugin
-    supports streaming, otherwise it falls back to the regular execute method.
-    
-    Args:
-        plugin_name: Name of the plugin to execute
-        *args: Positional arguments for the plugin
-        **kwargs: Keyword arguments for the plugin
-        
-    Yields:
-        Partial results as they become available
-        
-    Returns:
-        Final result from the plugin
-        
-    Example:
-        >>> # Stream results in real-time
-        >>> for chunk in manager.execute_plugin_stream("my_plugin", input_data):
-        ...     print(chunk, end="", flush=True)
-    """
+    plugin_name:str, # Name of the plugin to execute
+    *args, # Arguments to pass to the plugin
+    **kwargs # Keyword arguments to pass to the plugin
+) -> Generator[Any, None, Any]: # Generator yielding partial results, returns final result
+    "Execute a plugin with streaming support if available."
 ```
 
 ``` python
 def check_streaming_support(
     self,
-    plugin_name: str  # Name of the plugin to check
-) -> bool:  # True if plugin supports streaming
-    """
-    Check if a plugin supports streaming execution.
-    
-    Args:
-        plugin_name: Name of the plugin to check
-        
-    Returns:
-        True if the plugin implements execute_stream and supports streaming,
-        False otherwise.
-    """
+    plugin_name:str # Name of the plugin to check
+) -> bool: # True if plugin supports streaming
+    "Check if a plugin supports streaming execution."
 ```
 
 ``` python
 def get_streaming_plugins(
     self
-) -> List[str]:  # List of plugin names that support streaming
-    """
-    Get a list of all loaded plugins that support streaming.
-    
-    Returns:
-        List of plugin names that have streaming capabilities.
-    """
+) -> List[str]: # List of plugin names that support streaming
+    "Get a list of all loaded plugins that support streaming."
 ```
 
 #### Classes
@@ -463,191 +265,89 @@ def get_streaming_plugins(
 ``` python
 class PluginManager:
     def __init__(
-        self, 
-        plugin_interface: Type[PluginInterface] = PluginInterface,  # The base class/interface plugins must implement
-        entry_point_group: Optional[str] = None  # Optional override for entry point group name
+        self,
+        plugin_interface:Type[PluginInterface]=PluginInterface, # Base class/interface plugins must implement
+        entry_point_group:Optional[str]=None # Optional override for entry point group name
     )
-    """
-    Manages plugin discovery, loading, and lifecycle.
-    
-    This is a generic plugin manager that works with any PluginInterface
-    subclass. It provides:
-    - Automatic discovery via entry points
-    - Manual loading from module files
-    - Configuration management and validation
-    - Plugin enable/disable/reload
-    - Streaming support detection
-    
-    The manager automatically uses the entry_point_group defined in the plugin interface.
-    
-    Example:
-        >>> # For a transcription plugin system
-        >>> manager = PluginManager(plugin_interface=TranscriptionPlugin)
-        >>> # entry_point_group is automatically "transcription.plugins"
-        >>> manager.discover_plugins()
-        >>> manager.load_plugin(plugin_meta, config={"model": "base"})
-    """
+    "Manages plugin discovery, loading, and lifecycle."
     
     def __init__(
-            self, 
-            plugin_interface: Type[PluginInterface] = PluginInterface,  # The base class/interface plugins must implement
-            entry_point_group: Optional[str] = None  # Optional override for entry point group name
+            self,
+            plugin_interface:Type[PluginInterface]=PluginInterface, # Base class/interface plugins must implement
+            entry_point_group:Optional[str]=None # Optional override for entry point group name
         )
-        "Initialize the plugin manager.
-
-Args:
-    plugin_interface: The plugin interface class that plugins must implement
-    entry_point_group: Optional override for entry point group name.
-                     If not provided, uses plugin_interface.entry_point_group"
+        "Initialize the plugin manager."
     
-    def get_entry_points(self) -> importlib.metadata.EntryPoints:
-            """Get plugin entry points from installed packages.
-            
-            Returns:
-                Entry points for the configured group
-            """
-            self.entry_points = []        
+    def get_entry_points(self) -> importlib.metadata.EntryPoints: # Entry points for the configured group
+            """Get plugin entry points from installed packages."""
+            self.entry_points = []
             try
-        "Get plugin entry points from installed packages.
-
-Returns:
-    Entry points for the configured group"
+        "Get plugin entry points from installed packages."
     
-    def discover_plugins(self) -> List[PluginMeta]:  # List of discovered plugin metadata objects
-            """Discover all installed plugins via entry points.
-            
-            This method looks for plugins installed as packages that declare
-            entry points in the specified group.
-            
-            Returns:
-                List of discovered plugin metadata
-            """
+    def discover_plugins(self) -> List[PluginMeta]: # List of discovered plugin metadata objects
+            """Discover all installed plugins via entry points."""
             self.discovered = []
-                    
+    
             for ep in self.entry_points
-        "Discover all installed plugins via entry points.
-
-This method looks for plugins installed as packages that declare
-entry points in the specified group.
-
-Returns:
-    List of discovered plugin metadata"
+        "Discover all installed plugins via entry points."
     
     def load_plugin(
             self,
-            plugin_meta: PluginMeta,  # The plugin metadata
-            config: Optional[Dict[str, Any]] = None  # Optional configuration for the plugin
-        ) -> bool:  # True if successfully loaded, False otherwise
-        "Load and initialize a plugin.
-
-Args:
-    plugin_meta: Metadata for the plugin to load
-    config: Optional configuration dictionary
-    
-Returns:
-    True if successfully loaded, False otherwise"
+            plugin_meta:PluginMeta, # Plugin metadata
+            config:Optional[Dict[str, Any]]=None # Optional configuration for the plugin
+        ) -> bool: # True if successfully loaded, False otherwise
+        "Load and initialize a plugin."
     
     def load_plugin_from_module(
             self,
-            module_path: str,  # Path to the Python module
-            config: Optional[Dict[str, Any]] = None  # Optional configuration for the plugin
-        ) -> bool:  # True if successfully loaded, False otherwise
-        "Load a plugin directly from a Python module file or package.
-
-Useful for development or local plugins not installed via pip.
-
-Args:
-    module_path: Path to the Python module file or package directory
-    config: Optional configuration dictionary
-    
-Returns:
-    True if successfully loaded, False otherwise"
+            module_path:str, # Path to the Python module
+            config:Optional[Dict[str, Any]]=None # Optional configuration for the plugin
+        ) -> bool: # True if successfully loaded, False otherwise
+        "Load a plugin directly from a Python module file or package."
     
     def unload_plugin(
             self,
-            plugin_name: str  # Name of the plugin to unload
-        ) -> bool:  # True if successfully unloaded, False otherwise
-        "Unload a plugin and call its cleanup method.
-
-Args:
-    plugin_name: Name of the plugin to unload
-    
-Returns:
-    True if successfully unloaded, False otherwise"
+            plugin_name:str # Name of the plugin to unload
+        ) -> bool: # True if successfully unloaded, False otherwise
+        "Unload a plugin and call its cleanup method."
     
     def get_plugin(
             self,
-            plugin_name: str  # The name of the plugin to retrieve
-        ) -> Optional[PluginInterface]:  # The plugin instance if found, None otherwise
-        "Get a loaded plugin instance by name.
-
-Args:
-    plugin_name: Name of the plugin
+            plugin_name:str # Name of the plugin to retrieve
+        ) -> Optional[PluginInterface]: # Plugin instance if found, None otherwise
+        "Get a loaded plugin instance by name."
     
-Returns:
-    Plugin instance if found, None otherwise"
-    
-    def list_plugins(self) -> List[PluginMeta]:  # List of metadata for all loaded plugins
-            """List all loaded plugins.
-            
-            Returns:
-                List of plugin metadata objects
-            """
+    def list_plugins(self) -> List[PluginMeta]: # List of metadata for all loaded plugins
+            """List all loaded plugins."""
             return list(self.plugins.values())
-        
+    
         def execute_plugin(
             self,
-            plugin_name: str,  # Name of the plugin to execute
-            *args,  # Arguments to pass to the plugin
-            **kwargs  # Keyword arguments to pass to the plugin
-        ) -> Any:  # The result of the plugin execution
-        "List all loaded plugins.
-
-Returns:
-    List of plugin metadata objects"
+            plugin_name:str, # Name of the plugin to execute
+            *args, # Arguments to pass to the plugin
+            **kwargs # Keyword arguments to pass to the plugin
+        ) -> Any: # Result of the plugin execution
+        "List all loaded plugins."
     
     def execute_plugin(
             self,
-            plugin_name: str,  # Name of the plugin to execute
-            *args,  # Arguments to pass to the plugin
-            **kwargs  # Keyword arguments to pass to the plugin
-        ) -> Any:  # The result of the plugin execution
-        "Execute a plugin's main functionality.
-
-Args:
-    plugin_name: Name of the plugin to execute
-    *args: Positional arguments for the plugin
-    **kwargs: Keyword arguments for the plugin
-    
-Returns:
-    Plugin execution result
-    
-Raises:
-    ValueError: If plugin not found or disabled"
+            plugin_name:str, # Name of the plugin to execute
+            *args, # Arguments to pass to the plugin
+            **kwargs # Keyword arguments to pass to the plugin
+        ) -> Any: # Result of the plugin execution
+        "Execute a plugin's main functionality."
     
     def enable_plugin(
             self,
-            plugin_name: str  # The name of the plugin to enable
-        ) -> bool:  # True if plugin was enabled, False if not found
-        "Enable a plugin.
-
-Args:
-    plugin_name: Name of the plugin to enable
-    
-Returns:
-    True if enabled, False if not found"
+            plugin_name:str # Name of the plugin to enable
+        ) -> bool: # True if plugin was enabled, False if not found
+        "Enable a plugin."
     
     def disable_plugin(
             self,
-            plugin_name: str  # The name of the plugin to disable
-        ) -> bool:  # True if plugin was disabled, False if not found
-        "Disable a plugin without unloading it.
-
-Args:
-    plugin_name: Name of the plugin to disable
-    
-Returns:
-    True if disabled, False if not found"
+            plugin_name:str # Name of the plugin to disable
+        ) -> bool: # True if plugin was disabled, False if not found
+        "Disable a plugin without unloading it."
 ```
 
 ### Plugin Metadata (`metadata.ipynb`)
@@ -669,12 +369,12 @@ from cjm_plugin_system.core.metadata import (
 class PluginMeta:
     "Metadata about a plugin."
     
-    name: str  # The plugin's unique identifier
-    version: str  # The plugin's version string
-    description: str = ''  # A brief description of the plugin's functionality
-    author: str = ''  # The plugin author's name or organization
-    package_name: str = ''  # The Python package name containing the plugin
-    instance: Optional[Any]  # The plugin instance (PluginInterface subclass)
+    name: str  # Plugin's unique identifier
+    version: str  # Plugin's version string
+    description: str = ''  # Brief description of the plugin's functionality
+    author: str = ''  # Plugin author's name or organization
+    package_name: str = ''  # Python package name containing the plugin
+    instance: Optional[Any]  # Plugin instance (PluginInterface subclass)
     enabled: bool = True  # Whether the plugin is enabled
 ```
 
@@ -695,81 +395,23 @@ from cjm_plugin_system.utils.validation import (
 
 ``` python
 def validate_config(
-    config: Dict[str, Any],  # Configuration to validate
-    schema: Dict[str, Any]  # JSON Schema to validate against
-) -> Tuple[bool, Optional[str]]:  # (is_valid, error_message)
-    """
-    Validate a configuration dictionary against a JSON Schema.
-    
-    Uses the `jsonschema` library for full validation if available,
-    otherwise falls back to basic validation.
-    
-    Args:
-        config: Configuration dictionary to validate
-        schema: JSON Schema to validate against
-        
-    Returns:
-        Tuple of (is_valid, error_message).
-        If valid, error_message is None.
-        
-    Example:
-        >>> schema = {
-        ...     "type": "object",
-        ...     "properties": {
-        ...         "name": {"type": "string"},
-        ...         "age": {"type": "integer", "minimum": 0}
-        ...     },
-        ...     "required": ["name"]
-        ... }
-        >>> is_valid, error = validate_config({"name": "John", "age": 30}, schema)
-        >>> print(is_valid)
-        True
-    """
+    config:Dict[str, Any], # Configuration to validate
+    schema:Dict[str, Any] # JSON Schema to validate against
+) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+    "Validate a configuration dictionary against a JSON Schema."
 ```
 
 ``` python
 def _basic_validate(
-    config: Dict[str, Any],
-    schema: Dict[str, Any]
-) -> Tuple[bool, Optional[str]]
-    """
-    Basic validation without jsonschema library.
-    
-    Provides minimal validation support when jsonschema is not installed.
-    Checks:
-    - Required fields
-    - Field types
-    - Enum values
-    - Numeric constraints (minimum, maximum)
-    """
+    config:Dict[str, Any], # Configuration to validate
+    schema:Dict[str, Any] # JSON Schema to validate against
+) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+    "Basic validation without jsonschema library."
 ```
 
 ``` python
 def extract_defaults(
-    schema: Dict[str, Any]  # JSON Schema
-) -> Dict[str, Any]:  # Default values from schema
-    """
-    Extract default values from a JSON Schema.
-    
-    Returns a dictionary of default values for all properties
-    that have defaults defined in the schema.
-    
-    Args:
-        schema: JSON Schema dictionary
-        
-    Returns:
-        Dictionary of default values
-        
-    Example:
-        >>> schema = {
-        ...     "type": "object",
-        ...     "properties": {
-        ...         "name": {"type": "string", "default": "John"},
-        ...         "age": {"type": "integer", "default": 30}
-        ...     }
-        ... }
-        >>> defaults = extract_defaults(schema)
-        >>> print(defaults)
-        {'name': 'John', 'age': 30}
-    """
+    schema:Dict[str, Any] # JSON Schema
+) -> Dict[str, Any]: # Default values from schema
+    "Extract default values from a JSON Schema."
 ```

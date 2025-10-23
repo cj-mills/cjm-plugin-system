@@ -21,46 +21,22 @@ from .metadata import PluginMeta
 
 # %% ../../nbs/core/manager.ipynb 5
 class PluginManager:
-    """Manages plugin discovery, loading, and lifecycle.
-    
-    This is a generic plugin manager that works with any PluginInterface
-    subclass. It provides:
-    - Automatic discovery via entry points
-    - Manual loading from module files
-    - Configuration management and validation
-    - Plugin enable/disable/reload
-    - Streaming support detection
-    
-    The manager automatically uses the entry_point_group defined in the plugin interface.
-    
-    Example:
-        >>> # For a transcription plugin system
-        >>> manager = PluginManager(plugin_interface=TranscriptionPlugin)
-        >>> # entry_point_group is automatically "transcription.plugins"
-        >>> manager.discover_plugins()
-        >>> manager.load_plugin(plugin_meta, config={"model": "base"})
-    """
-    
+    """Manages plugin discovery, loading, and lifecycle."""
+
     def __init__(
-        self, 
-        plugin_interface: Type[PluginInterface] = PluginInterface,  # The base class/interface plugins must implement
-        entry_point_group: Optional[str] = None  # Optional override for entry point group name
+        self,
+        plugin_interface:Type[PluginInterface]=PluginInterface, # Base class/interface plugins must implement
+        entry_point_group:Optional[str]=None # Optional override for entry point group name
     ):
-        """Initialize the plugin manager.
-        
-        Args:
-            plugin_interface: The plugin interface class that plugins must implement
-            entry_point_group: Optional override for entry point group name.
-                             If not provided, uses plugin_interface.entry_point_group
-        """
+        """Initialize the plugin manager."""
         self.plugin_interface = plugin_interface
-        
+
         # Use entry_point_group from plugin interface if not explicitly provided
         if entry_point_group is None:
             self.entry_point_group = plugin_interface.entry_point_group
         else:
             self.entry_point_group = entry_point_group
-            
+
         self.entry_points = []
         self.discovered = []
         self.plugins: Dict[str, PluginMeta] = {}
@@ -69,39 +45,28 @@ class PluginManager:
         # Get plugin entry points
         self.get_entry_points()
 
-    def get_entry_points(self) -> importlib.metadata.EntryPoints:
-        """Get plugin entry points from installed packages.
-        
-        Returns:
-            Entry points for the configured group
-        """
-        self.entry_points = []        
+    def get_entry_points(self) -> importlib.metadata.EntryPoints: # Entry points for the configured group
+        """Get plugin entry points from installed packages."""
+        self.entry_points = []
         try:
             # For Python 3.10+
             entry_points = importlib.metadata.entry_points()
-            
+
             # Get entry points for our group
             self.entry_points = entry_points.select(group=self.entry_point_group)
         except Exception as e:
             self.logger.error(f"Error accessing entry points: {e}")
             return self.entry_points
-    
-    def discover_plugins(self) -> List[PluginMeta]:  # List of discovered plugin metadata objects
-        """Discover all installed plugins via entry points.
-        
-        This method looks for plugins installed as packages that declare
-        entry points in the specified group.
-        
-        Returns:
-            List of discovered plugin metadata
-        """
+
+    def discover_plugins(self) -> List[PluginMeta]: # List of discovered plugin metadata objects
+        """Discover all installed plugins via entry points."""
         self.discovered = []
-                
+
         for ep in self.entry_points:
             try:
                 # Get the entry point name (plugin name)
                 plugin_name = ep.name
-                
+
                 # Get package metadata
                 # In Python 3.11+, ep.dist gives us the distribution
                 if hasattr(ep, 'dist') and ep.dist:
@@ -113,20 +78,20 @@ class PluginManager:
                     # The value is like "package.module:ClassName"
                     package_name = plugin_name  # Use plugin name as fallback
                     version = "unknown"
-                    
+
                     # Try to get the actual package info
                     try:
                         # Extract package name from the entry point value
                         ep_value = str(ep.value) if hasattr(ep, 'value') else str(ep)
                         package_part = ep_value.split(':')[0].split('.')[0]
-                        
+
                         # Try to get distribution info
                         dist = importlib.metadata.distribution(package_part)
                         package_name = dist.name
                         version = dist.version
                     except Exception:
                         pass
-                
+
                 meta = PluginMeta(
                     name=plugin_name,
                     version=version,
@@ -134,73 +99,55 @@ class PluginManager:
                 )
                 self.discovered.append(meta)
                 self.logger.info(f"Discovered plugin: {meta.name} v{meta.version} from package {meta.package_name}")
-                
+
             except Exception as e:
                 self.logger.error(f"Error discovering plugin {ep.name}: {e}")
-        
+
         return self.discovered
-    
+
     def load_plugin(
         self,
-        plugin_meta: PluginMeta,  # The plugin metadata
-        config: Optional[Dict[str, Any]] = None  # Optional configuration for the plugin
-    ) -> bool:  # True if successfully loaded, False otherwise
-        """Load and initialize a plugin.
-        
-        Args:
-            plugin_meta: Metadata for the plugin to load
-            config: Optional configuration dictionary
-            
-        Returns:
-            True if successfully loaded, False otherwise
-        """
+        plugin_meta:PluginMeta, # Plugin metadata
+        config:Optional[Dict[str, Any]]=None # Optional configuration for the plugin
+    ) -> bool: # True if successfully loaded, False otherwise
+        """Load and initialize a plugin."""
         try:
             # Find the entry point and load it
             plugin_eps = self.entry_points.select(name=plugin_meta.name)
-            
+
             ep = list(plugin_eps)[0]
             plugin_class = ep.load()
-            
+
             # Verify it implements the required interface
             if not issubclass(plugin_class, self.plugin_interface):
                 self.logger.error(f"Plugin {plugin_meta.name} does not implement required interface")
                 return False
-            
+
             # Instantiate and initialize the plugin
             plugin_instance = plugin_class()
             plugin_instance.initialize(config)
-            
+
             # Store the plugin
             plugin_meta.instance = plugin_instance
             self.plugins[plugin_meta.name] = plugin_meta
-            
+
             self.logger.info(f"Loaded plugin: {plugin_meta.name}")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Error loading plugin {plugin_meta.name}: {e}")
             return False
-    
+
     def load_plugin_from_module(
         self,
-        module_path: str,  # Path to the Python module
-        config: Optional[Dict[str, Any]] = None  # Optional configuration for the plugin
-    ) -> bool:  # True if successfully loaded, False otherwise
-        """Load a plugin directly from a Python module file or package.
-        
-        Useful for development or local plugins not installed via pip.
-        
-        Args:
-            module_path: Path to the Python module file or package directory
-            config: Optional configuration dictionary
-            
-        Returns:
-            True if successfully loaded, False otherwise
-        """
+        module_path:str, # Path to the Python module
+        config:Optional[Dict[str, Any]]=None # Optional configuration for the plugin
+    ) -> bool: # True if successfully loaded, False otherwise
+        """Load a plugin directly from a Python module file or package."""
         try:
             # Convert to Path object
             path = Path(module_path)
-            
+
             # Load the module
             if path.is_file():
                 # Single file module
@@ -211,24 +158,24 @@ class PluginManager:
                 # Package directory
                 sys.path.insert(0, str(path.parent))
                 module = importlib.import_module(path.name)
-            
+
             # Find plugin classes in the module
             plugin_classes = []
             for name, obj in inspect.getmembers(module):
-                if (inspect.isclass(obj) and 
-                    issubclass(obj, self.plugin_interface) and 
+                if (inspect.isclass(obj) and
+                    issubclass(obj, self.plugin_interface) and
                     obj != self.plugin_interface):
                     plugin_classes.append(obj)
-            
+
             if not plugin_classes:
                 self.logger.error(f"No plugin classes found in {module_path}")
                 return False
-            
+
             # Load the first plugin class found
             plugin_class = plugin_classes[0]
             plugin_instance = plugin_class()
             plugin_instance.initialize(config)
-            
+
             # Create metadata
             meta = PluginMeta(
                 name=plugin_instance.name,
@@ -236,177 +183,113 @@ class PluginManager:
                 package_name=str(module_path)
             )
             meta.instance = plugin_instance
-            
+
             self.plugins[meta.name] = meta
             self._loaded_modules[meta.name] = module
-            
+
             self.logger.info(f"Loaded plugin from module: {meta.name}")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Error loading plugin from {module_path}: {e}")
             return False
-    
+
     def unload_plugin(
         self,
-        plugin_name: str  # Name of the plugin to unload
-    ) -> bool:  # True if successfully unloaded, False otherwise
-        """Unload a plugin and call its cleanup method.
-        
-        Args:
-            plugin_name: Name of the plugin to unload
-            
-        Returns:
-            True if successfully unloaded, False otherwise
-        """
+        plugin_name:str # Name of the plugin to unload
+    ) -> bool: # True if successfully unloaded, False otherwise
+        """Unload a plugin and call its cleanup method."""
         if plugin_name not in self.plugins:
             self.logger.error(f"Plugin {plugin_name} not found")
             return False
-        
+
         try:
             plugin_meta = self.plugins[plugin_name]
             if plugin_meta.instance:
                 plugin_meta.instance.cleanup()
-            
+
             del self.plugins[plugin_name]
-            
+
             # Remove from loaded modules if it was loaded that way
             if plugin_name in self._loaded_modules:
                 del self._loaded_modules[plugin_name]
-            
+
             self.logger.info(f"Unloaded plugin: {plugin_name}")
             return True
-            
+
         except Exception as e:
             self.logger.error(f"Error unloading plugin {plugin_name}: {e}")
             return False
-    
+
     def get_plugin(
         self,
-        plugin_name: str  # The name of the plugin to retrieve
-    ) -> Optional[PluginInterface]:  # The plugin instance if found, None otherwise
-        """Get a loaded plugin instance by name.
-        
-        Args:
-            plugin_name: Name of the plugin
-            
-        Returns:
-            Plugin instance if found, None otherwise
-        """
+        plugin_name:str # Name of the plugin to retrieve
+    ) -> Optional[PluginInterface]: # Plugin instance if found, None otherwise
+        """Get a loaded plugin instance by name."""
         if plugin_name in self.plugins:
             return self.plugins[plugin_name].instance
         return None
-    
-    def list_plugins(self) -> List[PluginMeta]:  # List of metadata for all loaded plugins
-        """List all loaded plugins.
-        
-        Returns:
-            List of plugin metadata objects
-        """
+
+    def list_plugins(self) -> List[PluginMeta]: # List of metadata for all loaded plugins
+        """List all loaded plugins."""
         return list(self.plugins.values())
-    
+
     def execute_plugin(
         self,
-        plugin_name: str,  # Name of the plugin to execute
-        *args,  # Arguments to pass to the plugin
-        **kwargs  # Keyword arguments to pass to the plugin
-    ) -> Any:  # The result of the plugin execution
-        """Execute a plugin's main functionality.
-        
-        Args:
-            plugin_name: Name of the plugin to execute
-            *args: Positional arguments for the plugin
-            **kwargs: Keyword arguments for the plugin
-            
-        Returns:
-            Plugin execution result
-            
-        Raises:
-            ValueError: If plugin not found or disabled
-        """
+        plugin_name:str, # Name of the plugin to execute
+        *args, # Arguments to pass to the plugin
+        **kwargs # Keyword arguments to pass to the plugin
+    ) -> Any: # Result of the plugin execution
+        """Execute a plugin's main functionality."""
         plugin = self.get_plugin(plugin_name)
         if not plugin:
             raise ValueError(f"Plugin {plugin_name} not found or not loaded")
-        
+
         if not self.plugins[plugin_name].enabled:
             raise ValueError(f"Plugin {plugin_name} is disabled")
-        
+
         return plugin.execute(*args, **kwargs)
-    
+
     def enable_plugin(
         self,
-        plugin_name: str  # The name of the plugin to enable
-    ) -> bool:  # True if plugin was enabled, False if not found
-        """Enable a plugin.
-        
-        Args:
-            plugin_name: Name of the plugin to enable
-            
-        Returns:
-            True if enabled, False if not found
-        """
+        plugin_name:str # Name of the plugin to enable
+    ) -> bool: # True if plugin was enabled, False if not found
+        """Enable a plugin."""
         if plugin_name in self.plugins:
             self.plugins[plugin_name].enabled = True
             return True
         return False
-    
+
     def disable_plugin(
         self,
-        plugin_name: str  # The name of the plugin to disable
-    ) -> bool:  # True if plugin was disabled, False if not found
-        """Disable a plugin without unloading it.
-        
-        Args:
-            plugin_name: Name of the plugin to disable
-            
-        Returns:
-            True if disabled, False if not found
-        """
+        plugin_name:str # Name of the plugin to disable
+    ) -> bool: # True if plugin was disabled, False if not found
+        """Disable a plugin without unloading it."""
         if plugin_name in self.plugins:
             self.plugins[plugin_name].enabled = False
             return True
         return False
 
-# %% ../../nbs/core/manager.ipynb 7
+# %% ../../nbs/core/manager.ipynb 8
 def get_plugin_config_schema(
     self,
-    plugin_name: str  # Name of the plugin
-) -> Optional[Dict[str, Any]]:  # Configuration schema or None if plugin not found
-    """Get the configuration schema for a plugin.
-    
-    Returns the JSON Schema that describes all configuration options
-    available for the specified plugin.
-    
-    Args:
-        plugin_name: Name of the plugin
-        
-    Returns:
-        JSON Schema dictionary or None if plugin not found
-    """
+    plugin_name:str # Name of the plugin
+) -> Optional[Dict[str, Any]]: # Configuration schema or None if plugin not found
+    """Get the configuration schema for a plugin."""
     # Find the entry point
     plugin_eps = self.entry_points.select(name=plugin_name)
     if len(plugin_eps) > 0:
         ep = list(plugin_eps)[0]
-        plugin_class = ep.load()  
+        plugin_class = ep.load()
         return plugin_class.get_config_schema()
     else:
         return None
 
 def get_plugin_config(
     self,
-    plugin_name: str  # Name of the plugin
-) -> Optional[Dict[str, Any]]:  # Current configuration or None if plugin not found
-    """Get the current configuration of a plugin.
-    
-    Returns the actual configuration values being used by the plugin,
-    including any defaults.
-    
-    Args:
-        plugin_name: Name of the plugin
-        
-    Returns:
-        Configuration dictionary or None if plugin not found
-    """
+    plugin_name:str # Name of the plugin
+) -> Optional[Dict[str, Any]]: # Current configuration or None if plugin not found
+    """Get the current configuration of a plugin."""
     plugin = self.get_plugin(plugin_name)
     if plugin:
         return plugin.get_current_config()
@@ -414,81 +297,57 @@ def get_plugin_config(
 
 def update_plugin_config(
     self,
-    plugin_name: str,  # Name of the plugin
-    config: Dict[str, Any],  # New configuration
-    merge: bool = True  # Whether to merge with existing config or replace entirely
-) -> bool:  # True if successful, False otherwise
-    """Update a plugin's configuration and reinitialize it.
-    
-    Args:
-        plugin_name: Name of the plugin to update
-        config: New configuration dictionary
-        merge: If True, merge with existing config. If False, replace entirely.
-    
-    Returns:
-        True if configuration was successfully updated, False otherwise.
-    """
+    plugin_name:str, # Name of the plugin
+    config:Dict[str, Any], # New configuration
+    merge:bool=True # Whether to merge with existing config or replace entirely
+) -> bool: # True if successful, False otherwise
+    """Update a plugin's configuration and reinitialize it."""
     plugin = self.get_plugin(plugin_name)
     if not plugin:
         self.logger.error(f"Plugin {plugin_name} not found")
         return False
-    
+
     try:
         # Get current config if merging
         if merge:
             current_config = plugin.get_current_config()
             config = {**current_config, **config}
-        
+
         # Validate the new configuration
         is_valid, error = plugin.validate_config(config)
         if not is_valid:
             self.logger.error(f"Invalid configuration for {plugin_name}: {error}")
             return False
-        
+
         # Clean up existing resources
         plugin.cleanup()
-        
+
         # Reinitialize with new config
         plugin.initialize(config)
-        
+
         self.logger.info(f"Updated configuration for plugin: {plugin_name}")
         return True
-        
+
     except Exception as e:
         self.logger.error(f"Error updating plugin {plugin_name} configuration: {e}")
         return False
 
 def validate_plugin_config(
     self,
-    plugin_name: str,  # Name of the plugin
-    config: Dict[str, Any]  # Configuration to validate
-) -> Tuple[bool, Optional[str]]:  # (is_valid, error_message)
-    """Validate a configuration dictionary for a plugin without applying it.
-    
-    Args:
-        plugin_name: Name of the plugin
-        config: Configuration to validate
-        
-    Returns:
-        Tuple of (is_valid, error_message). If valid, error_message is None.
-    """
+    plugin_name:str, # Name of the plugin
+    config:Dict[str, Any] # Configuration to validate
+) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+    """Validate a configuration dictionary for a plugin without applying it."""
     plugin = self.get_plugin(plugin_name)
     if not plugin:
         return False, f"Plugin {plugin_name} not found"
-    
+
     return plugin.validate_config(config)
 
 def get_all_plugin_schemas(
     self
-) -> Dict[str, Dict[str, Any]]:  # Dictionary mapping plugin names to their schemas
-    """Get configuration schemas for all loaded plugins.
-    
-    Returns a dictionary where keys are plugin names and values are
-    their configuration schemas.
-    
-    Returns:
-        Dictionary of plugin schemas
-    """
+) -> Dict[str, Dict[str, Any]]: # Dictionary mapping plugin names to their schemas
+    """Get configuration schemas for all loaded plugins."""
     schemas = {}
     for plugin_name in self.plugins:
         plugin = self.get_plugin(plugin_name)
@@ -498,37 +357,26 @@ def get_all_plugin_schemas(
 
 def reload_plugin(
     self,
-    plugin_name: str,  # Name of the plugin to reload
-    config: Optional[Dict[str, Any]] = None  # Optional new configuration
-) -> bool:  # True if successful, False otherwise
-    """Reload a plugin with optional new configuration.
-    
-    This is useful when you want to completely restart a plugin,
-    for example after updating its code during development.
-    
-    Args:
-        plugin_name: Name of the plugin to reload
-        config: Optional new configuration
-        
-    Returns:
-        True if successful, False otherwise
-    """
+    plugin_name:str, # Name of the plugin to reload
+    config:Optional[Dict[str, Any]]=None # Optional new configuration
+) -> bool: # True if successful, False otherwise
+    """Reload a plugin with optional new configuration."""
     if plugin_name not in self.plugins:
         self.logger.error(f"Plugin {plugin_name} not found")
         return False
-    
+
     try:
         # Get the plugin metadata
         plugin_meta = self.plugins[plugin_name]
-        
+
         # Get current config if not provided
         if config is None and plugin_meta.instance:
             config = plugin_meta.instance.get_current_config()
-        
+
         # Unload the plugin
         if plugin_meta.instance:
             plugin_meta.instance.cleanup()
-        
+
         # Reload based on how it was originally loaded
         if plugin_name in self._loaded_modules:
             # Was loaded from a module file
@@ -540,7 +388,7 @@ def reload_plugin(
             # Was loaded from entry points
             plugin_meta.instance = None
             return self.load_plugin(plugin_meta, config)
-            
+
     except Exception as e:
         self.logger.error(f"Error reloading plugin {plugin_name}: {e}")
         return False
@@ -553,41 +401,21 @@ PluginManager.validate_plugin_config = validate_plugin_config
 PluginManager.get_all_plugin_schemas = get_all_plugin_schemas
 PluginManager.reload_plugin = reload_plugin
 
-# %% ../../nbs/core/manager.ipynb 9
+# %% ../../nbs/core/manager.ipynb 10
 def execute_plugin_stream(
     self,
-    plugin_name: str,  # Name of the plugin to execute
-    *args,  # Arguments to pass to the plugin
-    **kwargs  # Keyword arguments to pass to the plugin
-) -> Generator[Any, None, Any]:  # Generator yielding partial results, returns final result
-    """Execute a plugin with streaming support if available.
-    
-    This method will use the plugin's execute_stream method if the plugin
-    supports streaming, otherwise it falls back to the regular execute method.
-    
-    Args:
-        plugin_name: Name of the plugin to execute
-        *args: Positional arguments for the plugin
-        **kwargs: Keyword arguments for the plugin
-        
-    Yields:
-        Partial results as they become available
-        
-    Returns:
-        Final result from the plugin
-        
-    Example:
-        >>> # Stream results in real-time
-        >>> for chunk in manager.execute_plugin_stream("my_plugin", input_data):
-        ...     print(chunk, end="", flush=True)
-    """
+    plugin_name:str, # Name of the plugin to execute
+    *args, # Arguments to pass to the plugin
+    **kwargs # Keyword arguments to pass to the plugin
+) -> Generator[Any, None, Any]: # Generator yielding partial results, returns final result
+    """Execute a plugin with streaming support if available."""
     plugin = self.get_plugin(plugin_name)
     if not plugin:
         raise ValueError(f"Plugin {plugin_name} not found or not loaded")
-    
+
     if not self.plugins[plugin_name].enabled:
         raise ValueError(f"Plugin {plugin_name} is disabled")
-    
+
     # Check if plugin supports streaming
     if hasattr(plugin, 'supports_streaming') and plugin.supports_streaming():
         self.logger.info(f"Using streaming mode for plugin {plugin_name}")
@@ -603,25 +431,17 @@ def execute_plugin_stream(
 
 def check_streaming_support(
     self,
-    plugin_name: str  # Name of the plugin to check
-) -> bool:  # True if plugin supports streaming
-    """Check if a plugin supports streaming execution.
-    
-    Args:
-        plugin_name: Name of the plugin to check
-        
-    Returns:
-        True if the plugin implements execute_stream and supports streaming,
-        False otherwise.
-    """
+    plugin_name:str # Name of the plugin to check
+) -> bool: # True if plugin supports streaming
+    """Check if a plugin supports streaming execution."""
     plugin = self.get_plugin(plugin_name)
     if not plugin:
         return False
-    
+
     # Check if plugin has the supports_streaming method and it returns True
     if hasattr(plugin, 'supports_streaming'):
         return plugin.supports_streaming()
-    
+
     # Fallback: check if execute_stream is implemented
     if hasattr(plugin, 'execute_stream'):
         # Check if it's overridden from base class
@@ -629,17 +449,13 @@ def check_streaming_support(
         if hasattr(plugin_class, 'execute_stream'):
             # Try to check if it's different from PluginInterface's default
             return True
-    
+
     return False
 
 def get_streaming_plugins(
     self
-) -> List[str]:  # List of plugin names that support streaming
-    """Get a list of all loaded plugins that support streaming.
-    
-    Returns:
-        List of plugin names that have streaming capabilities.
-    """
+) -> List[str]: # List of plugin names that support streaming
+    """Get a list of all loaded plugins that support streaming."""
     streaming_plugins = []
     for plugin_name in self.plugins:
         if self.check_streaming_support(plugin_name):

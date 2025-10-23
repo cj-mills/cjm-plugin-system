@@ -13,10 +13,10 @@ from typing import Optional, Any
 @dataclass
 class PluginMeta:
     """Metadata about a plugin."""
-    name: str  # The plugin's unique identifier
-    version: str  # The plugin's version string
-    description: str = ""  # A brief description of the plugin's functionality
-    author: str = ""  # The plugin author's name or organization
-    package_name: str = ""  # The Python package name containing the plugin
-    instance: Optional[Any] = None  # The plugin instance (PluginInterface subclass)
-    enabled: bool = True  # Whether the plugin is enabled
+    name:str # Plugin's unique identifier
+    version:str # Plugin's version string
+    description:str="" # Brief description of the plugin's functionality
+    author:str="" # Plugin author's name or organization
+    package_name:str="" # Python package name containing the plugin
+    instance:Optional[Any]=None # Plugin instance (PluginInterface subclass)
+    enabled:bool=True # Whether the plugin is enabled

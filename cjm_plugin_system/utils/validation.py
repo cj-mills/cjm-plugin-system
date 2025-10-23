@@ -16,35 +16,10 @@ except ImportError:
 
 # %% ../../nbs/utils/validation.ipynb 5
 def validate_config(
-    config: Dict[str, Any],  # Configuration to validate
-    schema: Dict[str, Any]  # JSON Schema to validate against
-) -> Tuple[bool, Optional[str]]:  # (is_valid, error_message)
-    """Validate a configuration dictionary against a JSON Schema.
-    
-    Uses the `jsonschema` library for full validation if available,
-    otherwise falls back to basic validation.
-    
-    Args:
-        config: Configuration dictionary to validate
-        schema: JSON Schema to validate against
-        
-    Returns:
-        Tuple of (is_valid, error_message).
-        If valid, error_message is None.
-        
-    Example:
-        >>> schema = {
-        ...     "type": "object",
-        ...     "properties": {
-        ...         "name": {"type": "string"},
-        ...         "age": {"type": "integer", "minimum": 0}
-        ...     },
-        ...     "required": ["name"]
-        ... }
-        >>> is_valid, error = validate_config({"name": "John", "age": 30}, schema)
-        >>> print(is_valid)
-        True
-    """
+    config:Dict[str, Any], # Configuration to validate
+    schema:Dict[str, Any] # JSON Schema to validate against
+) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+    """Validate a configuration dictionary against a JSON Schema."""
     # If jsonschema is available, use it for validation
     if HAS_JSONSCHEMA:
         try:
@@ -58,37 +33,29 @@ def validate_config(
         # Basic validation without jsonschema
         return _basic_validate(config, schema)
 
-# %% ../../nbs/utils/validation.ipynb 6
+# %% ../../nbs/utils/validation.ipynb 7
 def _basic_validate(
-    config: Dict[str, Any],
-    schema: Dict[str, Any]
-) -> Tuple[bool, Optional[str]]:
-    """Basic validation without jsonschema library.
-    
-    Provides minimal validation support when jsonschema is not installed.
-    Checks:
-    - Required fields
-    - Field types
-    - Enum values
-    - Numeric constraints (minimum, maximum)
-    """
+    config:Dict[str, Any], # Configuration to validate
+    schema:Dict[str, Any] # JSON Schema to validate against
+) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+    """Basic validation without jsonschema library."""
     try:
         # Check required fields
         required_fields = schema.get("required", [])
         for field in required_fields:
             if field not in config:
                 return False, f"Missing required field: {field}"
-        
+
         # Check field types if properties are defined
         properties = schema.get("properties", {})
         for key, value in config.items():
             if key in properties:
                 prop_schema = properties[key]
-                
+
                 # Check enum values
                 if "enum" in prop_schema and value not in prop_schema["enum"]:
                     return False, f"Invalid value for {key}: {value}. Must be one of {prop_schema['enum']}"
-                
+
                 # Basic type checking
                 expected_type = prop_schema.get("type")
                 if expected_type:
@@ -100,7 +67,7 @@ def _basic_validate(
                         types = [t for t in expected_type if t != "null"]
                         if types:
                             expected_type = types[0]
-                    
+
                     type_map = {
                         "string": str,
                         "number": (int, float),
@@ -112,50 +79,28 @@ def _basic_validate(
                     expected_python_type = type_map.get(expected_type)
                     if expected_python_type and not isinstance(value, expected_python_type):
                         return False, f"Invalid type for {key}: expected {expected_type}, got {type(value).__name__}"
-                
+
                 # Check numeric constraints
                 if isinstance(value, (int, float)):
                     if "minimum" in prop_schema and value < prop_schema["minimum"]:
                         return False, f"Value for {key} is below minimum: {value} < {prop_schema['minimum']}"
                     if "maximum" in prop_schema and value > prop_schema["maximum"]:
                         return False, f"Value for {key} is above maximum: {value} > {prop_schema['maximum']}"
-        
+
         return True, None
     except Exception as e:
         return False, f"Validation error: {str(e)}"
 
-# %% ../../nbs/utils/validation.ipynb 7
+# %% ../../nbs/utils/validation.ipynb 8
 def extract_defaults(
-    schema: Dict[str, Any]  # JSON Schema
-) -> Dict[str, Any]:  # Default values from schema
-    """Extract default values from a JSON Schema.
-    
-    Returns a dictionary of default values for all properties
-    that have defaults defined in the schema.
-    
-    Args:
-        schema: JSON Schema dictionary
-        
-    Returns:
-        Dictionary of default values
-        
-    Example:
-        >>> schema = {
-        ...     "type": "object",
-        ...     "properties": {
-        ...         "name": {"type": "string", "default": "John"},
-        ...         "age": {"type": "integer", "default": 30}
-        ...     }
-        ... }
-        >>> defaults = extract_defaults(schema)
-        >>> print(defaults)
-        {'name': 'John', 'age': 30}
-    """
+    schema:Dict[str, Any] # JSON Schema
+) -> Dict[str, Any]: # Default values from schema
+    """Extract default values from a JSON Schema."""
     defaults = {}
-    
+
     properties = schema.get("properties", {})
     for key, prop_schema in properties.items():
         if "default" in prop_schema:
             defaults[key] = prop_schema["default"]
-    
+
     return defaults

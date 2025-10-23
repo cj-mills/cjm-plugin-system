@@ -13,48 +13,15 @@ from ..utils.validation import validate_config, extract_defaults
 
 # %% ../../nbs/core/interface.ipynb 5
 class PluginInterface(ABC):
-    """Generic plugin interface that all plugins must implement.
-
-    This is a domain-agnostic base class. Domain-specific plugin systems
-    should subclass this interface and add their specific requirements.
-
-    **Important:** Domain-specific interfaces (direct subclasses of PluginInterface)
-    MUST define the `entry_point_group` class attribute. This requirement is enforced
-    at class definition time.
-
-    Example:
-        >>> class TranscriptionPlugin(PluginInterface):
-        ...     '''Transcription plugin interface.'''
-        ...     entry_point_group = "transcription.plugins"  # Required!
-        ...
-        ...     @property
-        ...     @abstractmethod
-        ...     def supported_formats(self) -> List[str]:
-        ...         '''Audio formats this plugin supports.'''
-        ...         pass
-        ...
-        ...     @abstractmethod
-        ...     def execute(
-        ...         self,
-        ...         audio: Union[AudioData, str, Path],
-        ...         **kwargs
-        ...     ) -> TranscriptionResult:
-        ...         '''Transcribe audio to text.'''
-        ...         pass
-        ...
-        >>> # Concrete plugins inherit entry_point_group automatically
-        >>> class WhisperPlugin(TranscriptionPlugin):
-        ...     # No need to define entry_point_group - inherited from TranscriptionPlugin
-        ...     pass
-    """
+    """Generic plugin interface that all plugins must implement."""
 
     # Must be overridden by domain-specific interfaces
     entry_point_group: str = None
-    
+
     def __init_subclass__(cls, **kwargs):
         """Enforce that domain-specific interfaces define entry_point_group."""
         super().__init_subclass__(**kwargs)
-        
+
         # Check if this is a direct subclass of PluginInterface
         # (i.e., a domain-specific interface like TranscriptionPlugin)
         if PluginInterface in cls.__bases__:
@@ -66,188 +33,81 @@ class PluginInterface(ABC):
                     f"    class {cls.__name__}(PluginInterface):\n"
                     f"        entry_point_group = 'your.plugins'"
                 )
-    
+
     @property
     @abstractmethod
-    def name(
-        self
-    ) -> str:  # The unique identifier for this plugin
+    def name(self) -> str: # Unique identifier for this plugin
         """Unique plugin identifier."""
         pass
-    
+
     @property
     @abstractmethod
-    def version(
-        self
-    ) -> str:  # The semantic version string (e.g., "1.0.0")
+    def version(self) -> str: # Semantic version string (e.g., "1.0.0")
         """Plugin version."""
         pass
-    
+
     @abstractmethod
     def initialize(
         self,
-        config: Optional[Dict[str, Any]] = None  # Configuration dictionary for plugin-specific settings
+        config:Optional[Dict[str, Any]]=None # Configuration dictionary for plugin-specific settings
     ) -> None:
-        """Initialize the plugin with configuration.
-        
-        Args:
-            config: Optional configuration dictionary. If not provided,
-                   defaults from the schema will be used.
-        """
+        """Initialize the plugin with configuration."""
         pass
-    
+
     @abstractmethod
     def execute(
         self,
         *args,
         **kwargs
-    ) -> Any:  # Returns plugin-specific output
-        """Execute the plugin's main functionality.
-        
-        The signature and return type of this method should be defined
-        by domain-specific plugin interfaces.
-        """
+    ) -> Any: # Plugin-specific output
+        """Execute the plugin's main functionality."""
         pass
-    
+
     @abstractmethod
-    def is_available(
-        self
-    ) -> bool:  # True if all required dependencies are available
-        """Check if the plugin's dependencies are available.
-        
-        Returns:
-            True if the plugin can be used, False if dependencies are missing.
-        """
+    def is_available(self) -> bool: # True if all required dependencies are available
+        """Check if the plugin's dependencies are available."""
         pass
 
     @staticmethod
     @abstractmethod
-    def get_config_schema(
-    ) -> Dict[str, Any]:  # JSON Schema describing configuration options
-        """Return JSON Schema describing the plugin's configuration options.
-        
-        The schema should follow JSON Schema Draft 7 specification.
-        This enables automatic UI generation and validation.
-        
-        Returns:
-            Dictionary containing a JSON Schema
-            
-        Example:
-            >>> @staticmethod
-            >>> def get_config_schema() -> Dict[str, Any]:
-            ...     return {
-            ...         "type": "object",
-            ...         "properties": {
-            ...             "model": {
-            ...                 "type": "string",
-            ...                 "enum": ["tiny", "base", "small"],
-            ...                 "default": "base",
-            ...                 "description": "Model size to use"
-            ...             }
-            ...         },
-            ...         "required": ["model"]
-            ...     }
-        """
-        pass
-    
-    @abstractmethod
-    def get_current_config(
-        self
-    ) -> Dict[str, Any]:  # Current configuration state
-        """Return the current configuration state.
-        
-        This should return the actual configuration being used by the plugin,
-        which may include defaults not explicitly set by the user.
-        
-        Returns:
-            Dictionary containing current configuration values
-        """
-        pass
-    
-    def validate_config(
-        self,
-        config: Dict[str, Any]  # Configuration to validate
-    ) -> Tuple[bool, Optional[str]]:  # (is_valid, error_message)
-        """Validate a configuration dictionary against the schema.
-        
-        Uses the plugin's schema from `get_config_schema()` to validate
-        the provided configuration.
-        
-        Args:
-            config: Configuration dictionary to validate
-            
-        Returns:
-            Tuple of (is_valid, error_message).
-            If valid, error_message is None.
-        """
-        schema = self.get_config_schema()
-        return validate_config(config, schema)
-    
-    def get_config_defaults(
-        self
-    ) -> Dict[str, Any]:  # Default values from schema
-        """Extract default values from the configuration schema.
-        
-        Returns a dictionary of default values for all properties
-        that have defaults defined in the schema.
-        
-        Returns:
-            Dictionary of default configuration values
-        """
-        schema = self.get_config_schema()
-        return extract_defaults(schema)
-    
-    def cleanup(
-        self
-    ) -> None:
-        """Optional cleanup when plugin is unloaded.
-        
-        Override this method to perform any necessary cleanup,
-        such as releasing resources or closing connections.
-        """
+    def get_config_schema() -> Dict[str, Any]: # JSON Schema describing configuration options
+        """Return JSON Schema describing the plugin's configuration options."""
         pass
 
-# %% ../../nbs/core/interface.ipynb 7
-def PluginInterface_supports_streaming(self) -> bool:
-    """Check if this plugin supports streaming execution.
-    
-    Returns:
-        True if execute_stream is implemented and streaming is supported
-    """
+    @abstractmethod
+    def get_current_config(self) -> Dict[str, Any]: # Current configuration state
+        """Return the current configuration state."""
+        pass
+
+    def validate_config(
+        self,
+        config:Dict[str, Any] # Configuration to validate
+    ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+        """Validate a configuration dictionary against the schema."""
+        schema = self.get_config_schema()
+        return validate_config(config, schema)
+
+    def get_config_defaults(self) -> Dict[str, Any]: # Default values from schema
+        """Extract default values from the configuration schema."""
+        schema = self.get_config_schema()
+        return extract_defaults(schema)
+
+    def cleanup(self) -> None:
+        """Optional cleanup when plugin is unloaded."""
+        pass
+
+# %% ../../nbs/core/interface.ipynb 8
+def PluginInterface_supports_streaming(self) -> bool: # True if execute_stream is implemented
+    """Check if this plugin supports streaming execution."""
     # Default: check if execute_stream is overridden from the base class
     return type(self).execute_stream != PluginInterface.execute_stream
 
 def PluginInterface_execute_stream(
     self,
-    *args,  # Arguments for plugin execution
-    **kwargs  # Keyword arguments for plugin execution
-) -> Generator[Any, None, Any]:  # Yields partial results, returns final result
-    """Stream execution results chunk by chunk.
-    
-    Default implementation falls back to execute() without streaming.
-    Plugins can override this to provide real streaming capabilities.
-    
-    Args:
-        *args: Positional arguments to pass to the plugin
-        **kwargs: Keyword arguments to pass to the plugin
-        
-    Yields:
-        Partial results as they become available (type depends on plugin)
-        
-    Returns:
-        Final complete result
-        
-    Example:
-        >>> # Stream results in real-time
-        >>> for chunk in plugin.execute_stream(input_data):
-        ...     print(chunk, end="", flush=True)
-        >>> 
-        >>> # Or collect all chunks and get final result
-        >>> generator = plugin.execute_stream(input_data)
-        >>> chunks = []
-        >>> for chunk in generator:
-        ...     chunks.append(chunk)
-    """
+    *args, # Arguments for plugin execution
+    **kwargs # Keyword arguments for plugin execution
+) -> Generator[Any, None, Any]: # Yields partial results, returns final result
+    """Stream execution results chunk by chunk."""
     # Default implementation: execute normally and yield complete result at once
     result = self.execute(*args, **kwargs)
     yield result
