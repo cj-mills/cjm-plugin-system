@@ -19,7 +19,16 @@ from typing import Dict, List, Optional, Type, Any, Tuple, Generator
 from .interface import PluginInterface
 from .metadata import PluginMeta
 
-# %% ../../nbs/core/manager.ipynb 5
+# %% ../../nbs/core/manager.ipynb 4
+# Optional: Import error handling library if available
+try:
+    from cjm_error_handling.core.base import ErrorContext, ErrorSeverity
+    from cjm_error_handling.core.errors import PluginError, ValidationError
+    _has_error_handling = True
+except ImportError:
+    _has_error_handling = False
+
+# %% ../../nbs/core/manager.ipynb 7
 class PluginManager:
     """Manages plugin discovery, loading, and lifecycle."""
 
@@ -120,7 +129,18 @@ class PluginManager:
 
             # Verify it implements the required interface
             if not issubclass(plugin_class, self.plugin_interface):
-                self.logger.error(f"Plugin {plugin_meta.name} does not implement required interface")
+                error_msg = f"Plugin {plugin_meta.name} does not implement required interface"
+                self.logger.error(error_msg)
+                if _has_error_handling:
+                    raise PluginError(
+                        message=f"Plugin does not implement required interface: {plugin_meta.name}",
+                        debug_info=f"Expected {self.plugin_interface.__name__}, got {plugin_class.__name__}",
+                        context=ErrorContext(
+                            operation="load_plugin",
+                            extra={"package_name": plugin_meta.package_name}
+                        ),
+                        plugin_id=plugin_meta.name
+                    )
                 return False
 
             # Instantiate and initialize the plugin
@@ -134,8 +154,22 @@ class PluginManager:
             self.logger.info(f"Loaded plugin: {plugin_meta.name}")
             return True
 
+        except PluginError:
+            # Re-raise structured errors
+            raise
         except Exception as e:
             self.logger.error(f"Error loading plugin {plugin_meta.name}: {e}")
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Failed to load plugin: {plugin_meta.name}",
+                    debug_info=f"Error during plugin loading: {str(e)}",
+                    context=ErrorContext(
+                        operation="load_plugin",
+                        extra={"package_name": plugin_meta.package_name}
+                    ),
+                    plugin_id=plugin_meta.name,
+                    cause=e
+                )
             return False
 
     def load_plugin_from_module(
@@ -168,7 +202,18 @@ class PluginManager:
                     plugin_classes.append(obj)
 
             if not plugin_classes:
-                self.logger.error(f"No plugin classes found in {module_path}")
+                error_msg = f"No plugin classes found in {module_path}"
+                self.logger.error(error_msg)
+                if _has_error_handling:
+                    raise PluginError(
+                        message=f"No plugin classes found in module",
+                        debug_info=f"Module path: {module_path}. Expected subclass of {self.plugin_interface.__name__}",
+                        context=ErrorContext(
+                            operation="load_plugin_from_module",
+                            extra={"module_path": str(module_path)}
+                        ),
+                        plugin_id=str(module_path)
+                    )
                 return False
 
             # Load the first plugin class found
@@ -190,8 +235,22 @@ class PluginManager:
             self.logger.info(f"Loaded plugin from module: {meta.name}")
             return True
 
+        except PluginError:
+            # Re-raise structured errors
+            raise
         except Exception as e:
             self.logger.error(f"Error loading plugin from {module_path}: {e}")
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Failed to load plugin from module",
+                    debug_info=f"Module path: {module_path}. Error: {str(e)}",
+                    context=ErrorContext(
+                        operation="load_plugin_from_module",
+                        extra={"module_path": str(module_path)}
+                    ),
+                    plugin_id=str(module_path),
+                    cause=e
+                )
             return False
 
     def unload_plugin(
@@ -200,7 +259,15 @@ class PluginManager:
     ) -> bool: # True if successfully unloaded, False otherwise
         """Unload a plugin and call its cleanup method."""
         if plugin_name not in self.plugins:
-            self.logger.error(f"Plugin {plugin_name} not found")
+            error_msg = f"Plugin {plugin_name} not found"
+            self.logger.error(error_msg)
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Cannot unload plugin: not found",
+                    debug_info=f"Plugin {plugin_name} is not loaded",
+                    context=ErrorContext(operation="unload_plugin"),
+                    plugin_id=plugin_name
+                )
             return False
 
         try:
@@ -219,6 +286,14 @@ class PluginManager:
 
         except Exception as e:
             self.logger.error(f"Error unloading plugin {plugin_name}: {e}")
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Failed to unload plugin: {plugin_name}",
+                    debug_info=f"Error during cleanup: {str(e)}",
+                    context=ErrorContext(operation="unload_plugin"),
+                    plugin_id=plugin_name,
+                    cause=e
+                )
             return False
 
     def get_plugin(
@@ -243,12 +318,37 @@ class PluginManager:
         """Execute a plugin's main functionality."""
         plugin = self.get_plugin(plugin_name)
         if not plugin:
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Cannot execute plugin: not found or not loaded",
+                    debug_info=f"Plugin {plugin_name} must be loaded before execution",
+                    context=ErrorContext(operation="execute_plugin"),
+                    plugin_id=plugin_name
+                )
             raise ValueError(f"Plugin {plugin_name} not found or not loaded")
 
         if not self.plugins[plugin_name].enabled:
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Cannot execute plugin: disabled",
+                    debug_info=f"Plugin {plugin_name} is currently disabled",
+                    context=ErrorContext(operation="execute_plugin"),
+                    plugin_id=plugin_name
+                )
             raise ValueError(f"Plugin {plugin_name} is disabled")
 
-        return plugin.execute(*args, **kwargs)
+        try:
+            return plugin.execute(*args, **kwargs)
+        except Exception as e:
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Plugin execution failed: {plugin_name}",
+                    debug_info=f"Error during plugin execution: {str(e)}",
+                    context=ErrorContext(operation="execute_plugin"),
+                    plugin_id=plugin_name,
+                    cause=e
+                )
+            raise
 
     def enable_plugin(
         self,
@@ -270,7 +370,7 @@ class PluginManager:
             return True
         return False
 
-# %% ../../nbs/core/manager.ipynb 8
+# %% ../../nbs/core/manager.ipynb 10
 def get_plugin_config_schema(
     self,
     plugin_name:str # Name of the plugin
@@ -304,7 +404,15 @@ def update_plugin_config(
     """Update a plugin's configuration and reinitialize it."""
     plugin = self.get_plugin(plugin_name)
     if not plugin:
-        self.logger.error(f"Plugin {plugin_name} not found")
+        error_msg = f"Plugin {plugin_name} not found"
+        self.logger.error(error_msg)
+        if _has_error_handling:
+            raise PluginError(
+                message=f"Cannot update config: plugin not found",
+                debug_info=f"Plugin {plugin_name} is not loaded",
+                context=ErrorContext(operation="update_plugin_config"),
+                plugin_id=plugin_name
+            )
         return False
 
     try:
@@ -316,7 +424,18 @@ def update_plugin_config(
         # Validate the new configuration
         is_valid, error = plugin.validate_config(config)
         if not is_valid:
-            self.logger.error(f"Invalid configuration for {plugin_name}: {error}")
+            error_msg = f"Invalid configuration for {plugin_name}: {error}"
+            self.logger.error(error_msg)
+            if _has_error_handling:
+                raise ValidationError(
+                    message=f"Invalid plugin configuration",
+                    debug_info=f"Validation failed for plugin {plugin_name}",
+                    context=ErrorContext(
+                        operation="update_plugin_config",
+                        extra={"plugin_name": plugin_name}
+                    ),
+                    validation_errors={"config": error}
+                )
             return False
 
         # Clean up existing resources
@@ -328,8 +447,23 @@ def update_plugin_config(
         self.logger.info(f"Updated configuration for plugin: {plugin_name}")
         return True
 
+    except (ValidationError, PluginError):
+        # Re-raise structured errors
+        raise
     except Exception as e:
-        self.logger.error(f"Error updating plugin {plugin_name} configuration: {e}")
+        error_msg = f"Error updating plugin {plugin_name} configuration: {e}"
+        self.logger.error(error_msg)
+        if _has_error_handling:
+            raise PluginError(
+                message=f"Failed to update plugin configuration",
+                debug_info=f"Error reinitializing plugin {plugin_name}: {str(e)}",
+                context=ErrorContext(
+                    operation="update_plugin_config",
+                    extra={"plugin_name": plugin_name}
+                ),
+                plugin_id=plugin_name,
+                cause=e
+            )
         return False
 
 def validate_plugin_config(
@@ -362,7 +496,15 @@ def reload_plugin(
 ) -> bool: # True if successful, False otherwise
     """Reload a plugin with optional new configuration."""
     if plugin_name not in self.plugins:
-        self.logger.error(f"Plugin {plugin_name} not found")
+        error_msg = f"Plugin {plugin_name} not found"
+        self.logger.error(error_msg)
+        if _has_error_handling:
+            raise PluginError(
+                message=f"Cannot reload plugin: not found",
+                debug_info=f"Plugin {plugin_name} is not loaded",
+                context=ErrorContext(operation="reload_plugin"),
+                plugin_id=plugin_name
+            )
         return False
 
     try:
@@ -389,8 +531,23 @@ def reload_plugin(
             plugin_meta.instance = None
             return self.load_plugin(plugin_meta, config)
 
+    except (PluginError, ValidationError):
+        # Re-raise structured errors
+        raise
     except Exception as e:
-        self.logger.error(f"Error reloading plugin {plugin_name}: {e}")
+        error_msg = f"Error reloading plugin {plugin_name}: {e}"
+        self.logger.error(error_msg)
+        if _has_error_handling:
+            raise PluginError(
+                message=f"Failed to reload plugin",
+                debug_info=f"Error during plugin reload: {str(e)}",
+                context=ErrorContext(
+                    operation="reload_plugin",
+                    extra={"plugin_name": plugin_name}
+                ),
+                plugin_id=plugin_name,
+                cause=e
+            )
         return False
 
 # Add to the PluginManager class
@@ -401,7 +558,7 @@ PluginManager.validate_plugin_config = validate_plugin_config
 PluginManager.get_all_plugin_schemas = get_all_plugin_schemas
 PluginManager.reload_plugin = reload_plugin
 
-# %% ../../nbs/core/manager.ipynb 10
+# %% ../../nbs/core/manager.ipynb 12
 def execute_plugin_stream(
     self,
     plugin_name:str, # Name of the plugin to execute
@@ -411,22 +568,58 @@ def execute_plugin_stream(
     """Execute a plugin with streaming support if available."""
     plugin = self.get_plugin(plugin_name)
     if not plugin:
+        if _has_error_handling:
+            raise PluginError(
+                message=f"Cannot execute plugin: not found or not loaded",
+                debug_info=f"Plugin {plugin_name} must be loaded before execution",
+                context=ErrorContext(operation="execute_plugin_stream"),
+                plugin_id=plugin_name
+            )
         raise ValueError(f"Plugin {plugin_name} not found or not loaded")
 
     if not self.plugins[plugin_name].enabled:
+        if _has_error_handling:
+            raise PluginError(
+                message=f"Cannot execute plugin: disabled",
+                debug_info=f"Plugin {plugin_name} is currently disabled",
+                context=ErrorContext(operation="execute_plugin_stream"),
+                plugin_id=plugin_name
+            )
         raise ValueError(f"Plugin {plugin_name} is disabled")
 
     # Check if plugin supports streaming
     if hasattr(plugin, 'supports_streaming') and plugin.supports_streaming():
         self.logger.info(f"Using streaming mode for plugin {plugin_name}")
-        return plugin.execute_stream(*args, **kwargs)
+        try:
+            return plugin.execute_stream(*args, **kwargs)
+        except Exception as e:
+            if _has_error_handling:
+                raise PluginError(
+                    message=f"Plugin streaming execution failed: {plugin_name}",
+                    debug_info=f"Error during plugin streaming: {str(e)}",
+                    context=ErrorContext(operation="execute_plugin_stream"),
+                    plugin_id=plugin_name,
+                    cause=e
+                )
+            raise
     else:
         self.logger.info(f"Plugin {plugin_name} doesn't support streaming, using regular execution")
         # Fall back to regular execution wrapped in a generator
         def fallback_generator():
-            result = plugin.execute(*args, **kwargs)
-            yield result
-            return result
+            try:
+                result = plugin.execute(*args, **kwargs)
+                yield result
+                return result
+            except Exception as e:
+                if _has_error_handling:
+                    raise PluginError(
+                        message=f"Plugin execution failed: {plugin_name}",
+                        debug_info=f"Error during plugin execution: {str(e)}",
+                        context=ErrorContext(operation="execute_plugin_stream"),
+                        plugin_id=plugin_name,
+                        cause=e
+                    )
+                raise
         return fallback_generator()
 
 def check_streaming_support(
