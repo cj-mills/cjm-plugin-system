@@ -31,9 +31,9 @@ graph LR
     utils_validation[utils.validation<br/>Configuration Validation]
 
     core_interface --> utils_validation
-    core_manager --> utils_validation
-    core_manager --> core_metadata
     core_manager --> core_interface
+    core_manager --> core_metadata
+    core_manager --> utils_validation
 ```
 
 *4 cross-module dependencies detected*
@@ -150,6 +150,8 @@ class PluginInterface(ABC):
 ``` python
 from cjm_plugin_system.core.manager import (
     PluginManager,
+    get_plugin_config_dataclass,
+    get_all_plugin_config_dataclasses,
     get_plugin_config,
     get_plugin_config_class,
     validate_plugin_config,
@@ -162,6 +164,21 @@ from cjm_plugin_system.core.manager import (
 ```
 
 #### Functions
+
+``` python
+def get_plugin_config_dataclass(
+    self,
+    plugin_name:str # Name of the plugin
+) -> dataclass: # Current configuration dataclass
+    "Get the configuration dataclass for a plugin."
+```
+
+``` python
+def get_all_plugin_config_dataclasses(
+    self
+) -> Dict[str, dataclass]
+    "Get configuration dataclasses for all loaded plugins."
+```
 
 ``` python
 def get_plugin_config(
