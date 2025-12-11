@@ -385,7 +385,7 @@ def get_plugin_config_dataclass(
     if len(plugin_eps) > 0:
         ep = list(plugin_eps)[0]
         plugin_class = ep.load()
-        return type(plugin.get_current_config())
+        return type(plugin_class.get_current_config())
     else:
         return None
 

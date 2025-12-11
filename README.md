@@ -31,9 +31,9 @@ graph LR
     utils_validation[utils.validation<br/>Configuration Validation]
 
     core_interface --> utils_validation
-    core_manager --> core_interface
-    core_manager --> core_metadata
     core_manager --> utils_validation
+    core_manager --> core_metadata
+    core_manager --> core_interface
 ```
 
 *4 cross-module dependencies detected*
