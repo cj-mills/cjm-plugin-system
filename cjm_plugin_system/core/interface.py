@@ -7,9 +7,13 @@ __all__ = ['PluginInterface', 'PluginInterface_supports_streaming', 'PluginInter
 
 # %% ../../nbs/core/interface.ipynb 3
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 import logging
-from typing import Optional, Dict, Any, Tuple, Generator
-from ..utils.validation import validate_config, extract_defaults
+from typing import Optional, Dict, Any, Tuple, Generator, Type
+from cjm_plugin_system.utils.validation import (
+    dict_to_config, config_to_dict, extract_defaults, validate_config,
+    SCHEMA_TITLE, SCHEMA_DESC, SCHEMA_MIN, SCHEMA_MAX, SCHEMA_ENUM
+)
 
 # %% ../../nbs/core/interface.ipynb 5
 class PluginInterface(ABC):
@@ -17,6 +21,9 @@ class PluginInterface(ABC):
 
     # Must be overridden by domain-specific interfaces
     entry_point_group: str = None
+    
+    # Configuration dataclass type - override in concrete plugins
+    config_class: Type = None
 
     def __init_subclass__(cls, **kwargs):
         """Enforce that domain-specific interfaces define entry_point_group."""
@@ -49,7 +56,7 @@ class PluginInterface(ABC):
     @abstractmethod
     def initialize(
         self,
-        config:Optional[Dict[str, Any]]=None # Configuration dictionary for plugin-specific settings
+        config:Optional[Any]=None # Configuration dataclass instance or dict
     ) -> None:
         """Initialize the plugin with configuration."""
         pass
@@ -68,29 +75,16 @@ class PluginInterface(ABC):
         """Check if the plugin's dependencies are available."""
         pass
 
-    @staticmethod
     @abstractmethod
-    def get_config_schema() -> Dict[str, Any]: # JSON Schema describing configuration options
-        """Return JSON Schema describing the plugin's configuration options."""
-        pass
-
-    @abstractmethod
-    def get_current_config(self) -> Dict[str, Any]: # Current configuration state
+    def get_current_config(self) -> Any: # Current configuration dataclass instance
         """Return the current configuration state."""
         pass
 
-    def validate_config(
-        self,
-        config:Dict[str, Any] # Configuration to validate
-    ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
-        """Validate a configuration dictionary against the schema."""
-        schema = self.get_config_schema()
-        return validate_config(config, schema)
-
-    def get_config_defaults(self) -> Dict[str, Any]: # Default values from schema
-        """Extract default values from the configuration schema."""
-        schema = self.get_config_schema()
-        return extract_defaults(schema)
+    def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
+        """Extract default values from the configuration dataclass."""
+        if self.config_class is None:
+            return {}
+        return extract_defaults(self.config_class)
 
     def cleanup(self) -> None:
         """Optional cleanup when plugin is unloaded."""

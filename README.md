@@ -17,7 +17,7 @@ pip install cjm_plugin_system
     │   ├── manager.ipynb    # Plugin discovery, loading, and lifecycle management system
     │   └── metadata.ipynb   # Data structures for plugin metadata
     └── utils/ (1)
-        └── validation.ipynb  # JSON Schema validation helpers for plugin configuration
+        └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
 
 Total: 4 notebooks across 2 directories
 
@@ -31,11 +31,12 @@ graph LR
     utils_validation[utils.validation<br/>Configuration Validation]
 
     core_interface --> utils_validation
+    core_manager --> utils_validation
     core_manager --> core_metadata
     core_manager --> core_interface
 ```
 
-*3 cross-module dependencies detected*
+*4 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -99,13 +100,13 @@ class PluginInterface(ABC):
         @abstractmethod
         def initialize(
             self,
-            config:Optional[Dict[str, Any]]=None # Configuration dictionary for plugin-specific settings
+            config:Optional[Any]=None # Configuration dataclass instance or dict
         ) -> None
         "Plugin version."
     
     def initialize(
             self,
-            config:Optional[Dict[str, Any]]=None # Configuration dictionary for plugin-specific settings
+            config:Optional[Any]=None # Configuration dataclass instance or dict
         ) -> None
         "Initialize the plugin with configuration."
     
@@ -120,42 +121,21 @@ class PluginInterface(ABC):
             """Check if the plugin's dependencies are available."""
             pass
     
-        @staticmethod
         @abstractmethod
-        def get_config_schema() -> Dict[str, Any]: # JSON Schema describing configuration options
+        def get_current_config(self) -> Any: # Current configuration dataclass instance
         "Check if the plugin's dependencies are available."
     
-    def get_config_schema() -> Dict[str, Any]: # JSON Schema describing configuration options
-            """Return JSON Schema describing the plugin's configuration options."""
-            pass
-    
-        @abstractmethod
-        def get_current_config(self) -> Dict[str, Any]: # Current configuration state
-        "Return JSON Schema describing the plugin's configuration options."
-    
-    def get_current_config(self) -> Dict[str, Any]: # Current configuration state
+    def get_current_config(self) -> Any: # Current configuration dataclass instance
             """Return the current configuration state."""
             pass
     
-        def validate_config(
-            self,
-            config:Dict[str, Any] # Configuration to validate
-        ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
+        def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
         "Return the current configuration state."
     
-    def validate_config(
-            self,
-            config:Dict[str, Any] # Configuration to validate
-        ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
-        "Validate a configuration dictionary against the schema."
-    
-    def get_config_defaults(self) -> Dict[str, Any]: # Default values from schema
-            """Extract default values from the configuration schema."""
-            schema = self.get_config_schema()
-            return extract_defaults(schema)
-    
-        def cleanup(self) -> None
-        "Extract default values from the configuration schema."
+    def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
+            """Extract default values from the configuration dataclass."""
+            if self.config_class is None
+        "Extract default values from the configuration dataclass."
     
     def cleanup(self) -> None
         "Optional cleanup when plugin is unloaded."
@@ -170,11 +150,10 @@ class PluginInterface(ABC):
 ``` python
 from cjm_plugin_system.core.manager import (
     PluginManager,
-    get_plugin_config_schema,
     get_plugin_config,
-    update_plugin_config,
+    get_plugin_config_class,
     validate_plugin_config,
-    get_all_plugin_schemas,
+    update_plugin_config,
     reload_plugin,
     execute_plugin_stream,
     check_streaming_support,
@@ -185,52 +164,45 @@ from cjm_plugin_system.core.manager import (
 #### Functions
 
 ``` python
-def get_plugin_config_schema(
-    self,
-    plugin_name:str # Name of the plugin
-) -> Optional[Dict[str, Any]]: # Configuration schema or None if plugin not found
-    "Get the configuration schema for a plugin."
-```
-
-``` python
 def get_plugin_config(
     self,
     plugin_name:str # Name of the plugin
-) -> Optional[Dict[str, Any]]: # Current configuration or None if plugin not found
+) -> Optional[Any]: # Current configuration dataclass instance or None if plugin not found
     "Get the current configuration of a plugin."
 ```
 
 ``` python
-def update_plugin_config(
+def get_plugin_config_class(
     self,
-    plugin_name:str, # Name of the plugin
-    config:Dict[str, Any], # New configuration
-    merge:bool=True # Whether to merge with existing config or replace entirely
-) -> bool: # True if successful, False otherwise
-    "Update a plugin's configuration and reinitialize it."
+    plugin_name:str # Name of the plugin
+) -> Optional[Type]: # Configuration dataclass type or None if plugin not found
+    "Get the configuration dataclass type for a plugin."
 ```
 
 ``` python
 def validate_plugin_config(
     self,
     plugin_name:str, # Name of the plugin
-    config:Dict[str, Any] # Configuration to validate
+    config:Any # Configuration dataclass instance to validate
 ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
-    "Validate a configuration dictionary for a plugin without applying it."
+    "Validate a configuration dataclass for a plugin."
 ```
 
 ``` python
-def get_all_plugin_schemas(
-    self
-) -> Dict[str, Dict[str, Any]]: # Dictionary mapping plugin names to their schemas
-    "Get configuration schemas for all loaded plugins."
+def update_plugin_config(
+    self,
+    plugin_name:str, # Name of the plugin
+    config:Any, # New configuration (dataclass instance or dict)
+    merge:bool=True # Whether to merge with existing config or replace entirely
+) -> bool: # True if successful, False otherwise
+    "Update a plugin's configuration and reinitialize it."
 ```
 
 ``` python
 def reload_plugin(
     self,
     plugin_name:str, # Name of the plugin to reload
-    config:Optional[Dict[str, Any]]=None # Optional new configuration
+    config:Optional[Any]=None # Optional new configuration (dataclass or dict)
 ) -> bool: # True if successful, False otherwise
     "Reload a plugin with optional new configuration."
 ```
@@ -380,13 +352,26 @@ class PluginMeta:
 
 ### Configuration Validation (`validation.ipynb`)
 
-> JSON Schema validation helpers for plugin configuration
+> Validation helpers for plugin configuration dataclasses
 
 #### Import
 
 ``` python
 from cjm_plugin_system.utils.validation import (
+    T,
+    SCHEMA_TITLE,
+    SCHEMA_DESC,
+    SCHEMA_MIN,
+    SCHEMA_MAX,
+    SCHEMA_ENUM,
+    SCHEMA_MIN_LEN,
+    SCHEMA_MAX_LEN,
+    SCHEMA_PATTERN,
+    SCHEMA_FORMAT,
+    validate_field_value,
     validate_config,
+    config_to_dict,
+    dict_to_config,
     extract_defaults
 )
 ```
@@ -394,24 +379,55 @@ from cjm_plugin_system.utils.validation import (
 #### Functions
 
 ``` python
-def validate_config(
-    config:Dict[str, Any], # Configuration to validate
-    schema:Dict[str, Any] # JSON Schema to validate against
+def validate_field_value(
+    value:Any, # Value to validate
+    metadata:Dict[str, Any], # Field metadata containing constraints
+    field_name:str="" # Field name for error messages
 ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
-    "Validate a configuration dictionary against a JSON Schema."
+    "Validate a value against field metadata constraints."
 ```
 
 ``` python
-def _basic_validate(
-    config:Dict[str, Any], # Configuration to validate
-    schema:Dict[str, Any] # JSON Schema to validate against
+def validate_config(
+    config:Any # Configuration dataclass instance to validate
 ) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
-    "Basic validation without jsonschema library."
+    "Validate all fields in a configuration dataclass against their metadata constraints."
+```
+
+``` python
+def config_to_dict(
+    config:Any # Configuration dataclass instance
+) -> Dict[str, Any]: # Dictionary representation of the configuration
+    "Convert a configuration dataclass instance to a dictionary."
+```
+
+``` python
+def dict_to_config(
+    config_class:Type[T], # Configuration dataclass type
+    data:Optional[Dict[str, Any]]=None, # Dictionary with configuration values
+    validate:bool=False # Whether to validate against metadata constraints
+) -> T: # Instance of the configuration dataclass
+    "Create a configuration dataclass instance from a dictionary."
 ```
 
 ``` python
 def extract_defaults(
-    schema:Dict[str, Any] # JSON Schema
-) -> Dict[str, Any]: # Default values from schema
-    "Extract default values from a JSON Schema."
+    config_class:Type # Configuration dataclass type
+) -> Dict[str, Any]: # Default values from the dataclass
+    "Extract default values from a configuration dataclass type."
+```
+
+#### Variables
+
+``` python
+T
+SCHEMA_TITLE = 'title'  # Display title for the field
+SCHEMA_DESC = 'description'  # Help text description
+SCHEMA_MIN = 'minimum'  # Minimum value for numbers
+SCHEMA_MAX = 'maximum'  # Maximum value for numbers
+SCHEMA_ENUM = 'enum'  # Allowed values for dropdowns
+SCHEMA_MIN_LEN = 'minLength'  # Minimum string length
+SCHEMA_MAX_LEN = 'maxLength'  # Maximum string length
+SCHEMA_PATTERN = 'pattern'  # Regex pattern for strings
+SCHEMA_FORMAT = 'format'  # String format (email, uri, date, etc.)
 ```
