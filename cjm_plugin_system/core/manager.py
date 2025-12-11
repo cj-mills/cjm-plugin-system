@@ -385,7 +385,7 @@ def get_plugin_config_dataclass(
     if len(plugin_eps) > 0:
         ep = list(plugin_eps)[0]
         plugin_class = ep.load()
-        return type(plugin_class.get_current_config())
+        return plugin_class.get_config_dataclass()
     else:
         return None
 
@@ -398,7 +398,7 @@ def get_all_plugin_config_dataclasses(
     for plugin_name in self.plugins:
         plugin = self.get_plugin(plugin_name)
         if plugin:
-            config_dataclasses[plugin_name] = type(plugin.get_current_config())
+            config_dataclasses[plugin_name] = plugin.get_config_dataclass()
     return config_dataclasses
 
 def get_plugin_config(

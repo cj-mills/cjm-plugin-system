@@ -32,8 +32,8 @@ graph LR
 
     core_interface --> utils_validation
     core_manager --> utils_validation
-    core_manager --> core_metadata
     core_manager --> core_interface
+    core_manager --> core_metadata
 ```
 
 *4 cross-module dependencies detected*
@@ -129,8 +129,17 @@ class PluginInterface(ABC):
             """Return the current configuration state."""
             pass
     
-        def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
+        @staticmethod
+        @abstractmethod
+        def get_config_dataclass() -> Any: # The dataclass describing the configuration options
         "Return the current configuration state."
+    
+    def get_config_dataclass() -> Any: # The dataclass describing the configuration options
+            """Return dataclass describing the plugin's configuration options."""
+            pass
+    
+        def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
+        "Return dataclass describing the plugin's configuration options."
     
     def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
             """Extract default values from the configuration dataclass."""

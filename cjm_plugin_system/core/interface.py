@@ -80,6 +80,12 @@ class PluginInterface(ABC):
         """Return the current configuration state."""
         pass
 
+    @staticmethod
+    @abstractmethod
+    def get_config_dataclass() -> Any: # The dataclass describing the configuration options
+        """Return dataclass describing the plugin's configuration options."""
+        pass
+
     def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
         """Extract default values from the configuration dataclass."""
         if self.config_class is None:
