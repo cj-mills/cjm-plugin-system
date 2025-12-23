@@ -12,14 +12,16 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (3)
+    ├── core/ (5)
     │   ├── interface.ipynb  # Abstract base class defining the generic plugin interface
     │   ├── manager.ipynb    # Plugin discovery, loading, and lifecycle management system
-    │   └── metadata.ipynb   # Data structures for plugin metadata
+    │   ├── metadata.ipynb   # Data structures for plugin metadata
+    │   ├── proxy.ipynb      # Bridge between Host application and isolated Worker processes
+    │   └── worker.ipynb     # FastAPI server that runs inside isolated plugin environments
     └── utils/ (1)
         └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
 
-Total: 4 notebooks across 2 directories
+Total: 6 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -28,12 +30,14 @@ graph LR
     core_interface[core.interface<br/>Plugin Interface]
     core_manager[core.manager<br/>Plugin Manager]
     core_metadata[core.metadata<br/>Plugin Metadata]
+    core_proxy[core.proxy<br/>Remote Plugin Proxy]
+    core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_interface --> utils_validation
-    core_manager --> utils_validation
+    core_manager --> core_proxy
     core_manager --> core_interface
     core_manager --> core_metadata
+    core_proxy --> core_interface
 ```
 
 *4 cross-module dependencies detected*
@@ -54,39 +58,29 @@ Detailed documentation for each module in the project:
 
 ``` python
 from cjm_plugin_system.core.interface import (
-    PluginInterface,
-    PluginInterface_supports_streaming,
-    PluginInterface_execute_stream
+    FileBackedDTO,
+    PluginInterface
 )
-```
-
-#### Functions
-
-``` python
-def PluginInterface_supports_streaming(self) -> bool: # True if execute_stream is implemented
-    """Check if this plugin supports streaming execution."""
-    # Default: check if execute_stream is overridden from the base class
-    "Check if this plugin supports streaming execution."
-```
-
-``` python
-def PluginInterface_execute_stream(
-    self,
-    *args, # Arguments for plugin execution
-    **kwargs # Keyword arguments for plugin execution
-) -> Generator[Any, None, Any]: # Yields partial results, returns final result
-    "Stream execution results chunk by chunk."
 ```
 
 #### Classes
 
 ``` python
+@runtime_checkable
+class FileBackedDTO(Protocol):
+    "Protocol for Data Transfer Objects that serialize to disk for zero-copy transfer."
+    
+    def to_temp_file(self) -> str: # Absolute path to the temporary file
+        "Save the data to a temporary file and return the absolute path."
+```
+
+``` python
 class PluginInterface(ABC):
-    "Generic plugin interface that all plugins must implement."
+    "Abstract base class for all plugins (both local workers and remote proxies)."
     
     def name(self) -> str: # Unique identifier for this plugin
             """Unique plugin identifier."""
-            pass
+            ...
     
         @property
         @abstractmethod
@@ -95,20 +89,20 @@ class PluginInterface(ABC):
     
     def version(self) -> str: # Semantic version string (e.g., "1.0.0")
             """Plugin version."""
-            pass
+            ...
     
         @abstractmethod
         def initialize(
             self,
-            config:Optional[Any]=None # Configuration dataclass instance or dict
+            config: Optional[Dict[str, Any]] = None # Configuration dictionary
         ) -> None
         "Plugin version."
     
     def initialize(
             self,
-            config:Optional[Any]=None # Configuration dataclass instance or dict
+            config: Optional[Dict[str, Any]] = None # Configuration dictionary
         ) -> None
-        "Initialize the plugin with configuration."
+        "Initialize or re-configure the plugin."
     
     def execute(
             self,
@@ -117,37 +111,31 @@ class PluginInterface(ABC):
         ) -> Any: # Plugin-specific output
         "Execute the plugin's main functionality."
     
-    def is_available(self) -> bool: # True if all required dependencies are available
-            """Check if the plugin's dependencies are available."""
-            pass
+    def execute_stream(
+            self,
+            *args,
+            **kwargs
+        ) -> Generator[Any, None, None]: # Yields partial results
+        "Stream execution results chunk by chunk."
+    
+    def get_config_schema(self) -> Dict[str, Any]: # JSON Schema for configuration
+            """Return JSON Schema describing the plugin's configuration options."""
+            ...
     
         @abstractmethod
-        def get_current_config(self) -> Any: # Current configuration dataclass instance
-        "Check if the plugin's dependencies are available."
+        def get_current_config(self) -> Dict[str, Any]: # Current configuration values
+        "Return JSON Schema describing the plugin's configuration options."
     
-    def get_current_config(self) -> Any: # Current configuration dataclass instance
-            """Return the current configuration state."""
-            pass
+    def get_current_config(self) -> Dict[str, Any]: # Current configuration values
+            """Return the current configuration state as a dictionary."""
+            ...
     
-        @staticmethod
         @abstractmethod
-        def get_config_dataclass() -> Any: # The dataclass describing the configuration options
-        "Return the current configuration state."
-    
-    def get_config_dataclass() -> Any: # The dataclass describing the configuration options
-            """Return dataclass describing the plugin's configuration options."""
-            pass
-    
-        def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
-        "Return dataclass describing the plugin's configuration options."
-    
-    def get_config_defaults(self) -> Dict[str, Any]: # Default values from config_class
-            """Extract default values from the configuration dataclass."""
-            if self.config_class is None
-        "Extract default values from the configuration dataclass."
+        def cleanup(self) -> None
+        "Return the current configuration state as a dictionary."
     
     def cleanup(self) -> None
-        "Optional cleanup when plugin is unloaded."
+        "Clean up resources when plugin is unloaded."
 ```
 
 ### Plugin Manager (`manager.ipynb`)
@@ -159,103 +147,76 @@ class PluginInterface(ABC):
 ``` python
 from cjm_plugin_system.core.manager import (
     PluginManager,
-    get_plugin_config_dataclass,
-    get_all_plugin_config_dataclasses,
     get_plugin_config,
-    get_plugin_config_class,
-    validate_plugin_config,
+    get_plugin_config_schema,
+    get_all_plugin_configs,
     update_plugin_config,
     reload_plugin,
-    execute_plugin_stream,
-    check_streaming_support,
-    get_streaming_plugins
+    get_plugin_stats,
+    execute_plugin_stream
 )
 ```
 
 #### Functions
 
 ``` python
-def get_plugin_config_dataclass(
-    self,
-    plugin_name:str # Name of the plugin
-) -> dataclass: # Current configuration dataclass
-    "Get the configuration dataclass for a plugin."
-```
-
-``` python
-def get_all_plugin_config_dataclasses(
-    self
-) -> Dict[str, dataclass]
-    "Get configuration dataclasses for all loaded plugins."
-```
-
-``` python
 def get_plugin_config(
     self,
-    plugin_name:str # Name of the plugin
-) -> Optional[Any]: # Current configuration dataclass instance or None if plugin not found
+    plugin_name: str # Name of the plugin
+) -> Optional[Dict[str, Any]]: # Current configuration or None
     "Get the current configuration of a plugin."
 ```
 
 ``` python
-def get_plugin_config_class(
+def get_plugin_config_schema(
     self,
-    plugin_name:str # Name of the plugin
-) -> Optional[Type]: # Configuration dataclass type or None if plugin not found
-    "Get the configuration dataclass type for a plugin."
+    plugin_name: str # Name of the plugin
+) -> Optional[Dict[str, Any]]: # JSON Schema or None
+    "Get the configuration JSON Schema for a plugin."
 ```
 
 ``` python
-def validate_plugin_config(
-    self,
-    plugin_name:str, # Name of the plugin
-    config:Any # Configuration dataclass instance to validate
-) -> Tuple[bool, Optional[str]]: # (is_valid, error_message)
-    "Validate a configuration dataclass for a plugin."
+def get_all_plugin_configs(self) -> Dict[str, Dict[str, Any]]: # Plugin name -> config mapping
+    """Get current configuration for all loaded plugins."""
+    return {
+        name: plugin.get_current_config()
+    "Get current configuration for all loaded plugins."
 ```
 
 ``` python
 def update_plugin_config(
     self,
-    plugin_name:str, # Name of the plugin
-    config:Any, # New configuration (dataclass instance or dict)
-    merge:bool=True # Whether to merge with existing config or replace entirely
-) -> bool: # True if successful, False otherwise
-    "Update a plugin's configuration and reinitialize it."
+    plugin_name: str, # Name of the plugin
+    config: Dict[str, Any] # New configuration values
+) -> bool: # True if successful
+    "Update a plugin's configuration (hot-reload without restart)."
 ```
 
 ``` python
 def reload_plugin(
     self,
-    plugin_name:str, # Name of the plugin to reload
-    config:Optional[Any]=None # Optional new configuration (dataclass or dict)
-) -> bool: # True if successful, False otherwise
-    "Reload a plugin with optional new configuration."
+    plugin_name: str, # Name of the plugin
+    config: Optional[Dict[str, Any]] = None # Optional new configuration
+) -> bool: # True if successful
+    "Reload a plugin by terminating and restarting its Worker."
 ```
 
 ``` python
-def execute_plugin_stream(
+def get_plugin_stats(
     self,
-    plugin_name:str, # Name of the plugin to execute
-    *args, # Arguments to pass to the plugin
-    **kwargs # Keyword arguments to pass to the plugin
-) -> Generator[Any, None, Any]: # Generator yielding partial results, returns final result
-    "Execute a plugin with streaming support if available."
+    plugin_name: str # Name of the plugin
+) -> Optional[Dict[str, Any]]: # Resource telemetry or None
+    "Get resource usage stats for a plugin's Worker process."
 ```
 
 ``` python
-def check_streaming_support(
+async def execute_plugin_stream(
     self,
-    plugin_name:str # Name of the plugin to check
-) -> bool: # True if plugin supports streaming
-    "Check if a plugin supports streaming execution."
-```
-
-``` python
-def get_streaming_plugins(
-    self
-) -> List[str]: # List of plugin names that support streaming
-    "Get a list of all loaded plugins that support streaming."
+    plugin_name: str, # Name of the plugin
+    *args,
+    **kwargs
+) -> AsyncGenerator[Any, None]: # Async generator yielding results
+    "Execute a plugin with streaming response."
 ```
 
 #### Classes
@@ -264,87 +225,94 @@ def get_streaming_plugins(
 class PluginManager:
     def __init__(
         self,
-        plugin_interface:Type[PluginInterface]=PluginInterface, # Base class/interface plugins must implement
-        entry_point_group:Optional[str]=None # Optional override for entry point group name
+        plugin_interface: Type[PluginInterface] = PluginInterface, # Base interface for type checking
+        search_paths: Optional[List[Path]] = None # Custom manifest search paths
     )
-    "Manages plugin discovery, loading, and lifecycle."
+    "Manages plugin discovery, loading, and lifecycle via process isolation."
     
     def __init__(
             self,
-            plugin_interface:Type[PluginInterface]=PluginInterface, # Base class/interface plugins must implement
-            entry_point_group:Optional[str]=None # Optional override for entry point group name
+            plugin_interface: Type[PluginInterface] = PluginInterface, # Base interface for type checking
+            search_paths: Optional[List[Path]] = None # Custom manifest search paths
         )
         "Initialize the plugin manager."
     
-    def get_entry_points(self) -> importlib.metadata.EntryPoints: # Entry points for the configured group
-            """Get plugin entry points from installed packages."""
-            self.entry_points = []
-            try
-        "Get plugin entry points from installed packages."
-    
-    def discover_plugins(self) -> List[PluginMeta]: # List of discovered plugin metadata objects
-            """Discover all installed plugins via entry points."""
+    def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
+            """Discover plugins via JSON manifests in search paths."""
             self.discovered = []
+            seen_plugins = set()
     
-            for ep in self.entry_points
-        "Discover all installed plugins via entry points."
+            for base_path in self.search_paths
+        "Discover plugins via JSON manifests in search paths."
     
     def load_plugin(
             self,
-            plugin_meta:PluginMeta, # Plugin metadata
-            config:Optional[Dict[str, Any]]=None # Optional configuration for the plugin
-        ) -> bool: # True if successfully loaded, False otherwise
-        "Load and initialize a plugin."
+            plugin_meta: PluginMeta, # Plugin metadata (with manifest attached)
+            config: Optional[Dict[str, Any]] = None # Initial configuration
+        ) -> bool: # True if successfully loaded
+        "Load a plugin by spawning a Worker subprocess."
     
-    def load_plugin_from_module(
+    def load_all(
             self,
-            module_path:str, # Path to the Python module
-            config:Optional[Dict[str, Any]]=None # Optional configuration for the plugin
-        ) -> bool: # True if successfully loaded, False otherwise
-        "Load a plugin directly from a Python module file or package."
+            configs: Optional[Dict[str, Dict[str, Any]]] = None # Plugin name -> config mapping
+        ) -> Dict[str, bool]: # Plugin name -> success mapping
+        "Discover and load all available plugins."
     
     def unload_plugin(
             self,
-            plugin_name:str # Name of the plugin to unload
-        ) -> bool: # True if successfully unloaded, False otherwise
-        "Unload a plugin and call its cleanup method."
+            plugin_name: str # Name of the plugin to unload
+        ) -> bool: # True if successfully unloaded
+        "Unload a plugin and terminate its Worker process."
+    
+    def unload_all(self) -> None:
+            """Unload all plugins and terminate all Worker processes."""
+            for name in list(self.plugins.keys())
+        "Unload all plugins and terminate all Worker processes."
     
     def get_plugin(
             self,
-            plugin_name:str # Name of the plugin to retrieve
-        ) -> Optional[PluginInterface]: # Plugin instance if found, None otherwise
+            plugin_name: str # Name of the plugin
+        ) -> Optional[PluginInterface]: # Plugin proxy instance or None
         "Get a loaded plugin instance by name."
     
-    def list_plugins(self) -> List[PluginMeta]: # List of metadata for all loaded plugins
+    def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
             """List all loaded plugins."""
             return list(self.plugins.values())
     
         def execute_plugin(
             self,
-            plugin_name:str, # Name of the plugin to execute
-            *args, # Arguments to pass to the plugin
-            **kwargs # Keyword arguments to pass to the plugin
-        ) -> Any: # Result of the plugin execution
+            plugin_name: str, # Name of the plugin
+            *args,
+            **kwargs
+        ) -> Any: # Plugin result
         "List all loaded plugins."
     
     def execute_plugin(
             self,
-            plugin_name:str, # Name of the plugin to execute
-            *args, # Arguments to pass to the plugin
-            **kwargs # Keyword arguments to pass to the plugin
-        ) -> Any: # Result of the plugin execution
-        "Execute a plugin's main functionality."
+            plugin_name: str, # Name of the plugin
+            *args,
+            **kwargs
+        ) -> Any: # Plugin result
+        "Execute a plugin's main functionality (sync)."
+    
+    async def execute_plugin_async(
+            self,
+            plugin_name: str, # Name of the plugin
+            *args,
+            **kwargs
+        ) -> Any: # Plugin result
+        "Execute a plugin's main functionality (async)."
     
     def enable_plugin(
             self,
-            plugin_name:str # Name of the plugin to enable
-        ) -> bool: # True if plugin was enabled, False if not found
+            plugin_name: str # Name of the plugin
+        ) -> bool: # True if plugin was enabled
         "Enable a plugin."
     
     def disable_plugin(
             self,
-            plugin_name:str # Name of the plugin to disable
-        ) -> bool: # True if plugin was disabled, False if not found
+            plugin_name: str # Name of the plugin
+        ) -> bool: # True if plugin was disabled
         "Disable a plugin without unloading it."
 ```
 
@@ -374,6 +342,173 @@ class PluginMeta:
     package_name: str = ''  # Python package name containing the plugin
     instance: Optional[Any]  # Plugin instance (PluginInterface subclass)
     enabled: bool = True  # Whether the plugin is enabled
+```
+
+### Remote Plugin Proxy (`proxy.ipynb`)
+
+> Bridge between Host application and isolated Worker processes
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.proxy import (
+    RemotePluginProxy,
+    execute_async,
+    execute_stream_sync,
+    execute_stream,
+    get_stats,
+    is_alive
+)
+```
+
+#### Functions
+
+``` python
+def _maybe_serialize_input(
+    self,
+    obj: Any # Object to potentially serialize
+) -> Any: # Serialized form (path string or original object)
+    "Convert FileBackedDTO objects to file paths for zero-copy transfer."
+```
+
+``` python
+def _prepare_payload(
+    self,
+    args: tuple, # Positional arguments
+    kwargs: dict # Keyword arguments
+) -> Dict[str, Any]: # JSON-serializable payload
+    "Prepare arguments for HTTP transmission."
+```
+
+``` python
+async def execute_async(
+    self,
+    *args,
+    **kwargs
+) -> Any: # Plugin result
+    "Execute the plugin asynchronously."
+```
+
+``` python
+def execute_stream_sync(self, *args, **kwargs) -> Generator[Any, None, None]
+    "Synchronous wrapper for streaming (blocking)."
+```
+
+``` python
+async def execute_stream(
+    self,
+    *args,
+    **kwargs
+) -> AsyncGenerator[Any, None]: # Yields parsed JSON chunks
+    "Execute with streaming response (async generator)."
+```
+
+``` python
+def get_stats(self) -> Dict[str, Any]: # Process telemetry
+    """Get worker process resource usage."""
+    with httpx.Client() as client
+    "Get worker process resource usage."
+```
+
+``` python
+def is_alive(self) -> bool: # True if worker is responsive
+    """Check if the worker process is still running and responsive."""
+    if not self.process or self.process.poll() is not None
+    "Check if the worker process is still running and responsive."
+```
+
+``` python
+def __enter__(self):
+    """Enter context manager."""
+    return self
+
+def __exit__(self, exc_type, exc_val, exc_tb)
+    "Enter context manager."
+```
+
+``` python
+def __exit__(self, exc_type, exc_val, exc_tb):
+    """Exit context manager and cleanup."""
+    self.cleanup()
+    return False
+
+async def __aenter__(self)
+    "Exit context manager and cleanup."
+```
+
+``` python
+async def __aenter__(self):
+    """Enter async context manager."""
+    return self
+
+async def __aexit__(self, exc_type, exc_val, exc_tb)
+    "Enter async context manager."
+```
+
+``` python
+async def __aexit__(self, exc_type, exc_val, exc_tb)
+    "Exit async context manager and cleanup."
+```
+
+#### Classes
+
+``` python
+class RemotePluginProxy:
+    def __init__(
+        self,
+        manifest: Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+    )
+    "Proxy that forwards plugin calls to an isolated Worker subprocess."
+    
+    def __init__(
+            self,
+            manifest: Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+        )
+        "Initialize proxy and start the worker process."
+    
+    def name(self) -> str: # Plugin name from manifest
+            """Plugin name."""
+            return self.manifest.get('name', 'unknown')
+        
+        @property
+        def version(self) -> str: # Plugin version from manifest
+        "Plugin name."
+    
+    def version(self) -> str: # Plugin version from manifest
+            """Plugin version."""
+            return self.manifest.get('version', '0.0.0')
+    
+        def _get_free_port(self) -> int
+        "Plugin version."
+    
+    def initialize(
+            self,
+            config: Optional[Dict[str, Any]] = None # Configuration dictionary
+        ) -> None
+        "Initialize or reconfigure the plugin."
+    
+    def execute(
+            self,
+            *args,
+            **kwargs
+        ) -> Any: # Plugin result
+        "Execute the plugin synchronously."
+    
+    def get_config_schema(self) -> Dict[str, Any]: # JSON Schema
+            """Get the plugin's configuration schema."""
+            with httpx.Client() as client
+        "Get the plugin's configuration schema."
+    
+    def get_current_config(self) -> Dict[str, Any]: # Current config values
+            """Get the plugin's current configuration."""
+            with httpx.Client() as client
+        "Get the plugin's current configuration."
+    
+    def cleanup(self) -> None:
+            """Clean up plugin resources and terminate worker process."""
+            # Send cleanup request to worker
+            try
+        "Clean up plugin resources and terminate worker process."
 ```
 
 ### Configuration Validation (`validation.ipynb`)
@@ -456,4 +591,64 @@ SCHEMA_MIN_LEN = 'minLength'  # Minimum string length
 SCHEMA_MAX_LEN = 'maxLength'  # Maximum string length
 SCHEMA_PATTERN = 'pattern'  # Regex pattern for strings
 SCHEMA_FORMAT = 'format'  # String format (email, uri, date, etc.)
+```
+
+### Universal Worker (`worker.ipynb`)
+
+> FastAPI server that runs inside isolated plugin environments
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.worker import (
+    EnhancedJSONEncoder,
+    parent_monitor,
+    create_app,
+    run_worker
+)
+```
+
+#### Functions
+
+``` python
+def parent_monitor(
+    ppid: int # Parent process ID to monitor
+) -> None
+    "Monitor parent process and terminate self if parent dies."
+```
+
+``` python
+def create_app(
+    module_name: str, # Python module path (e.g., "my_plugin.plugin")
+    class_name: str   # Plugin class name (e.g., "WhisperPlugin")
+) -> FastAPI: # Configured FastAPI application
+    "Create FastAPI app that hosts the specified plugin."
+```
+
+``` python
+def run_worker() -> None:
+    """CLI entry point for running the worker."""
+    parser = argparse.ArgumentParser(description="Universal Plugin Worker")
+    parser.add_argument("--module", required=True, help="Plugin module path")
+    parser.add_argument("--class", dest="class_name", required=True, help="Plugin class name")
+    parser.add_argument("--port", type=int, required=True, help="Port to listen on")
+    parser.add_argument("--ppid", type=int, required=False, help="Parent PID to monitor")
+    args = parser.parse_args()
+
+    # Start watchdog if parent PID provided
+    if args.ppid
+    "CLI entry point for running the worker."
+```
+
+#### Classes
+
+``` python
+class EnhancedJSONEncoder(JSONEncoder):
+    "JSON encoder that handles dataclasses and other common types."
+    
+    def default(
+            self,
+            o: Any # Object to encode
+        ) -> Any: # JSON-serializable representation
+        "Convert non-serializable objects to serializable form."
 ```
