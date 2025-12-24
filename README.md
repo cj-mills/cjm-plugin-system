@@ -18,15 +18,17 @@ pip install cjm_plugin_system
     │   ├── metadata.ipynb   # Data structures for plugin metadata
     │   ├── proxy.ipynb      # Bridge between Host application and isolated Worker processes
     │   └── worker.ipynb     # FastAPI server that runs inside isolated plugin environments
-    └── utils/ (1)
-        └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
+    ├── utils/ (1)
+    │   └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
+    └── cli.ipynb  # CLI tool for declarative plugin management
 
-Total: 6 notebooks across 2 directories
+Total: 7 notebooks across 2 directories
 
 ## Module Dependencies
 
 ``` mermaid
 graph LR
+    cli[cli<br/>cli]
     core_interface[core.interface<br/>Plugin Interface]
     core_manager[core.manager<br/>Plugin Manager]
     core_metadata[core.metadata<br/>Plugin Metadata]
@@ -35,8 +37,8 @@ graph LR
     utils_validation[utils.validation<br/>Configuration Validation]
 
     core_manager --> core_metadata
-    core_manager --> core_proxy
     core_manager --> core_interface
+    core_manager --> core_proxy
     core_proxy --> core_interface
 ```
 
@@ -44,11 +46,76 @@ graph LR
 
 ## CLI Reference
 
-No CLI commands found in this project.
+### `cjm-ctl` Command
+
+                                                                                                              
+     Usage: cjm-ctl [OPTIONS] COMMAND [ARGS]...                                                               
+                                                                                                              
+     CJM Plugin System CLI                                                                                    
+                                                                                                              
+    ╭─ Options ──────────────────────────────────────────────────────────────────────────────────────────────╮
+    │ --install-completion          Install completion for the current shell.                                │
+    │ --show-completion             Show completion for the current shell, to copy it or customize the       │
+    │                               installation.                                                            │
+    │ --help                        Show this message and exit.                                              │
+    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
+    │ install-all   Install and register all plugins defined in plugins.yaml.                                │
+    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+For detailed help on any command, use `cjm-ctl <command> --help`.
 
 ## Module Overview
 
 Detailed documentation for each module in the project:
+
+### cli (`cli.ipynb`)
+
+> CLI tool for declarative plugin management
+
+#### Import
+
+``` python
+from cjm_plugin_system.cli import (
+    app,
+    main,
+    run_cmd,
+    install_all
+)
+```
+
+#### Functions
+
+``` python
+def main() -> None
+    "CJM Plugin System CLI for managing isolated plugin environments."
+```
+
+``` python
+def run_cmd(
+    cmd: str,  # Shell command to execute
+    shell: bool = True,  # Whether to run through shell
+    check: bool = True  # Whether to raise on non-zero exit
+) -> None
+    "Run a shell command and stream output."
+```
+
+``` python
+def _generate_manifest(
+    env_name: str,  # Name of the Conda environment
+    package_name: str,  # Package source string (git URL or package name)
+    manifest_dir: Path  # Directory to write manifest JSON files
+) -> None
+    "Run introspection script inside the target env to generate manifest."
+```
+
+``` python
+def install_all(
+    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
+    force: bool = typer.Option(False, help="Force recreation of environments")
+) -> None
+    "Install and register all plugins defined in plugins.yaml."
+```
 
 ### Plugin Interface (`interface.ipynb`)
 

@@ -1,0 +1,17 @@
+plugins:
+  - name: whisper-local
+    env_name: test-whisper-auto
+    
+    # 1. Environment File (System Deps)
+    # Pull raw file from GitHub to get CUDA/ffmpeg deps
+    env_file: "https://raw.githubusercontent.com/cj-mills/cjm-transcription-plugin-whisper/main/environment.yml"
+    
+    # 2. The Plugin Package (Source Code)
+    # Git install syntax
+    package: "git+https://github.com/cj-mills/cjm-transcription-plugin-whisper.git"
+    
+    # 3. Interface Libraries
+    # These must be installed first so the plugin can import them during setup
+    interface_libs:
+      - "git+https://github.com/cj-mills/cjm-plugin-system.git"
+      - "git+https://github.com/cj-mills/cjm-transcription-plugin-system.git"
