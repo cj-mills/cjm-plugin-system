@@ -34,9 +34,9 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
+    core_manager --> core_metadata
     core_manager --> core_proxy
     core_manager --> core_interface
-    core_manager --> core_metadata
     core_proxy --> core_interface
 ```
 
@@ -533,7 +533,8 @@ from cjm_plugin_system.utils.validation import (
     validate_config,
     config_to_dict,
     dict_to_config,
-    extract_defaults
+    extract_defaults,
+    dataclass_to_jsonschema
 )
 ```
 
@@ -576,6 +577,20 @@ def extract_defaults(
     config_class:Type # Configuration dataclass type
 ) -> Dict[str, Any]: # Default values from the dataclass
     "Extract default values from a configuration dataclass type."
+```
+
+``` python
+def _python_type_to_json_type(
+    python_type:type # Python type annotation to convert
+) -> Dict[str, Any]: # JSON schema type definition
+    "Convert Python type to JSON schema type."
+```
+
+``` python
+def dataclass_to_jsonschema(
+    cls:type # Dataclass with field metadata
+) -> Dict[str, Any]: # JSON schema dictionary
+    "Convert a dataclass to a JSON schema for form generation."
 ```
 
 #### Variables

@@ -5,11 +5,11 @@
 # %% auto 0
 __all__ = ['T', 'SCHEMA_TITLE', 'SCHEMA_DESC', 'SCHEMA_MIN', 'SCHEMA_MAX', 'SCHEMA_ENUM', 'SCHEMA_MIN_LEN', 'SCHEMA_MAX_LEN',
            'SCHEMA_PATTERN', 'SCHEMA_FORMAT', 'validate_field_value', 'validate_config', 'config_to_dict',
-           'dict_to_config', 'extract_defaults']
+           'dict_to_config', 'extract_defaults', 'dataclass_to_jsonschema']
 
 # %% ../../nbs/utils/validation.ipynb 3
 from dataclasses import fields, is_dataclass, asdict, MISSING
-from typing import Dict, Any, Tuple, Optional, Type, TypeVar
+from typing import Dict, Any, Tuple, Optional, Type, TypeVar, get_type_hints, get_origin, get_args, Union
 
 T = TypeVar('T')
 
@@ -135,3 +135,88 @@ def extract_defaults(
             defaults[f.name] = f.default_factory()
     
     return defaults
+
+# %% ../../nbs/utils/validation.ipynb 15
+def _python_type_to_json_type(
+    python_type:type # Python type annotation to convert
+) -> Dict[str, Any]: # JSON schema type definition
+    """Convert Python type to JSON schema type."""
+    origin = get_origin(python_type)
+    args = get_args(python_type)
+    
+    # Handle List[X] -> array with items
+    if origin is list:
+        item_type = args[0] if args else str
+        return {
+            "type": "array",
+            "items": _python_type_to_json_type(item_type)
+        }
+    
+    # Handle Optional[X] / Union[X, None] -> nullable type
+    if origin is Union:
+        non_none_types = [a for a in args if a is not type(None)]
+        if len(non_none_types) == 1:
+            # This is Optional[X]
+            base_schema = _python_type_to_json_type(non_none_types[0])
+            base_schema["type"] = [base_schema["type"], "null"]
+            return base_schema
+        # Multiple non-None types - just use first one
+        if non_none_types:
+            return _python_type_to_json_type(non_none_types[0])
+        return {"type": "null"}
+    
+    # Handle basic types
+    type_mapping = {
+        str: {"type": "string"},
+        int: {"type": "integer"},
+        float: {"type": "number"},
+        bool: {"type": "boolean"},
+    }
+    
+    return type_mapping.get(python_type, {"type": "string"})
+
+# %% ../../nbs/utils/validation.ipynb 16
+def dataclass_to_jsonschema(
+    cls:type # Dataclass with field metadata
+) -> Dict[str, Any]: # JSON schema dictionary
+    """Convert a dataclass to a JSON schema for form generation."""
+    if not hasattr(cls, "__dataclass_fields__"):
+        raise TypeError(f"{cls} is not a dataclass")
+    
+    # Get class-level schema metadata
+    schema = {
+        "name": getattr(cls, "__schema_name__", cls.__name__),
+        "title": getattr(cls, "__schema_title__", cls.__name__),
+        "description": getattr(cls, "__schema_description__", cls.__doc__ or ""),
+        "type": "object",
+        "properties": {}
+    }
+    
+    # Get type hints for the class
+    try:
+        type_hints = get_type_hints(cls)
+    except Exception:
+        type_hints = {}
+    
+    # Process each field
+    for f in fields(cls):
+        python_type = type_hints.get(f.name, str)
+        prop_schema = _python_type_to_json_type(python_type)
+        
+        # Add metadata from field
+        metadata = f.metadata or {}
+        for key in [SCHEMA_TITLE, SCHEMA_DESC, SCHEMA_MIN, SCHEMA_MAX, 
+                    SCHEMA_ENUM, SCHEMA_MIN_LEN, SCHEMA_MAX_LEN, 
+                    SCHEMA_PATTERN, SCHEMA_FORMAT]:
+            if key in metadata:
+                prop_schema[key] = metadata[key]
+        
+        # Add default value
+        if f.default is not MISSING:
+            prop_schema["default"] = f.default
+        elif f.default_factory is not MISSING:
+            prop_schema["default"] = f.default_factory()
+        
+        schema["properties"][f.name] = prop_schema
+    
+    return schema
