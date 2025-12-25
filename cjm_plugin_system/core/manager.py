@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Type
 from .interface import PluginInterface
 from .metadata import PluginMeta
 from .proxy import RemotePluginProxy
+from .scheduling import ResourceScheduler, PermissiveScheduler
 
 # %% ../../nbs/core/manager.ipynb 5
 class PluginManager:
@@ -22,8 +23,9 @@ class PluginManager:
 
     def __init__(
         self,
-        plugin_interface: Type[PluginInterface] = PluginInterface, # Base interface for type checking
-        search_paths: Optional[List[Path]] = None # Custom manifest search paths
+        plugin_interface: Type[PluginInterface] = PluginInterface,  # Base interface for type checking
+        search_paths: Optional[List[Path]] = None,  # Custom manifest search paths
+        scheduler: Optional[ResourceScheduler] = None  # Resource allocation policy
     ):
         """Initialize the plugin manager."""
         self.plugin_interface = plugin_interface
@@ -31,11 +33,42 @@ class PluginManager:
             Path.cwd() / ".cjm" / "plugins",   # Local (high priority)
             Path.home() / ".cjm" / "plugins"   # Global (low priority)
         ]
+        self.scheduler = scheduler or PermissiveScheduler()
+        self.system_monitor: Optional[PluginInterface] = None
         self.discovered: List[PluginMeta] = []
         self.plugins: Dict[str, PluginMeta] = {}
         self.logger = logging.getLogger(f"{__name__}.{type(self).__name__}")
 
-    def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
+    def register_system_monitor(
+        self,
+        plugin_name: str  # Name of the system monitor plugin
+    ) -> None:
+        """Bind a loaded plugin to act as the hardware system monitor."""
+        self.system_monitor = self.get_plugin(plugin_name)
+        if self.system_monitor:
+            self.logger.info(f"Registered system monitor: {plugin_name}")
+        else:
+            self.logger.warning(f"System monitor plugin not found: {plugin_name}")
+
+    def _get_global_stats(self) -> Dict[str, Any]:  # Current system telemetry
+        """Fetch real-time stats from the system monitor plugin (sync)."""
+        if self.system_monitor:
+            try:
+                return self.system_monitor.execute("get_system_status")
+            except Exception as e:
+                self.logger.warning(f"Failed to fetch system stats: {e}")
+        return {}
+
+    async def _get_global_stats_async(self) -> Dict[str, Any]:  # Current system telemetry
+        """Fetch real-time stats from the system monitor plugin (async)."""
+        if self.system_monitor:
+            try:
+                return await self.system_monitor.execute_async("get_system_status")
+            except Exception as e:
+                self.logger.warning(f"Failed to fetch system stats: {e}")
+        return {}
+
+    def discover_manifests(self) -> List[PluginMeta]:  # List of discovered plugin metadata
         """Discover plugins via JSON manifests in search paths."""
         self.discovered = []
         seen_plugins = set()
@@ -72,9 +105,9 @@ class PluginManager:
 
     def load_plugin(
         self,
-        plugin_meta: PluginMeta, # Plugin metadata (with manifest attached)
-        config: Optional[Dict[str, Any]] = None # Initial configuration
-    ) -> bool: # True if successfully loaded
+        plugin_meta: PluginMeta,  # Plugin metadata (with manifest attached)
+        config: Optional[Dict[str, Any]] = None  # Initial configuration
+    ) -> bool:  # True if successfully loaded
         """Load a plugin by spawning a Worker subprocess."""
         if not hasattr(plugin_meta, 'manifest'):
             self.logger.error(f"Plugin {plugin_meta.name} has no manifest data")
@@ -99,8 +132,8 @@ class PluginManager:
 
     def load_all(
         self,
-        configs: Optional[Dict[str, Dict[str, Any]]] = None # Plugin name -> config mapping
-    ) -> Dict[str, bool]: # Plugin name -> success mapping
+        configs: Optional[Dict[str, Dict[str, Any]]] = None  # Plugin name -> config mapping
+    ) -> Dict[str, bool]:  # Plugin name -> success mapping
         """Discover and load all available plugins."""
         configs = configs or {}
         results = {}
@@ -114,8 +147,8 @@ class PluginManager:
 
     def unload_plugin(
         self,
-        plugin_name: str # Name of the plugin to unload
-    ) -> bool: # True if successfully unloaded
+        plugin_name: str  # Name of the plugin to unload
+    ) -> bool:  # True if successfully unloaded
         """Unload a plugin and terminate its Worker process."""
         if plugin_name not in self.plugins:
             self.logger.error(f"Plugin {plugin_name} not found")
@@ -141,23 +174,23 @@ class PluginManager:
 
     def get_plugin(
         self,
-        plugin_name: str # Name of the plugin
-    ) -> Optional[PluginInterface]: # Plugin proxy instance or None
+        plugin_name: str  # Name of the plugin
+    ) -> Optional[PluginInterface]:  # Plugin proxy instance or None
         """Get a loaded plugin instance by name."""
         if plugin_name in self.plugins:
             return self.plugins[plugin_name].instance
         return None
 
-    def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
+    def list_plugins(self) -> List[PluginMeta]:  # List of loaded plugin metadata
         """List all loaded plugins."""
         return list(self.plugins.values())
 
     def execute_plugin(
         self,
-        plugin_name: str, # Name of the plugin
+        plugin_name: str,  # Name of the plugin
         *args,
         **kwargs
-    ) -> Any: # Plugin result
+    ) -> Any:  # Plugin result
         """Execute a plugin's main functionality (sync)."""
         plugin = self.get_plugin(plugin_name)
         if not plugin:
@@ -166,14 +199,22 @@ class PluginManager:
         if not self.plugins[plugin_name].enabled:
             raise ValueError(f"Plugin {plugin_name} is disabled")
 
-        return plugin.execute(*args, **kwargs)
+        # Scheduling check (pass method reference for polling support)
+        if not self.scheduler.allocate(self.plugins[plugin_name], self._get_global_stats):
+            raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name}")
+
+        self.scheduler.on_execution_start(plugin_name)
+        try:
+            return plugin.execute(*args, **kwargs)
+        finally:
+            self.scheduler.on_execution_finish(plugin_name)
 
     async def execute_plugin_async(
         self,
-        plugin_name: str, # Name of the plugin
+        plugin_name: str,  # Name of the plugin
         *args,
         **kwargs
-    ) -> Any: # Plugin result
+    ) -> Any:  # Plugin result
         """Execute a plugin's main functionality (async)."""
         plugin = self.get_plugin(plugin_name)
         if not plugin:
@@ -182,12 +223,20 @@ class PluginManager:
         if not self.plugins[plugin_name].enabled:
             raise ValueError(f"Plugin {plugin_name} is disabled")
 
-        return await plugin.execute_async(*args, **kwargs)
+        # Async scheduling check (pass async method for non-blocking polling)
+        if not await self.scheduler.allocate_async(self.plugins[plugin_name], self._get_global_stats_async):
+            raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name}")
+
+        self.scheduler.on_execution_start(plugin_name)
+        try:
+            return await plugin.execute_async(*args, **kwargs)
+        finally:
+            self.scheduler.on_execution_finish(plugin_name)
 
     def enable_plugin(
         self,
-        plugin_name: str # Name of the plugin
-    ) -> bool: # True if plugin was enabled
+        plugin_name: str  # Name of the plugin
+    ) -> bool:  # True if plugin was enabled
         """Enable a plugin."""
         if plugin_name in self.plugins:
             self.plugins[plugin_name].enabled = True
@@ -196,8 +245,8 @@ class PluginManager:
 
     def disable_plugin(
         self,
-        plugin_name: str # Name of the plugin
-    ) -> bool: # True if plugin was disabled
+        plugin_name: str  # Name of the plugin
+    ) -> bool:  # True if plugin was disabled
         """Disable a plugin without unloading it."""
         if plugin_name in self.plugins:
             self.plugins[plugin_name].enabled = False
@@ -301,10 +350,10 @@ from typing import AsyncGenerator
 
 async def execute_plugin_stream(
     self,
-    plugin_name: str, # Name of the plugin
+    plugin_name: str,  # Name of the plugin
     *args,
     **kwargs
-) -> AsyncGenerator[Any, None]: # Async generator yielding results
+) -> AsyncGenerator[Any, None]:  # Async generator yielding results
     """Execute a plugin with streaming response."""
     plugin = self.get_plugin(plugin_name)
     if not plugin:
@@ -313,9 +362,16 @@ async def execute_plugin_stream(
     if not self.plugins[plugin_name].enabled:
         raise ValueError(f"Plugin {plugin_name} is disabled")
 
-    # Forward to proxy's streaming method
-    async for chunk in plugin.execute_stream(*args, **kwargs):
-        yield chunk
+    # Async scheduling check (pass async method for non-blocking polling)
+    if not await self.scheduler.allocate_async(self.plugins[plugin_name], self._get_global_stats_async):
+        raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name}")
+
+    self.scheduler.on_execution_start(plugin_name)
+    try:
+        async for chunk in plugin.execute_stream(*args, **kwargs):
+            yield chunk
+    finally:
+        self.scheduler.on_execution_finish(plugin_name)
 
 # Add to PluginManager
 PluginManager.execute_plugin_stream = execute_plugin_stream

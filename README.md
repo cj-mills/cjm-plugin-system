@@ -12,17 +12,18 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (5)
-    │   ├── interface.ipynb  # Abstract base class defining the generic plugin interface
-    │   ├── manager.ipynb    # Plugin discovery, loading, and lifecycle management system
-    │   ├── metadata.ipynb   # Data structures for plugin metadata
-    │   ├── proxy.ipynb      # Bridge between Host application and isolated Worker processes
-    │   └── worker.ipynb     # FastAPI server that runs inside isolated plugin environments
+    ├── core/ (6)
+    │   ├── interface.ipynb   # Abstract base class defining the generic plugin interface
+    │   ├── manager.ipynb     # Plugin discovery, loading, and lifecycle management system
+    │   ├── metadata.ipynb    # Data structures for plugin metadata
+    │   ├── proxy.ipynb       # Bridge between Host application and isolated Worker processes
+    │   ├── scheduling.ipynb  # Resource scheduling policies for plugin execution
+    │   └── worker.ipynb      # FastAPI server that runs inside isolated plugin environments
     ├── utils/ (1)
     │   └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
     └── cli.ipynb  # CLI tool for declarative plugin management
 
-Total: 7 notebooks across 2 directories
+Total: 8 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -33,16 +34,19 @@ graph LR
     core_manager[core.manager<br/>Plugin Manager]
     core_metadata[core.metadata<br/>Plugin Metadata]
     core_proxy[core.proxy<br/>Remote Plugin Proxy]
+    core_scheduling[core.scheduling<br/>Scheduling]
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
+    core_manager --> core_scheduling
     core_manager --> core_metadata
-    core_manager --> core_interface
     core_manager --> core_proxy
+    core_manager --> core_interface
     core_proxy --> core_interface
+    core_scheduling --> core_metadata
 ```
 
-*4 cross-module dependencies detected*
+*6 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -279,10 +283,10 @@ def get_plugin_stats(
 ``` python
 async def execute_plugin_stream(
     self,
-    plugin_name: str, # Name of the plugin
+    plugin_name: str,  # Name of the plugin
     *args,
     **kwargs
-) -> AsyncGenerator[Any, None]: # Async generator yielding results
+) -> AsyncGenerator[Any, None]:  # Async generator yielding results
     "Execute a plugin with streaming response."
 ```
 
@@ -292,19 +296,27 @@ async def execute_plugin_stream(
 class PluginManager:
     def __init__(
         self,
-        plugin_interface: Type[PluginInterface] = PluginInterface, # Base interface for type checking
-        search_paths: Optional[List[Path]] = None # Custom manifest search paths
+        plugin_interface: Type[PluginInterface] = PluginInterface,  # Base interface for type checking
+        search_paths: Optional[List[Path]] = None,  # Custom manifest search paths
+        scheduler: Optional[ResourceScheduler] = None  # Resource allocation policy
     )
     "Manages plugin discovery, loading, and lifecycle via process isolation."
     
     def __init__(
             self,
-            plugin_interface: Type[PluginInterface] = PluginInterface, # Base interface for type checking
-            search_paths: Optional[List[Path]] = None # Custom manifest search paths
+            plugin_interface: Type[PluginInterface] = PluginInterface,  # Base interface for type checking
+            search_paths: Optional[List[Path]] = None,  # Custom manifest search paths
+            scheduler: Optional[ResourceScheduler] = None  # Resource allocation policy
         )
         "Initialize the plugin manager."
     
-    def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
+    def register_system_monitor(
+            self,
+            plugin_name: str  # Name of the system monitor plugin
+        ) -> None
+        "Bind a loaded plugin to act as the hardware system monitor."
+    
+    def discover_manifests(self) -> List[PluginMeta]:  # List of discovered plugin metadata
             """Discover plugins via JSON manifests in search paths."""
             self.discovered = []
             seen_plugins = set()
@@ -314,21 +326,21 @@ class PluginManager:
     
     def load_plugin(
             self,
-            plugin_meta: PluginMeta, # Plugin metadata (with manifest attached)
-            config: Optional[Dict[str, Any]] = None # Initial configuration
-        ) -> bool: # True if successfully loaded
+            plugin_meta: PluginMeta,  # Plugin metadata (with manifest attached)
+            config: Optional[Dict[str, Any]] = None  # Initial configuration
+        ) -> bool:  # True if successfully loaded
         "Load a plugin by spawning a Worker subprocess."
     
     def load_all(
             self,
-            configs: Optional[Dict[str, Dict[str, Any]]] = None # Plugin name -> config mapping
-        ) -> Dict[str, bool]: # Plugin name -> success mapping
+            configs: Optional[Dict[str, Dict[str, Any]]] = None  # Plugin name -> config mapping
+        ) -> Dict[str, bool]:  # Plugin name -> success mapping
         "Discover and load all available plugins."
     
     def unload_plugin(
             self,
-            plugin_name: str # Name of the plugin to unload
-        ) -> bool: # True if successfully unloaded
+            plugin_name: str  # Name of the plugin to unload
+        ) -> bool:  # True if successfully unloaded
         "Unload a plugin and terminate its Worker process."
     
     def unload_all(self) -> None:
@@ -338,48 +350,48 @@ class PluginManager:
     
     def get_plugin(
             self,
-            plugin_name: str # Name of the plugin
-        ) -> Optional[PluginInterface]: # Plugin proxy instance or None
+            plugin_name: str  # Name of the plugin
+        ) -> Optional[PluginInterface]:  # Plugin proxy instance or None
         "Get a loaded plugin instance by name."
     
-    def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
+    def list_plugins(self) -> List[PluginMeta]:  # List of loaded plugin metadata
             """List all loaded plugins."""
             return list(self.plugins.values())
     
         def execute_plugin(
             self,
-            plugin_name: str, # Name of the plugin
+            plugin_name: str,  # Name of the plugin
             *args,
             **kwargs
-        ) -> Any: # Plugin result
+        ) -> Any:  # Plugin result
         "List all loaded plugins."
     
     def execute_plugin(
             self,
-            plugin_name: str, # Name of the plugin
+            plugin_name: str,  # Name of the plugin
             *args,
             **kwargs
-        ) -> Any: # Plugin result
+        ) -> Any:  # Plugin result
         "Execute a plugin's main functionality (sync)."
     
     async def execute_plugin_async(
             self,
-            plugin_name: str, # Name of the plugin
+            plugin_name: str,  # Name of the plugin
             *args,
             **kwargs
-        ) -> Any: # Plugin result
+        ) -> Any:  # Plugin result
         "Execute a plugin's main functionality (async)."
     
     def enable_plugin(
             self,
-            plugin_name: str # Name of the plugin
-        ) -> bool: # True if plugin was enabled
+            plugin_name: str  # Name of the plugin
+        ) -> bool:  # True if plugin was enabled
         "Enable a plugin."
     
     def disable_plugin(
             self,
-            plugin_name: str # Name of the plugin
-        ) -> bool: # True if plugin was disabled
+            plugin_name: str  # Name of the plugin
+        ) -> bool:  # True if plugin was disabled
         "Disable a plugin without unloading it."
 ```
 
@@ -576,6 +588,145 @@ class RemotePluginProxy:
             # Send cleanup request to worker
             try
         "Clean up plugin resources and terminate worker process."
+```
+
+### Scheduling (`scheduling.ipynb`)
+
+> Resource scheduling policies for plugin execution
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.scheduling import (
+    ResourceScheduler,
+    PermissiveScheduler,
+    SafetyScheduler,
+    QueueScheduler
+)
+```
+
+#### Classes
+
+``` python
+class ResourceScheduler(ABC):
+    "Abstract base class for resource allocation policies."
+    
+    def allocate(
+            self,
+            plugin_meta: PluginMeta,  # Metadata of the plugin requesting resources
+            stats_provider: Callable[[], Dict[str, Any]]  # Function that returns fresh stats
+        ) -> bool:  # True if execution is allowed
+        "Decide if a plugin can start based on its requirements and system state."
+    
+    async def allocate_async(
+            self,
+            plugin_meta: PluginMeta,  # Metadata of the plugin requesting resources
+            stats_provider: Callable[[], Awaitable[Dict[str, Any]]]  # Async function returning stats
+        ) -> bool:  # True if execution is allowed
+        "Async allocation decision. Default delegates to sync allocate after fetching stats once."
+    
+    def on_execution_start(
+            self,
+            plugin_name: str  # Name of the plugin starting execution
+        ) -> None
+        "Notify scheduler that a task started (to reserve resources)."
+    
+    def on_execution_finish(
+            self,
+            plugin_name: str  # Name of the plugin finishing execution
+        ) -> None
+        "Notify scheduler that a task finished (to release resources)."
+```
+
+``` python
+class PermissiveScheduler(ResourceScheduler):
+    "Scheduler that allows all executions (Default / Dev Mode)."
+    
+    def allocate(
+            self,
+            plugin_meta: PluginMeta,  # Metadata of the plugin requesting resources
+            stats_provider: Callable[[], Dict[str, Any]]  # Stats provider (ignored)
+        ) -> bool:  # Always returns True
+        "Allow all plugin executions without checking resources."
+    
+    def on_execution_start(
+            self,
+            plugin_name: str  # Name of the plugin starting execution
+        ) -> None
+        "No-op for permissive scheduler."
+    
+    def on_execution_finish(
+            self,
+            plugin_name: str  # Name of the plugin finishing execution
+        ) -> None
+        "No-op for permissive scheduler."
+```
+
+``` python
+class SafetyScheduler(ResourceScheduler):
+    "Scheduler that prevents execution if resources are insufficient."
+    
+    def allocate(
+            self,
+            plugin_meta: PluginMeta,  # Metadata of the plugin requesting resources
+            stats_provider: Callable[[], Dict[str, Any]]  # Function returning current stats
+        ) -> bool:  # True if resources are available
+        "Check resource requirements against system state."
+    
+    def on_execution_start(
+            self,
+            plugin_name: str  # Name of the plugin starting execution
+        ) -> None
+        "Called when execution starts (for future resource reservation)."
+    
+    def on_execution_finish(
+            self,
+            plugin_name: str  # Name of the plugin finishing execution
+        ) -> None
+        "Called when execution finishes (for future resource release)."
+```
+
+``` python
+class QueueScheduler:
+    def __init__(
+        self,
+        timeout: float = 300.0,  # Max seconds to wait for resources
+        poll_interval: float = 2.0  # Seconds between resource checks
+    )
+    "Scheduler that waits for resources to become available."
+    
+    def __init__(
+            self,
+            timeout: float = 300.0,  # Max seconds to wait for resources
+            poll_interval: float = 2.0  # Seconds between resource checks
+        )
+        "Initialize queue scheduler with timeout and polling settings."
+    
+    def allocate(
+            self,
+            plugin_meta: PluginMeta,  # Metadata of the plugin requesting resources
+            stats_provider: Callable[[], Dict[str, Any]]  # Function returning current stats
+        ) -> bool:  # True if resources become available before timeout
+        "Wait for resources using blocking sleep."
+    
+    async def allocate_async(
+            self,
+            plugin_meta: PluginMeta,  # Metadata of the plugin requesting resources
+            stats_provider: Callable[[], Awaitable[Dict[str, Any]]]  # Async stats function
+        ) -> bool:  # True if resources become available before timeout
+        "Wait for resources using non-blocking async sleep."
+    
+    def on_execution_start(
+            self,
+            plugin_name: str  # Name of the plugin starting execution
+        ) -> None
+        "Called when execution starts."
+    
+    def on_execution_finish(
+            self,
+            plugin_name: str  # Name of the plugin finishing execution
+        ) -> None
+        "Called when execution finishes."
 ```
 
 ### Configuration Validation (`validation.ipynb`)
