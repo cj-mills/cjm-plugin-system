@@ -52,6 +52,20 @@ class RemotePluginProxy(PluginInterface):
     def _start_process(self) -> None:
         """Launch the worker subprocess."""
         python_path = self.manifest['python_path']
+
+        # 1. Setup Log Directory
+        log_dir = Path.home() / ".cjm" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 2. Open Log File (Append mode)
+        # We keep the file handle open as long as the process runs
+        self.log_path = log_dir / f"{self.name}.log"
+        self.log_file = open(self.log_path, "a") # Close this in cleanup()
+        
+        # Write a header so we know a new session started
+        self.log_file.write(f"\n--- Starting {self.name} at {time.ctime()} ---\n")
+        self.log_file.flush()
+        
         cmd = [
             python_path,
             "-m", "cjm_plugin_system.core.worker",
@@ -66,10 +80,13 @@ class RemotePluginProxy(PluginInterface):
         env.update(self.manifest.get('env_vars', {}))
 
         print(f"[{self.name}] Starting worker on port {self.port}...")
+        # 3. Redirect Output to File
+        # We merge stderr into stdout for a single timeline
+        print(f"[{self.name}] Logs: {self.log_path}")
         self.process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            stdout=self.log_file,
+            stderr=subprocess.STDOUT, # Merge stderr into stdout
             start_new_session=True,
             env=env
         )
@@ -151,6 +168,10 @@ class RemotePluginProxy(PluginInterface):
             except subprocess.TimeoutExpired:
                 self.process.kill()
             self.process = None
+
+        # Close file handle
+        if hasattr(self, 'log_file') and self.log_file:
+            self.log_file.close()
 
 # %% ../../nbs/core/proxy.ipynb 8
 def _maybe_serialize_input(

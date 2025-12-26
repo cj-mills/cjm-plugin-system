@@ -253,6 +253,25 @@ class PluginManager:
             return True
         return False
 
+    def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str:
+            """Read the last N lines of the plugin's log file."""
+            # Find the log path based on convention
+            log_path = Path.home() / ".cjm" / "logs" / f"{plugin_name}.log"
+            
+            if not log_path.exists():
+                return "No logs found."
+                
+            try:
+                # Efficient tail implementation
+                # For small files, reading all is fine. For large, use deque.
+                from collections import deque
+                with open(log_path, 'r') as f:
+                    # Read last N lines
+                    tail = deque(f, maxlen=lines)
+                    return "".join(tail)
+            except Exception as e:
+                return f"Error reading logs: {e}"
+
 # %% ../../nbs/core/manager.ipynb 8
 def get_plugin_config(
     self,

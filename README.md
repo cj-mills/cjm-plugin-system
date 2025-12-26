@@ -38,10 +38,10 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_manager --> core_scheduling
-    core_manager --> core_metadata
     core_manager --> core_proxy
+    core_manager --> core_metadata
     core_manager --> core_interface
+    core_manager --> core_scheduling
     core_proxy --> core_interface
     core_scheduling --> core_metadata
 ```
@@ -393,6 +393,14 @@ class PluginManager:
             plugin_name: str  # Name of the plugin
         ) -> bool:  # True if plugin was disabled
         "Disable a plugin without unloading it."
+    
+    def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str:
+                """Read the last N lines of the plugin's log file."""
+                # Find the log path based on convention
+                log_path = Path.home() / ".cjm" / "logs" / f"{plugin_name}.log"
+                
+                if not log_path.exists()
+        "Read the last N lines of the plugin's log file."
 ```
 
 ### Plugin Metadata (`metadata.ipynb`)

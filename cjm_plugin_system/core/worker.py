@@ -22,6 +22,13 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    force=True
+)
+
 # %% ../../nbs/core/worker.ipynb 6
 class EnhancedJSONEncoder(json.JSONEncoder):
     """JSON encoder that handles dataclasses and other common types."""
