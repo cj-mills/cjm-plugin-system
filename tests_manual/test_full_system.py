@@ -14,15 +14,19 @@ async def main():
     print(f"Discovered: {[p.name for p in manager.discovered]}")
     
     # 3. Load & Register System Monitor
-    manager.load_plugin(manager.discovered[0], {"model": "large-v3", "device": "cuda"})
+    whisper_plugin_name = 'cjm-transcription-plugin-whisper'
+    whisper_plugin_meta = next((item for item in manager.discovered if item.name == whisper_plugin_name), None)
+    manager.load_plugin(whisper_plugin_meta, {"model": "large-v3", "device": "cuda"})
 
     # This spins up the lightweight 'test-sys-mon' environment
     print("\n--- Starting System Monitor ---")
-    if not manager.load_plugin(manager.discovered[1]):
+    sysmon_plugin_name = 'cjm-system-monitor-nvidia'
+    sysmon_plugin_meta = next((item for item in manager.discovered if item.name == sysmon_plugin_name), None)
+    if not manager.load_plugin(sysmon_plugin_meta):
         print("❌ Failed to load monitor")
         return
         
-    manager.register_system_monitor("cjm-system-monitor-nvidia")
+    manager.register_system_monitor(sysmon_plugin_name)
     
     # 4. Verify we can see Real Hardware Stats
     stats = await manager._get_global_stats_async()
@@ -31,7 +35,7 @@ async def main():
     # 5. Load Whisper
     # This spins up the heavy 'test-whisper-auto' environment
     print("\n--- Starting Whisper ---")
-    whisper_meta = manager.plugins['cjm-transcription-plugin-whisper']
+    whisper_meta = manager.plugins[whisper_plugin_name]
     print(whisper_meta)
     
     # 6. Execute with Safety Check
