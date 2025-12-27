@@ -73,6 +73,9 @@ async def run_comparison():
     # We pass 'job_id' in kwargs. The updated _save_to_db will use it.
     results = await asyncio.gather(
         manager.execute_plugin_async(plugin_a_name, audio=audio_file, job_id=job_id),
+    )
+
+    results = await asyncio.gather(
         manager.execute_plugin_async(plugin_b_name, audio=audio_file, job_id=job_id),
         # manager.execute_plugin_async(plugin_c_name, audio=audio_file_2, job_id=job_id)
     )
