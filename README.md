@@ -38,10 +38,10 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_manager --> core_proxy
+    core_manager --> core_scheduling
     core_manager --> core_metadata
     core_manager --> core_interface
-    core_manager --> core_scheduling
+    core_manager --> core_proxy
     core_proxy --> core_interface
     core_scheduling --> core_metadata
 ```
@@ -358,12 +358,7 @@ class PluginManager:
             """List all loaded plugins."""
             return list(self.plugins.values())
     
-        def execute_plugin(
-            self,
-            plugin_name: str,  # Name of the plugin
-            *args,
-            **kwargs
-        ) -> Any:  # Plugin result
+        def _evict_for_resources(self, needed_meta: PluginMeta) -> bool
         "List all loaded plugins."
     
     def execute_plugin(
@@ -429,6 +424,7 @@ class PluginMeta:
     package_name: str = ''  # Python package name containing the plugin
     instance: Optional[Any]  # Plugin instance (PluginInterface subclass)
     enabled: bool = True  # Whether the plugin is enabled
+    last_executed: float = 0.0  # Unix timestamp
 ```
 
 ### Remote Plugin Proxy (`proxy.ipynb`)

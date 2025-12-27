@@ -20,3 +20,4 @@ class PluginMeta:
     package_name:str="" # Python package name containing the plugin
     instance:Optional[Any]=None # Plugin instance (PluginInterface subclass)
     enabled:bool=True # Whether the plugin is enabled
+    last_executed: float = 0.0 # Unix timestamp

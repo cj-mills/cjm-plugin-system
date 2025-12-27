@@ -10,6 +10,7 @@ __all__ = ['PluginManager', 'get_plugin_config', 'get_plugin_config_schema', 'ge
 import json
 import logging
 from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Type
 
 from .interface import PluginInterface
@@ -185,6 +186,44 @@ class PluginManager:
         """List all loaded plugins."""
         return list(self.plugins.values())
 
+    def _evict_for_resources(self, needed_meta: PluginMeta) -> bool:
+        """
+        Attempt to free resources by unloading/releasing idle plugins.
+        Strategy: Least Recently Used (LRU).
+        """
+        self.logger.info(f"Attempting eviction to make room for {needed_meta.name}...")
+        
+        # 1. Identify Candidates: Running plugins that ARE NOT the one we need
+        candidates = [
+            meta for name, meta in self.plugins.items()
+            if meta.instance 
+            and name != needed_meta.name
+            and meta.manifest.get('resources', {}).get('requires_gpu', False) # Only evict GPU users
+        ]
+        
+        # 2. Sort by LRU (Oldest timestamp first)
+        candidates.sort(key=lambda x: x.last_executed)
+        
+        # 3. Evict one by one until we have space
+        for candidate in candidates:
+            self.logger.info(f"Evicting idle plugin: {candidate.name} (Last used: {candidate.last_executed})")
+            
+            # Prefer Soft Release if available, else Hard Unload
+            if hasattr(candidate.instance, 'release'):
+                candidate.instance.release()
+            else:
+                self.reload_plugin(candidate.name)
+            
+            # Wait a moment for VRAM to clear
+            time.sleep(0.5) 
+            
+            # Re-check scheduler immediately
+            # If allocate returns True now, we stop evicting
+            if self.scheduler.allocate(needed_meta, self._get_global_stats):
+                return True
+                
+        return False
+
     def execute_plugin(
         self,
         plugin_name: str,  # Name of the plugin
@@ -199,9 +238,23 @@ class PluginManager:
         if not self.plugins[plugin_name].enabled:
             raise ValueError(f"Plugin {plugin_name} is disabled")
 
+        # Update Timestamp (Mark as active)
+        plugin_meta = self.plugins[plugin_name]
+        plugin_meta.last_executed = time.time()
+
+        # Allocation Loop
+        stats_provider = self._get_global_stats
+
         # Scheduling check (pass method reference for polling support)
-        if not self.scheduler.allocate(self.plugins[plugin_name], self._get_global_stats):
-            raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name}")
+        if not self.scheduler.allocate(plugin_meta, stats_provider):
+            # Trigger Eviction if blocked
+            self.logger.warning(f"Resources busy for {plugin_name}. Triggering eviction protocol.")
+            
+            if self._evict_for_resources(plugin_meta):
+                self.logger.info("Eviction successful. Resources acquired.")
+            else:
+                # If eviction failed (or QueueScheduler timed out), raise error
+                raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name} (Eviction failed)")
 
         self.scheduler.on_execution_start(plugin_name)
         try:
@@ -223,9 +276,23 @@ class PluginManager:
         if not self.plugins[plugin_name].enabled:
             raise ValueError(f"Plugin {plugin_name} is disabled")
 
+        # Update Timestamp (Mark as active)
+        plugin_meta = self.plugins[plugin_name]
+        plugin_meta.last_executed = time.time()
+
+        # Allocation Loop
+        stats_provider = self._get_global_stats
+
         # Async scheduling check (pass async method for non-blocking polling)
         if not await self.scheduler.allocate_async(self.plugins[plugin_name], self._get_global_stats_async):
-            raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name}")
+            # Trigger Eviction if blocked
+            self.logger.warning(f"Resources busy for {plugin_name}. Triggering eviction protocol.")
+            
+            if self._evict_for_resources(plugin_meta):
+                self.logger.info("Eviction successful. Resources acquired.")
+            else:
+                # If eviction failed (or QueueScheduler timed out), raise error
+                raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name} (Eviction failed)")
 
         self.scheduler.on_execution_start(plugin_name)
         try:
