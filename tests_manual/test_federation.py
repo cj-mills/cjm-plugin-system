@@ -10,12 +10,14 @@ from pathlib import Path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from cjm_plugin_system.core.manager import PluginManager
+from cjm_plugin_system.core.scheduling import QueueScheduler, SafetyScheduler
 
 async def run_comparison():
     print("=== FEDERATION DEMO: MODEL ARENA ===")
     
     # 1. Setup Manager
-    manager = PluginManager()
+    manager = PluginManager(scheduler=SafetyScheduler())
+    # manager = PluginManager(scheduler=QueueScheduler())
     manager.discover_manifests()
 
     # This spins up the lightweight 'test-sys-mon' environment
@@ -34,14 +36,21 @@ async def run_comparison():
     # 2. Identify our Contenders
     # Replace these names with your actual installed plugins
     plugin_a_name = "cjm-transcription-plugin-whisper"
-    plugin_b_name = "cjm-transcription-plugin-voxtral-hf" # Or your second plugin
+    # plugin_a_name = "cjm-transcription-plugin-gemini"
+    plugin_b_name = "cjm-transcription-plugin-voxtral-hf"
+    # plugin_c_name = "cjm-transcription-plugin-whisper"
+    # plugin_b_name = "cjm-transcription-plugin-gemini"
+    # plugin_b_name = "cjm-transcription-plugin-voxtral-vllm"
 
     plugin_a_meta = next((item for item in manager.discovered if item.name == plugin_a_name), None)
     manager.load_plugin(plugin_a_meta, {"model": "large-v3", "device": "cuda"})
+    # manager.load_plugin(plugin_a_meta, {"asdf":"asdf"})
 
     plugin_b_meta = next((item for item in manager.discovered if item.name == plugin_b_name), None)
     manager.load_plugin(plugin_b_meta, {"device": "cuda"})
 
+    # plugin_c_meta = next((item for item in manager.discovered if item.name == plugin_c_name), None)
+    # manager.load_plugin(plugin_c_meta, {"model": "large", "device": "cuda"})
     
     if plugin_b_name not in manager.plugins:
         print(f"⚠️ Second plugin {plugin_b_name} not found. Skipping execution step.")
@@ -52,6 +61,7 @@ async def run_comparison():
     # This acts as the foreign key linking the two isolated databases
     job_id = f"demo_{uuid.uuid4().hex[:8]}"
     audio_file = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-whisper/test_files/short_test_audio.mp3"
+    # audio_file_2 = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-fasthtml-workflow-transcription-single-file/test_files/02 - 1. Laying Plans.mp3"
     
     print(f"🚀 Job ID: {job_id}")
     print(f"🎧 Processing: {audio_file}")
@@ -63,7 +73,8 @@ async def run_comparison():
     # We pass 'job_id' in kwargs. The updated _save_to_db will use it.
     results = await asyncio.gather(
         manager.execute_plugin_async(plugin_a_name, audio=audio_file, job_id=job_id),
-        manager.execute_plugin_async(plugin_b_name, audio=audio_file, job_id=job_id)
+        manager.execute_plugin_async(plugin_b_name, audio=audio_file, job_id=job_id),
+        # manager.execute_plugin_async(plugin_c_name, audio=audio_file_2, job_id=job_id)
     )
     
     print("✅ Inference Complete.")
