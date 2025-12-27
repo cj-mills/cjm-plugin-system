@@ -8,7 +8,6 @@ __all__ = ['PluginManager', 'get_plugin_config', 'get_plugin_config_schema', 'ge
 
 # %% ../../nbs/core/manager.ipynb 3
 import json
-import logging
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Type
@@ -17,6 +16,13 @@ from .interface import PluginInterface
 from .metadata import PluginMeta
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
+
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[PluginManager] %(message)s',
+    force=True
+)
 
 # %% ../../nbs/core/manager.ipynb 5
 class PluginManager:

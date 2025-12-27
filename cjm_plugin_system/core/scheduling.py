@@ -8,11 +8,17 @@ __all__ = ['ResourceScheduler', 'PermissiveScheduler', 'SafetyScheduler', 'Queue
 # %% ../../nbs/core/scheduling.ipynb 3
 import time
 import asyncio
-import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable, Awaitable
 
 from .metadata import PluginMeta
+
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='[ResourceScheduler] %(message)s',
+    force=True
+)
 
 # %% ../../nbs/core/scheduling.ipynb 5
 class ResourceScheduler(ABC):
