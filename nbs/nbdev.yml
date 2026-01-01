@@ -4,6 +4,6 @@ project:
 website:
   title: "cjm-plugin-system"
   site-url: "https://cj-mills.github.io/cjm-plugin-system"
-  description: "Generic plugin system with discovery, configuration validation, and runtime management for extensible Python applications."
+  description: "Process-isolated plugin system with resource-aware scheduling, configuration validation, and lifecycle management for extensible Python applications."
   repo-branch: main
   repo-url: "https://github.com/cj-mills/cjm-plugin-system"
