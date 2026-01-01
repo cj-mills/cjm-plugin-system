@@ -87,12 +87,26 @@ def create_app(
 
     @app.get("/stats")
     def stats() -> Dict[str, Any]:
-        """Return process resource usage for scheduling decisions."""
+        """Return process tree resource usage."""
         proc = psutil.Process()
+        
+        # 1. Get Memory of Main Process
+        total_rss = proc.memory_info().rss
+        
+        # 2. Get Memory of Children (Safe Loop)
+        # recursive=True ensures we catch grandchildren
+        for child in proc.children(recursive=True):
+            try:
+                # We must check if child still exists before asking for memory
+                total_rss += child.memory_info().rss
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                # Process died or we don't have permission (rare for child), skip it
+                pass
+
         return {
             "pid": os.getpid(),
-            "cpu_percent": proc.cpu_percent(),
-            "memory_rss_mb": proc.memory_info().rss / 1024 / 1024
+            "cpu_percent": proc.cpu_percent(), # Note: aggregating CPU % is complex, main pid is usually enough proxy
+            "memory_rss_mb": total_rss / 1024 / 1024
         }
 
     @app.post("/initialize")
