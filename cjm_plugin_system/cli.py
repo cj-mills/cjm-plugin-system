@@ -58,13 +58,49 @@ def _generate_manifest(
 
     print(f"[{env_name}] Introspecting module: {module_name}")
     
+    # Enhanced introspection script that also captures config_schema
+    # The script:
+    # 1. Gets metadata from get_plugin_metadata()
+    # 2. Instantiates the plugin class to get config_schema
+    # 3. Merges config_schema into metadata (if not already present)
+    introspection_script = f'''
+import json
+import importlib
+from {module_name}.meta import get_plugin_metadata
+
+meta = get_plugin_metadata()
+
+# Try to get config_schema from plugin instance if not in metadata
+if "config_schema" not in meta:
+    try:
+        # Import plugin module and class
+        plugin_module = meta.get("module", "{module_name}.plugin")
+        plugin_class = meta.get("class", "")
+        
+        if plugin_module and plugin_class:
+            mod = importlib.import_module(plugin_module)
+            cls = getattr(mod, plugin_class)
+            
+            # Instantiate and get config schema
+            instance = cls()
+            if hasattr(instance, "get_config_schema"):
+                meta["config_schema"] = instance.get_config_schema()
+            
+            # Clean up
+            if hasattr(instance, "cleanup"):
+                try:
+                    instance.cleanup()
+                except:
+                    pass
+    except Exception as e:
+        # Config schema extraction is optional - continue without it
+        pass
+
+print(json.dumps(meta, indent=2))
+'''
+    
     # The introspection command
-    # Plugins should declare category/interface in their get_plugin_metadata()
-    introspection_cmd = (
-        f"conda run -n {env_name} python -c "
-        f"'from {module_name}.meta import get_plugin_metadata; "
-        f"import json; print(json.dumps(get_plugin_metadata(), indent=2))'"
-    )
+    introspection_cmd = f"conda run -n {env_name} python -c '{introspection_script}'"
     
     try:
         # Check output, capture stdout
@@ -90,11 +126,13 @@ def _generate_manifest(
         plugin_name = meta_json.get('name', 'unknown')
         out_file = manifest_dir / f"{plugin_name}.json"
         
-        # Log detected category/interface if present
+        # Log detected metadata
         if 'category' in meta_json:
             print(f"[{env_name}] Category: {meta_json['category']}")
         if 'interface' in meta_json:
             print(f"[{env_name}] Interface: {meta_json['interface']}")
+        if 'config_schema' in meta_json:
+            print(f"[{env_name}] Config schema: captured")
         
         with open(out_file, 'w') as f:
             f.write(json.dumps(meta_json, indent=2))

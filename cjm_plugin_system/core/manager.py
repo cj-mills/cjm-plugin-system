@@ -101,7 +101,8 @@ class PluginManager:
                         author=manifest.get('author', ''),
                         package_name=manifest.get('module', ''),
                         category=manifest.get('category', ''),
-                        interface=manifest.get('interface', '')
+                        interface=manifest.get('interface', ''),
+                        config_schema=manifest.get('config_schema')
                     )
                     meta.manifest = manifest
                     
@@ -135,6 +136,23 @@ class PluginManager:
     def get_loaded_categories(self) -> List[str]:  # List of unique categories
         """Get all unique categories among loaded plugins."""
         return list(set(meta.category for meta in self.plugins.values() if meta.category))
+
+    def get_plugin_meta(
+        self,
+        plugin_name: str  # Name of the plugin
+    ) -> Optional[PluginMeta]:  # Plugin metadata or None
+        """Get metadata for a loaded plugin by name."""
+        return self.plugins.get(plugin_name)
+
+    def get_discovered_meta(
+        self,
+        plugin_name: str  # Name of the plugin
+    ) -> Optional[PluginMeta]:  # Plugin metadata or None
+        """Get metadata for a discovered (not necessarily loaded) plugin by name."""
+        for meta in self.discovered:
+            if meta.name == plugin_name:
+                return meta
+        return None
 
     def load_plugin(
         self,

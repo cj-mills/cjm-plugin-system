@@ -7,7 +7,7 @@ __all__ = ['PluginMeta']
 
 # %% ../../nbs/core/metadata.ipynb 3
 from dataclasses import dataclass, field
-from typing import Optional, Any
+from typing import Any, Dict, Optional
 
 # %% ../../nbs/core/metadata.ipynb 5
 @dataclass
@@ -20,6 +20,7 @@ class PluginMeta:
     package_name:str="" # Python package name containing the plugin
     category:str="" # Plugin category (e.g., "transcription", "system_monitor")
     interface:str="" # Fully qualified interface class name
+    config_schema:Optional[Dict[str, Any]]=None # JSON Schema for plugin configuration
     instance:Optional[Any]=None # Plugin instance (PluginInterface subclass)
     enabled:bool=True # Whether the plugin is enabled
     last_executed:float=0.0 # Unix timestamp
