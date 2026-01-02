@@ -39,9 +39,9 @@ graph LR
     utils_validation[utils.validation<br/>Configuration Validation]
 
     core_manager --> core_metadata
-    core_manager --> core_scheduling
     core_manager --> core_interface
     core_manager --> core_proxy
+    core_manager --> core_scheduling
     core_proxy --> core_interface
     core_scheduling --> core_metadata
 ```
@@ -324,6 +324,36 @@ class PluginManager:
             for base_path in self.search_paths
         "Discover plugins via JSON manifests in search paths."
     
+    def get_discovered_by_category(
+            self,
+            category: str  # Category to filter by (e.g., "transcription")
+        ) -> List[PluginMeta]:  # List of matching discovered plugins
+        "Get discovered plugins filtered by category."
+    
+    def get_plugins_by_category(
+            self,
+            category: str  # Category to filter by (e.g., "transcription")
+        ) -> List[PluginMeta]:  # List of matching loaded plugins
+        "Get loaded plugins filtered by category."
+    
+    def get_discovered_categories(self) -> List[str]:  # List of unique categories
+            """Get all unique categories among discovered plugins."""
+            return list(set(meta.category for meta in self.discovered if meta.category))
+    
+        def get_loaded_categories(self) -> List[str]:  # List of unique categories
+        "Get all unique categories among discovered plugins."
+    
+    def get_loaded_categories(self) -> List[str]:  # List of unique categories
+            """Get all unique categories among loaded plugins."""
+            return list(set(meta.category for meta in self.plugins.values() if meta.category))
+    
+        def load_plugin(
+            self,
+            plugin_meta: PluginMeta,  # Plugin metadata (with manifest attached)
+            config: Optional[Dict[str, Any]] = None  # Initial configuration
+        ) -> bool:  # True if successfully loaded
+        "Get all unique categories among loaded plugins."
+    
     def load_plugin(
             self,
             plugin_meta: PluginMeta,  # Plugin metadata (with manifest attached)
@@ -422,6 +452,8 @@ class PluginMeta:
     description: str = ''  # Brief description of the plugin's functionality
     author: str = ''  # Plugin author's name or organization
     package_name: str = ''  # Python package name containing the plugin
+    category: str = ''  # Plugin category (e.g., "transcription", "system_monitor")
+    interface: str = ''  # Fully qualified interface class name
     instance: Optional[Any]  # Plugin instance (PluginInterface subclass)
     enabled: bool = True  # Whether the plugin is enabled
     last_executed: float = 0.0  # Unix timestamp

@@ -59,7 +59,7 @@ def _generate_manifest(
     print(f"[{env_name}] Introspecting module: {module_name}")
     
     # The introspection command
-    # We explicitly redirect stderr to devnull to keep stdout clean for JSON
+    # Plugins should declare category/interface in their get_plugin_metadata()
     introspection_cmd = (
         f"conda run -n {env_name} python -c "
         f"'from {module_name}.meta import get_plugin_metadata; "
@@ -89,6 +89,12 @@ def _generate_manifest(
 
         plugin_name = meta_json.get('name', 'unknown')
         out_file = manifest_dir / f"{plugin_name}.json"
+        
+        # Log detected category/interface if present
+        if 'category' in meta_json:
+            print(f"[{env_name}] Category: {meta_json['category']}")
+        if 'interface' in meta_json:
+            print(f"[{env_name}] Interface: {meta_json['interface']}")
         
         with open(out_file, 'w') as f:
             f.write(json.dumps(meta_json, indent=2))

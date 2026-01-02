@@ -97,7 +97,11 @@ class PluginManager:
                     meta = PluginMeta(
                         name=name,
                         version=manifest.get('version', '0.0.0'),
-                        package_name=manifest.get('module', '')
+                        description=manifest.get('description', ''),
+                        author=manifest.get('author', ''),
+                        package_name=manifest.get('module', ''),
+                        category=manifest.get('category', ''),
+                        interface=manifest.get('interface', '')
                     )
                     meta.manifest = manifest
                     
@@ -109,6 +113,28 @@ class PluginManager:
                     self.logger.error(f"Error loading manifest {manifest_file}: {e}")
 
         return self.discovered
+
+    def get_discovered_by_category(
+        self,
+        category: str  # Category to filter by (e.g., "transcription")
+    ) -> List[PluginMeta]:  # List of matching discovered plugins
+        """Get discovered plugins filtered by category."""
+        return [meta for meta in self.discovered if meta.category == category]
+
+    def get_plugins_by_category(
+        self,
+        category: str  # Category to filter by (e.g., "transcription")
+    ) -> List[PluginMeta]:  # List of matching loaded plugins
+        """Get loaded plugins filtered by category."""
+        return [meta for meta in self.plugins.values() if meta.category == category]
+
+    def get_discovered_categories(self) -> List[str]:  # List of unique categories
+        """Get all unique categories among discovered plugins."""
+        return list(set(meta.category for meta in self.discovered if meta.category))
+
+    def get_loaded_categories(self) -> List[str]:  # List of unique categories
+        """Get all unique categories among loaded plugins."""
+        return list(set(meta.category for meta in self.plugins.values() if meta.category))
 
     def load_plugin(
         self,
