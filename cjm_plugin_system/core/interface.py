@@ -74,3 +74,17 @@ class PluginInterface(ABC):
     def cleanup(self) -> None:
         """Clean up resources when plugin is unloaded."""
         ...
+
+    def cancel(self) -> None:
+        """Cancel the current execution. Override for cooperative cancellation support."""
+        pass  # Default: no-op (plugins opt-in to cancellation)
+
+    def report_progress(
+        self,
+        progress: float, # 0.0 to 1.0, or -1.0 for indeterminate
+        message: str = "" # Descriptive status message
+    ) -> None:
+        """Report execution progress. Call during execute() to update status."""
+        # Default: store in instance variables for worker to poll
+        self._progress = progress
+        self._status_message = message

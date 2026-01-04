@@ -9,7 +9,7 @@ __all__ = ['ResourceScheduler', 'PermissiveScheduler', 'SafetyScheduler', 'Queue
 import time
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Callable, Awaitable
+from typing import Dict, Any, Callable, Awaitable, Set
 
 from .metadata import PluginMeta
 
@@ -159,6 +159,7 @@ class QueueScheduler(ResourceScheduler):
         self.timeout = timeout
         self.poll_interval = poll_interval
         self.logger = logging.getLogger(f"{__name__}.{type(self).__name__}")
+        self._active_plugins: Set[str] = set()  # Track plugins with running executions
 
     def _check_resources(
         self,
@@ -232,12 +233,16 @@ class QueueScheduler(ResourceScheduler):
         self,
         plugin_name: str  # Name of the plugin starting execution
     ) -> None:
-        """Called when execution starts."""
-        pass
+        """Track that a plugin has started executing."""
+        self._active_plugins.add(plugin_name)
 
     def on_execution_finish(
         self,
         plugin_name: str  # Name of the plugin finishing execution
     ) -> None:
-        """Called when execution finishes."""
-        pass
+        """Track that a plugin has finished executing."""
+        self._active_plugins.discard(plugin_name)
+
+    def get_active_plugins(self) -> Set[str]:  # Set of currently executing plugin names
+        """Get the set of plugins with active executions."""
+        return self._active_plugins.copy()

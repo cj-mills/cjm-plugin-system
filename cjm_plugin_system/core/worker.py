@@ -175,6 +175,25 @@ def create_app(
 
         return StreamingResponse(iter_response(), media_type="application/x-ndjson")
 
+    @app.post("/cancel")
+    def cancel() -> Dict[str, str]:
+        """Cancel any running execution."""
+        if hasattr(plugin_instance, 'cancel'):
+            try:
+                plugin_instance.cancel()
+                return {"status": "cancelled"}
+            except Exception as e:
+                return {"status": "error", "detail": str(e)}
+        return {"status": "not_supported"}
+
+    @app.get("/progress")
+    def get_progress() -> Dict[str, Any]:
+        """Get current execution progress."""
+        return {
+            "progress": getattr(plugin_instance, '_progress', 0.0),
+            "message": getattr(plugin_instance, '_status_message', "")
+        }
+
     @app.post("/cleanup")
     def cleanup() -> Dict[str, str]:
         """Clean up plugin resources."""

@@ -12,18 +12,19 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (6)
+    ├── core/ (7)
     │   ├── interface.ipynb   # Abstract base class defining the generic plugin interface
     │   ├── manager.ipynb     # Plugin discovery, loading, and lifecycle management system
     │   ├── metadata.ipynb    # Data structures for plugin metadata
     │   ├── proxy.ipynb       # Bridge between Host application and isolated Worker processes
+    │   ├── queue.ipynb       # Resource-aware job queue for sequential plugin execution with cancellation support
     │   ├── scheduling.ipynb  # Resource scheduling policies for plugin execution
     │   └── worker.ipynb      # FastAPI server that runs inside isolated plugin environments
     ├── utils/ (1)
     │   └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
     └── cli.ipynb  # CLI tool for declarative plugin management
 
-Total: 8 notebooks across 2 directories
+Total: 9 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -34,19 +35,21 @@ graph LR
     core_manager[core.manager<br/>Plugin Manager]
     core_metadata[core.metadata<br/>Plugin Metadata]
     core_proxy[core.proxy<br/>Remote Plugin Proxy]
+    core_queue[core.queue<br/>Job Queue]
     core_scheduling[core.scheduling<br/>Scheduling]
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_manager --> core_interface
     core_manager --> core_scheduling
-    core_manager --> core_proxy
     core_manager --> core_metadata
+    core_manager --> core_interface
+    core_manager --> core_proxy
     core_proxy --> core_interface
+    core_queue --> core_manager
     core_scheduling --> core_metadata
 ```
 
-*6 cross-module dependencies detected*
+*7 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -205,8 +208,24 @@ class PluginInterface(ABC):
         def cleanup(self) -> None
         "Return the current configuration state as a dictionary."
     
-    def cleanup(self) -> None
+    def cleanup(self) -> None:
+            """Clean up resources when plugin is unloaded."""
+            ...
+    
+        def cancel(self) -> None
         "Clean up resources when plugin is unloaded."
+    
+    def cancel(self) -> None:
+            """Cancel the current execution. Override for cooperative cancellation support."""
+            pass  # Default: no-op (plugins opt-in to cancellation)
+        "Cancel the current execution. Override for cooperative cancellation support."
+    
+    def report_progress(
+            self,
+            progress: float, # 0.0 to 1.0, or -1.0 for indeterminate
+            message: str = "" # Descriptive status message
+        ) -> None
+        "Report execution progress. Call during execute() to update status."
 ```
 
 ### Plugin Manager (`manager.ipynb`)
@@ -484,7 +503,11 @@ from cjm_plugin_system.core.proxy import (
     execute_stream_sync,
     execute_stream,
     get_stats,
-    is_alive
+    is_alive,
+    cancel,
+    cancel_async,
+    get_progress,
+    get_progress_async
 )
 ```
 
@@ -542,6 +565,34 @@ def is_alive(self) -> bool: # True if worker is responsive
     """Check if the worker process is still running and responsive."""
     if not self.process or self.process.poll() is not None
     "Check if the worker process is still running and responsive."
+```
+
+``` python
+def cancel(self) -> bool: # True if cancel request was sent
+    """Request cancellation of running execution."""
+    try
+    "Request cancellation of running execution."
+```
+
+``` python
+async def cancel_async(self) -> bool: # True if cancel request was sent
+    """Request cancellation asynchronously."""
+    try
+    "Request cancellation asynchronously."
+```
+
+``` python
+def get_progress(self) -> Dict[str, Any]: # {progress: float, message: str}
+    """Get current execution progress from worker."""
+    try
+    "Get current execution progress from worker."
+```
+
+``` python
+async def get_progress_async(self) -> Dict[str, Any]: # {progress: float, message: str}
+    """Get current execution progress asynchronously."""
+    try
+    "Get current execution progress asynchronously."
 ```
 
 ``` python
@@ -636,6 +687,215 @@ class RemotePluginProxy:
             # Send cleanup request to worker
             try
         "Clean up plugin resources and terminate worker process."
+```
+
+### Job Queue (`queue.ipynb`)
+
+> Resource-aware job queue for sequential plugin execution with
+> cancellation support
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.queue import (
+    JobStatus,
+    Job,
+    JobQueue,
+    submit,
+    cancel,
+    reorder,
+    get_job,
+    wait_for_job,
+    get_state,
+    get_job_logs,
+    start,
+    stop
+)
+```
+
+#### Functions
+
+``` python
+async def submit(
+    self,
+    plugin_name: str,  # Target plugin
+    *args,
+    priority: int = 0,  # Higher = more urgent
+    **kwargs
+) -> str:  # Returns job_id
+    "Submit a job to the queue."
+```
+
+``` python
+async def cancel(
+    self,
+    job_id: str  # Job to cancel
+) -> bool:  # True if cancelled
+    "Cancel a pending or running job."
+```
+
+``` python
+def reorder(
+    self,
+    job_id: str,  # Job to move
+    new_priority: int  # New priority value
+) -> bool:  # True if reordered
+    "Change the priority of a pending job."
+```
+
+``` python
+def get_job(
+    self,
+    job_id: str  # Job to retrieve
+) -> Optional[Job]:  # Job or None
+    "Get a job by ID."
+```
+
+``` python
+async def wait_for_job(
+    self,
+    job_id: str,  # Job to wait for
+    timeout: Optional[float] = None  # Max seconds to wait
+) -> Job:  # Completed/failed/cancelled job
+    "Wait for a job to complete."
+```
+
+``` python
+def get_state(self) -> Dict[str, Any]:  # Queue state for UI
+    """Get the current queue state."""
+    running_dict = None
+    if self._running
+    "Get the current queue state."
+```
+
+``` python
+def get_job_logs(
+    self,
+    job_id: str,  # Job to get logs for
+    lines: int = 100  # Max lines to return
+) -> str:  # Log content
+    "Get logs for a job from the plugin's log file."
+```
+
+``` python
+async def start(self) -> None:
+    """Start the queue processor."""
+    if self._running_flag
+    "Start the queue processor."
+```
+
+``` python
+async def stop(self) -> None:
+    """Stop the queue processor gracefully."""
+    self._running_flag = False
+    self._job_available.set()  # Wake up the processor
+    
+    if self._processor_task
+    "Stop the queue processor gracefully."
+```
+
+``` python
+def _move_to_history(self, job: Job) -> None:
+    """Move a job to history, maintaining max_history limit."""
+    self._history.append(job)
+    if len(self._history) > self.max_history
+    "Move a job to history, maintaining max_history limit."
+```
+
+``` python
+def _signal_job_completed(self, job_id: str) -> None:
+    """Signal that a job has completed."""
+    event = self._job_completed_events.get(job_id)
+    if event
+    "Signal that a job has completed."
+```
+
+``` python
+async def _process_loop(self) -> None:
+    """Main processing loop."""
+    while self._running_flag
+    "Main processing loop."
+```
+
+``` python
+async def _execute_job(self, job: Job) -> None:
+    """Execute a single job."""
+    self.logger.info(f"Starting job {job.id[:8]} ({job.plugin_name})")
+    
+    # Mark as running
+    job.status = JobStatus.running
+    job.started_at = time.time()
+    self._running = job
+    
+    try
+    "Execute a single job."
+```
+
+``` python
+async def _execute_with_cancellation(
+    self,
+    job: Job,
+    plugin: Any
+) -> Any
+    "Execute job with cancellation monitoring."
+```
+
+``` python
+async def _poll_progress(
+    self,
+    job: Job,
+    plugin: Any
+) -> None
+    "Poll progress from the plugin during execution."
+```
+
+#### Classes
+
+``` python
+class JobStatus(str, Enum):
+    "Status of a job in the queue."
+```
+
+``` python
+@dataclass
+class Job:
+    "A queued plugin execution request."
+    
+    id: str  # Unique job identifier (UUID)
+    plugin_name: str  # Target plugin name
+    args: Tuple[Any, ...]  # Positional arguments for execute()
+    kwargs: Dict[str, Any]  # Keyword arguments for execute()
+    status: JobStatus = JobStatus.pending  # Current job status
+    priority: int = 0  # Higher = more urgent
+    created_at: float = field(...)  # Submission timestamp
+    started_at: Optional[float]  # Execution start timestamp
+    completed_at: Optional[float]  # Completion timestamp
+    result: Any  # Execution result (if completed)
+    error: Optional[str]  # Error message (if failed)
+    progress: float = 0.0  # 0.0 to 1.0, or -1.0 for indeterminate
+    status_message: str = ''  # Descriptive status message
+    
+```
+
+``` python
+class JobQueue:
+    def __init__(
+        self,
+        manager: PluginManager,  # Plugin manager instance
+        max_history: int = 100,  # Max completed jobs to retain
+        cancel_timeout: float = 3.0,  # Seconds to wait for cooperative cancel
+        progress_poll_interval: float = 1.0  # Seconds between progress polls
+    )
+    "Resource-aware job queue for sequential plugin execution."
+    
+    def __init__(
+            self,
+            manager: PluginManager,  # Plugin manager instance
+            max_history: int = 100,  # Max completed jobs to retain
+            cancel_timeout: float = 3.0,  # Seconds to wait for cooperative cancel
+            progress_poll_interval: float = 1.0  # Seconds between progress polls
+        )
+        "Initialize the job queue."
 ```
 
 ### Scheduling (`scheduling.ipynb`)
@@ -768,13 +1028,16 @@ class QueueScheduler:
             self,
             plugin_name: str  # Name of the plugin starting execution
         ) -> None
-        "Called when execution starts."
+        "Track that a plugin has started executing."
     
     def on_execution_finish(
             self,
             plugin_name: str  # Name of the plugin finishing execution
         ) -> None
-        "Called when execution finishes."
+        "Track that a plugin has finished executing."
+    
+    def get_active_plugins(self) -> Set[str]:  # Set of currently executing plugin names
+        "Get the set of plugins with active executions."
 ```
 
 ### Configuration Validation (`validation.ipynb`)
