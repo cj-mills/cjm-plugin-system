@@ -1,9 +1,9 @@
 """
-Graph Federation Demo: The "Ingestion" Workflow
+Graph Federation Demo: The "Ingestion" Workflow (Art of War Edition)
 
 This test demonstrates the full lifecycle:
 1.  JOB: Transcribe Audio (Voxtral) -> Generates a Job ID
-2.  LOGIC: Create Graph Nodes linked to that Job ID (Mocking an LLM extraction)
+2.  LOGIC: Create Graph Nodes linked to that Job ID (Simulating LLM extraction of Sun Tzu's concepts)
 3.  ACTION: Push Nodes to Context Graph via execute(action=...)
 4.  QUERY: Use DuckDB to JOIN the Transcript DB with the Graph DB
 """
@@ -26,7 +26,7 @@ from cjm_plugin_system.core.scheduling import QueueScheduler
 
 
 async def run_graph_federation():
-    print("=== GRAPH FEDERATION DEMO: TRANSCRIPT TO KNOWLEDGE GRAPH ===")
+    print("=== GRAPH FEDERATION DEMO: TRANSCRIPT TO KNOWLEDGE GRAPH (SUN TZU) ===")
 
     # 1. Setup Manager
     manager = PluginManager(scheduler=QueueScheduler())
@@ -47,7 +47,7 @@ async def run_graph_federation():
         print(f"Plugin {graph_name} not found. Check manifests in ~/.cjm/plugins/")
         return
 
-    # 3. Load Plugins (synchronous - load_plugin_async doesn't exist)
+    # 3. Load Plugins
     print(f"\n--- Loading Plugins ---")
 
     # Load Voxtral (CUDA)
@@ -63,17 +63,27 @@ async def run_graph_federation():
         return
     print(f"  Loaded: {graph_name}")
 
-    # 4. Start Job Queue (For long-running transcription)
+    # 4. Start Job Queue
     queue = JobQueue(manager)
     await queue.start()
 
     # 5. EXECUTION PHASE 1: TRANSCRIPTION
     # We define a shared ID that will link the Audio world to the Graph world
     shared_job_id = f"job_{uuid.uuid4().hex[:8]}"
-    audio_file = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-whisper/test_files/short_test_audio.mp3"
+    
+    # Update to the specific Art of War file
+    # Note: Ensure this file exists in your test_files directory, or update path accordingly
+    audio_file = "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-voxtral-hf/test_files/02 - 1. Laying Plans.mp3"
 
     print(f"\n--- Phase 1: Transcribing Audio ---")
     print(f"Job ID: {shared_job_id}")
+    print(f"File:   {os.path.basename(audio_file)}")
+
+    if not os.path.exists(audio_file):
+        print(f"WARNING: Audio file not found at {audio_file}. Please check path.")
+        await queue.stop()
+        manager.unload_all()
+        return
 
     # Submit to Queue
     queue_job_id = await queue.submit(
@@ -93,89 +103,161 @@ async def run_graph_federation():
         manager.unload_all()
         return
 
-    # job.result is the return value from execute() - typically a dict when going through proxy
+    # Handle result extraction
     transcript_result = job.result
-
-    # Handle both dict and object cases
     if isinstance(transcript_result, dict):
         transcript_text = transcript_result.get("text", "")
     else:
         transcript_text = transcript_result.text if hasattr(transcript_result, "text") else str(transcript_result)
 
-    print(f"  -> Transcript: {transcript_text[:100]}...")
+    print(f"  -> Transcript Start: {transcript_text[:100]}...")
 
-    # 6. EXECUTION PHASE 2: "MOCK" LLM EXTRACTION
-    print(f"\n--- Phase 2: Extracting Entities (Mock) ---")
-    # Simulating an LLM analyzing the text and finding entities
-    # Crucially, we create a SourceRef pointing back to the specific Transcription Job
+    # 6. EXECUTION PHASE 2: "REALISTIC" LLM EXTRACTION
+    print(f"\n--- Phase 2: Extracting Entities (Simulated LLM) ---")
+    
+    # We simulate the LLM analyzing "Laying Plans" and extracting the core ontology.
+    # All nodes point back to the transcription job.
 
-    # Create node and edge data as dicts (for JSON transport via execute)
     source_ref_data = {
         "plugin_name": transcriber_name,
         "table_name": "transcriptions",
         "row_id": shared_job_id,
-        "segment_slice": "full_text"
+        "segment_slice": "full_text" # In a real app, this would be specific timestamp ranges
     }
 
-    node_a_id = str(uuid.uuid4())
-    node_b_id = str(uuid.uuid4())
-    edge_id = str(uuid.uuid4())
+    # -- Define Nodes --
+    nodes = []
+    edges = []
 
-    node_a_data = {
-        "id": node_a_id,
-        "label": "Topic",
-        "properties": {"name": "Neural Networks", "confidence": 0.95},
+    # 1. The Author
+    node_sun_tzu = {
+        "id": str(uuid.uuid4()),
+        "label": "Person",
+        "properties": {"name": "Sun Tzu", "role": "General/Strategist"},
         "sources": [source_ref_data]
     }
+    nodes.append(node_sun_tzu)
 
-    node_b_data = {
-        "id": node_b_id,
-        "label": "Speaker",
-        "properties": {"name": "Unknown Expert", "detected_language": "en"},
+    # 2. The Work
+    node_art_of_war = {
+        "id": str(uuid.uuid4()),
+        "label": "Work",
+        "properties": {"title": "The Art of War", "importance": "Vital to the State"},
         "sources": [source_ref_data]
     }
+    nodes.append(node_art_of_war)
 
-    edge_data = {
-        "id": edge_id,
-        "source_id": node_b_id,
-        "target_id": node_a_id,
-        "relation_type": "DISCUSSES",
-        "properties": {"sentiment": "neutral"}
+    # 3. The Core Concept (Five Factors)
+    node_five_factors = {
+        "id": str(uuid.uuid4()),
+        "label": "Framework",
+        "properties": {"name": "The Five Constant Factors"},
+        "sources": [source_ref_data]
     }
+    nodes.append(node_five_factors)
 
-    print(f"  Created Node: Topic (Neural Networks)")
-    print(f"  Created Node: Speaker (Unknown Expert)")
-    print(f"  Created Edge: Speaker --[DISCUSSES]--> Topic")
+    # 4. Specific Factor: The Commander
+    node_commander = {
+        "id": str(uuid.uuid4()),
+        "label": "Factor",
+        "properties": {"name": "The Commander"},
+        "sources": [source_ref_data]
+    }
+    nodes.append(node_commander)
+
+    # 5. Required Virtue: Wisdom
+    node_wisdom = {
+        "id": str(uuid.uuid4()),
+        "label": "Virtue",
+        "properties": {"name": "Wisdom"},
+        "sources": [source_ref_data]
+    }
+    nodes.append(node_wisdom)
+
+    # 6. Strategic Maxim
+    node_deception = {
+        "id": str(uuid.uuid4()),
+        "label": "Strategy",
+        "properties": {"name": "Deception", "quote": "All warfare is based on deception"},
+        "sources": [source_ref_data]
+    }
+    nodes.append(node_deception)
+
+    # -- Define Edges --
+    
+    # Sun Tzu --[AUTHORED]--> Art of War
+    edges.append({
+        "id": str(uuid.uuid4()),
+        "source_id": node_sun_tzu["id"],
+        "target_id": node_art_of_war["id"],
+        "relation_type": "AUTHORED",
+        "properties": {}
+    })
+
+    # Art of War --[GOVERNED_BY]--> Five Factors
+    edges.append({
+        "id": str(uuid.uuid4()),
+        "source_id": node_art_of_war["id"],
+        "target_id": node_five_factors["id"],
+        "relation_type": "GOVERNED_BY",
+        "properties": {}
+    })
+
+    # The Commander --[IS_PART_OF]--> Five Factors
+    edges.append({
+        "id": str(uuid.uuid4()),
+        "source_id": node_commander["id"],
+        "target_id": node_five_factors["id"],
+        "relation_type": "IS_PART_OF",
+        "properties": {}
+    })
+
+    # The Commander --[REQUIRES]--> Wisdom
+    edges.append({
+        "id": str(uuid.uuid4()),
+        "source_id": node_commander["id"],
+        "target_id": node_wisdom["id"],
+        "relation_type": "REQUIRES",
+        "properties": {}
+    })
+    
+    # Art of War --[BASED_ON]--> Deception
+    edges.append({
+        "id": str(uuid.uuid4()),
+        "source_id": node_art_of_war["id"],
+        "target_id": node_deception["id"],
+        "relation_type": "BASED_ON",
+        "properties": {}
+    })
+
+    print(f"  Generated {len(nodes)} Nodes and {len(edges)} Edges based on 'Laying Plans'.")
 
     # 7. EXECUTION PHASE 3: GRAPH INGESTION
     print(f"\n--- Phase 3: Writing to Context Graph ---")
-
-    # Use manager.execute_plugin_async() with action parameter
-    # This is the correct way to call graph operations through the proxy
 
     print("  -> Adding Nodes...")
     result = await manager.execute_plugin_async(
         graph_name,
         action="add_nodes",
-        nodes=[node_a_data, node_b_data]
+        nodes=nodes
     )
     print(f"     Result: {result}")
 
-    print("  -> Adding Edge...")
+    print("  -> Adding Edges...")
     result = await manager.execute_plugin_async(
         graph_name,
         action="add_edges",
-        edges=[edge_data]
+        edges=edges
     )
     print(f"     Result: {result}")
 
     # Verify with get_schema
-    print("  -> Verifying Graph State...")
+    print("  -> Verifying Graph Ontology...")
     schema = await manager.execute_plugin_async(
         graph_name,
         action="get_schema"
     )
-    print(f"     Schema: {schema}")
+    print(f"     Labels found: {schema['node_labels']}")
 
     # 8. EXECUTION PHASE 4: FEDERATED QUERY
     print(f"\n--- Phase 4: Data Federation (DuckDB) ---")
@@ -183,58 +265,49 @@ async def run_graph_federation():
     db_path_vox = manager.plugins[transcriber_name].manifest['db_path']
     db_path_graph = manager.plugins[graph_name].manifest['db_path']
 
-    print(f"Voxtral DB: {db_path_vox}")
-    print(f"Graph DB:   {db_path_graph}")
-
     # Connect DuckDB
     con = duckdb.connect()
 
     con.execute(f"ATTACH '{db_path_vox}' AS db_vox (TYPE SQLITE, READ_ONLY TRUE);")
     con.execute(f"ATTACH '{db_path_graph}' AS db_graph (TYPE SQLITE, READ_ONLY TRUE);")
 
-    # The Query: Join Transcript Metadata with Graph Entities
-    # We join where the Graph Node's 'sources' array contains the Transcription Job ID
-    # Note: DuckDB treats SQLite JSON columns as text.
-    # FIX: Use json_extract_string (or ->>) to get the unquoted string for comparison with job_id.
-
+    # Query: Show me the breakdown of concepts derived from this specific audio file
     query = f"""
     SELECT
         t.job_id,
-        SUBSTRING(t.text, 1, 80) as transcript_preview,
-        n.label as entity_type,
-        json_extract_string(n.properties, '$.name') as entity_name,
-        e.relation_type
+        n.label as type,
+        json_extract_string(n.properties, '$.name') as name,
+        json_extract_string(n.properties, '$.title') as title,
+        e.relation_type as relation,
+        -- Find the target node name if available (simple self-join simulation)
+        (SELECT json_extract_string(properties, '$.name') 
+         FROM db_graph.nodes target 
+         WHERE target.id = e.target_id) as target_concept
     FROM db_graph.nodes n
-    -- Find edges where this node is the source
+    -- Left join edges to show structure
     LEFT JOIN db_graph.edges e ON n.id = e.source_id
-    -- Join to Transcription DB via the sources JSON array
+    -- Join to transcript to prove linkage
     JOIN db_vox.transcriptions t
       ON json_extract_string(n.sources, '$[0].row_id') = t.job_id
     WHERE t.job_id = '{shared_job_id}'
+    ORDER BY n.label, e.relation_type
     """
 
     try:
         df = con.execute(query).df()
 
-        print("\n=== FEDERATION RESULT ===")
+        print("\n=== FEDERATION RESULT: KNOWLEDGE EXTRACTED ===")
         import pandas as pd
         pd.set_option('display.max_colwidth', None)
         pd.set_option('display.width', 1000)
 
         if not df.empty:
-            print(df.to_string(index=False))
+            # Clean up display by coalescing name/title
+            df['entity'] = df['name'].fillna(df['title'])
+            display_cols = ['type', 'entity', 'relation', 'target_concept']
+            print(df[display_cols].to_string(index=False))
         else:
-            print("No linked records found. Check JSON extraction logic.")
-
-            # Debug: Show what's in each table
-            print("\n--- Debug: Tables Content ---")
-            print("Transcriptions:")
-            debug_df = con.execute(f"SELECT job_id, SUBSTRING(text, 1, 50) as text_preview FROM db_vox.transcriptions WHERE job_id = '{shared_job_id}'").df()
-            print(debug_df)
-
-            print("\nNodes:")
-            debug_df = con.execute("SELECT id, label, sources FROM db_graph.nodes LIMIT 5").df()
-            print(debug_df)
+            print("No linked records found.")
 
     except Exception as e:
         print(f"DuckDB Query Error: {e}")
