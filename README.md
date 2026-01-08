@@ -40,10 +40,10 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_manager --> core_proxy
-    core_manager --> core_metadata
-    core_manager --> core_scheduling
     core_manager --> core_interface
+    core_manager --> core_scheduling
+    core_manager --> core_metadata
+    core_manager --> core_proxy
     core_proxy --> core_interface
     core_queue --> core_manager
     core_scheduling --> core_metadata
@@ -68,6 +68,7 @@ graph LR
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
     ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
     │ install-all   Install and register all plugins defined in plugins.yaml.                                │
+    │ setup-host    Install interface libraries in the current Python environment.                           │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 For detailed help on any command, use `cjm-ctl <command> --help`.
@@ -87,7 +88,8 @@ from cjm_plugin_system.cli import (
     app,
     main,
     run_cmd,
-    install_all
+    install_all,
+    setup_host
 )
 ```
 
@@ -122,6 +124,14 @@ def install_all(
     force: bool = typer.Option(False, help="Force recreation of environments")
 ) -> None
     "Install and register all plugins defined in plugins.yaml."
+```
+
+``` python
+def setup_host(
+    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
+) -> None
+    "Install interface libraries in the current Python environment."
 ```
 
 ### Plugin Interface (`interface.ipynb`)
