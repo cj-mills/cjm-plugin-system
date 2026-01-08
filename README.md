@@ -40,10 +40,10 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_manager --> core_scheduling
-    core_manager --> core_metadata
-    core_manager --> core_interface
     core_manager --> core_proxy
+    core_manager --> core_metadata
+    core_manager --> core_scheduling
+    core_manager --> core_interface
     core_proxy --> core_interface
     core_queue --> core_manager
     core_scheduling --> core_metadata

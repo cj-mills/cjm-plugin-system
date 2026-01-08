@@ -154,6 +154,23 @@ class PluginManager:
                 return meta
         return None
 
+    def _extract_defaults_from_schema(
+        self,
+        config_schema: Optional[Dict[str, Any]]  # JSON Schema with properties
+    ) -> Dict[str, Any]:  # Default values extracted from schema
+        """Extract default values from a JSON Schema's properties."""
+        if not config_schema:
+            return {}
+
+        properties = config_schema.get("properties", {})
+        defaults = {}
+
+        for field_name, field_schema in properties.items():
+            if "default" in field_schema:
+                defaults[field_name] = field_schema["default"]
+
+        return defaults
+
     def load_plugin(
         self,
         plugin_meta: PluginMeta,  # Plugin metadata (with manifest attached)
@@ -167,11 +184,18 @@ class PluginManager:
         try:
             self.logger.info(f"Launching worker for {plugin_meta.name}...")
             proxy = RemotePluginProxy(plugin_meta.manifest)
-            
-            # Initialize with config if provided
+
+            # If config is None or empty, extract defaults from the plugin's config schema
+            if not config:
+                config_schema = plugin_meta.manifest.get("config_schema")
+                config = self._extract_defaults_from_schema(config_schema)
+                if config:
+                    self.logger.info(f"Using default config for {plugin_meta.name}: {list(config.keys())}")
+
+            # Initialize with config (defaults or provided)
             if config:
                 proxy.initialize(config)
-            
+
             plugin_meta.instance = proxy
             self.plugins[plugin_meta.name] = plugin_meta
             self.logger.info(f"Loaded plugin: {plugin_meta.name}")

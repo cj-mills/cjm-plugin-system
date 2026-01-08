@@ -64,7 +64,7 @@ async def run_graph_federation():
     print(f"  Loaded: {transcriber_name}")
 
     # Load Graph (CPU/IO)
-    if not manager.load_plugin(graph_meta, {"test":"test"}):
+    if not manager.load_plugin(graph_meta):
         print(f"Failed to load {graph_name}")
         manager.unload_all()
         return
