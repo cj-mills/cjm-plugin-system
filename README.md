@@ -40,10 +40,10 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
+    core_manager --> core_proxy
+    core_manager --> core_metadata
     core_manager --> core_interface
     core_manager --> core_scheduling
-    core_manager --> core_metadata
-    core_manager --> core_proxy
     core_proxy --> core_interface
     core_queue --> core_manager
     core_scheduling --> core_metadata
@@ -67,8 +67,9 @@ graph LR
     │ --help                        Show this message and exit.                                              │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
     ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
-    │ install-all   Install and register all plugins defined in plugins.yaml.                                │
-    │ setup-host    Install interface libraries in the current Python environment.                           │
+    │ install-all     Install and register all plugins defined in plugins.yaml.                              │
+    │ setup-host      Install interface libraries in the current Python environment.                         │
+    │ estimate-size   Estimate disk space required for plugin environments.                                  │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 For detailed help on any command, use `cjm-ctl <command> --help`.
@@ -89,7 +90,8 @@ from cjm_plugin_system.cli import (
     main,
     run_cmd,
     install_all,
-    setup_host
+    setup_host,
+    estimate_size
 )
 ```
 
@@ -132,6 +134,44 @@ def setup_host(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
 ) -> None
     "Install interface libraries in the current Python environment."
+```
+
+``` python
+def _format_size(
+    size_bytes: int  # Size in bytes
+) -> str:  # Human-readable size string
+    "Format bytes as human-readable string."
+```
+
+``` python
+def _get_pypi_size(
+    package_spec: str  # Package name or git URL
+) -> tuple[int, str]:  # (size_bytes, package_name)
+    "Query PyPI for package download size."
+```
+
+``` python
+def _estimate_conda_size(
+    env_file: str,  # Path to environment.yml
+    env_name: str  # Target environment name
+) -> tuple[int, int]:  # (total_bytes, package_count)
+    "Estimate conda package sizes using dry-run."
+```
+
+``` python
+def _estimate_pip_sizes(
+    packages: list[str]  # List of pip package specs
+) -> tuple[int, int, list[tuple[str, int]]]:  # (total_bytes, found_count, [(name, size), ...])
+    "Estimate pip package sizes from PyPI."
+```
+
+``` python
+def estimate_size(
+    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
+    plugin_name: Optional[str] = typer.Option(None, "--plugin", "-p", help="Estimate for a single plugin"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show per-package breakdown")
+) -> None
+    "Estimate disk space required for plugin environments."
 ```
 
 ### Plugin Interface (`interface.ipynb`)
