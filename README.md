@@ -40,10 +40,10 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_manager --> core_proxy
-    core_manager --> core_metadata
     core_manager --> core_interface
+    core_manager --> core_metadata
     core_manager --> core_scheduling
+    core_manager --> core_proxy
     core_proxy --> core_interface
     core_queue --> core_manager
     core_scheduling --> core_metadata
@@ -70,6 +70,8 @@ graph LR
     │ install-all     Install and register all plugins defined in plugins.yaml.                              │
     │ setup-host      Install interface libraries in the current Python environment.                         │
     │ estimate-size   Estimate disk space required for plugin environments.                                  │
+    │ list            List installed plugins from ~/.cjm/plugins/ manifests.                                 │
+    │ remove          Remove a plugin's manifest and conda environment.                                      │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 For detailed help on any command, use `cjm-ctl <command> --help`.
@@ -91,7 +93,9 @@ from cjm_plugin_system.cli import (
     run_cmd,
     install_all,
     setup_host,
-    estimate_size
+    estimate_size,
+    list_plugins,
+    remove_plugin
 )
 ```
 
@@ -118,6 +122,15 @@ def _generate_manifest(
     manifest_dir: Path  # Directory to write manifest JSON files
 ) -> None
     "Run introspection script inside the target env to generate manifest."
+```
+
+``` python
+def _add_conda_env_to_manifest(
+    manifest_dir: Path,  # Directory containing manifest files
+    plugin_name: str,  # Plugin name (used for finding manifest file)
+    env_name: str  # Conda environment name to add
+) -> bool:  # True if successfully updated
+    "Add conda_env field to an existing manifest file."
 ```
 
 ``` python
@@ -172,6 +185,48 @@ def estimate_size(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show per-package breakdown")
 ) -> None
     "Estimate disk space required for plugin environments."
+```
+
+``` python
+def _get_conda_envs() -> set[str]:  # Set of existing conda environment names
+    """Get list of existing conda environment names."""
+    try
+    "Get list of existing conda environment names."
+```
+
+``` python
+def _get_installed_manifests() -> list[dict]:  # List of manifest dictionaries
+    """Load all manifest JSON files from ~/.cjm/plugins/."""
+    manifest_dir = Path.home() / ".cjm" / "plugins"
+    manifests = []
+    
+    if not manifest_dir.exists()
+    "Load all manifest JSON files from ~/.cjm/plugins/."
+```
+
+``` python
+def _extract_env_from_python_path(
+    python_path: str  # Path like /home/user/miniforge3/envs/my-env/bin/python
+) -> str:  # Extracted environment name or empty string
+    "Extract conda environment name from python_path."
+```
+
+``` python
+def list_plugins(
+    config_path: Optional[str] = typer.Option(None, "--config", help="Path to config file for cross-reference"),
+    show_envs: bool = typer.Option(False, "--envs", "-e", help="Show conda environment status")
+) -> None
+    "List installed plugins from ~/.cjm/plugins/ manifests."
+```
+
+``` python
+def remove_plugin(
+    plugin_name: str = typer.Argument(..., help="Name of the plugin to remove"),
+    config_path: Optional[str] = typer.Option(None, "--config", help="Path to config file for env name lookup"),
+    keep_env: bool = typer.Option(False, "--keep-env", help="Keep the conda environment, only remove manifest"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
+) -> None
+    "Remove a plugin's manifest and conda environment."
 ```
 
 ### Plugin Interface (`interface.ipynb`)
