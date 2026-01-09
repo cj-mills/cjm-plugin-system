@@ -163,3 +163,4 @@ checklink/cookies.txt
 .locks/
 /benchmarks/
 *.backup
+/claude-docs/
