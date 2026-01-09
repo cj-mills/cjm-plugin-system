@@ -26,6 +26,7 @@ from cjm_plugin_system.core.scheduling import QueueScheduler
 
 # Tier 2 Core DTOs
 from cjm_graph_plugin_system.core import SourceRef
+from cjm_graph_plugin_system.utils.mermaid import context_to_mermaid
 
 # Tier 2 Domain Library (The new addition)
 from cjm_graph_domains.domains.knowledge import Person, Work, Concept, Topic, Quote
@@ -293,6 +294,43 @@ async def run_graph_federation():
         print(f"DuckDB Query Error: {e}")
         import traceback
         traceback.print_exc()
+
+
+    # 9. VISUALIZATION (Mermaid)
+    print(f"\n--- Phase 5: Visualization ---")
+    
+    # We need to fetch the full context (all nodes we just created) to visualize it.
+    # Since we don't have a single root node, we can cheat and export the whole graph 
+    # (since we know it's small/fresh for this test).
+    
+    # Execute 'export_graph' via the manager
+    export_result = await manager.execute_plugin_async(
+        graph_name,
+        action="export_graph"
+    )
+    
+    # Convert dict result back to GraphContext object for the utility
+    # Note: The utility expects a GraphContext object, but the plugin returns a dict via IPC.
+    # We need to reconstruct it using the Tier 2 library.
+    from cjm_graph_plugin_system.core import GraphContext
+    full_graph_ctx = GraphContext.from_dict(export_result)
+    
+    # Generate Diagram
+    mermaid_code = context_to_mermaid(
+        full_graph_ctx, 
+        direction="LR",
+        node_color_map={
+            "Person": "#ffcccc",
+            "Work": "#ccccff",
+            "Concept": "#ccffcc",
+            "Quote": "#ffffcc"
+        }
+    )
+    
+    print("\n[Mermaid Diagram]")
+    print("Copy/Paste this into https://mermaid.live :\n")
+    print(mermaid_code)
+
 
     # Cleanup
     await queue.stop()
