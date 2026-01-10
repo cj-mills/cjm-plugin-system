@@ -17,6 +17,7 @@ from typing import Any, AsyncGenerator, Dict, Generator, Optional
 
 import httpx
 
+from .config import get_config
 from .interface import FileBackedDTO, PluginInterface
 
 # %% ../../nbs/core/proxy.ipynb 6
@@ -25,7 +26,7 @@ class RemotePluginProxy(PluginInterface):
     
     def __init__(
         self,
-        manifest: Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+        manifest:Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
     ):
         """Initialize proxy and start the worker process."""
         self.manifest = manifest
@@ -54,8 +55,9 @@ class RemotePluginProxy(PluginInterface):
         """Launch the worker subprocess."""
         python_path = self.manifest['python_path']
 
-        # 1. Setup Log Directory
-        log_dir = Path.home() / ".cjm" / "logs"
+        # 1. Setup Log Directory using config
+        cfg = get_config()
+        log_dir = cfg.logs_dir
         log_dir.mkdir(parents=True, exist_ok=True)
         
         # 2. Open Log File (Append mode)
@@ -95,7 +97,7 @@ class RemotePluginProxy(PluginInterface):
 
     def _wait_for_ready(
         self,
-        timeout: float = 30.0 # Max seconds to wait for worker startup
+        timeout:float=30.0 # Max seconds to wait for worker startup
     ) -> None:
         """Wait for worker to become responsive."""
         start = time.time()
@@ -118,7 +120,7 @@ class RemotePluginProxy(PluginInterface):
 
     def initialize(
         self,
-        config: Optional[Dict[str, Any]] = None # Configuration dictionary
+        config:Optional[Dict[str, Any]]=None # Configuration dictionary
     ) -> None:
         """Initialize or reconfigure the plugin."""
         with httpx.Client() as client:

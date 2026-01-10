@@ -12,6 +12,7 @@ from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Type
 
+from .config import get_config
 from .interface import PluginInterface
 from .metadata import PluginMeta
 from .proxy import RemotePluginProxy
@@ -30,16 +31,23 @@ class PluginManager:
 
     def __init__(
         self,
-        plugin_interface: Type[PluginInterface] = PluginInterface,  # Base interface for type checking
-        search_paths: Optional[List[Path]] = None,  # Custom manifest search paths
-        scheduler: Optional[ResourceScheduler] = None  # Resource allocation policy
+        plugin_interface:Type[PluginInterface]=PluginInterface, # Base interface for type checking
+        search_paths:Optional[List[Path]]=None, # Custom manifest search paths
+        scheduler:Optional[ResourceScheduler]=None # Resource allocation policy
     ):
         """Initialize the plugin manager."""
         self.plugin_interface = plugin_interface
-        self.search_paths = search_paths or [
-            Path.cwd() / ".cjm" / "plugins",   # Local (high priority)
-            Path.home() / ".cjm" / "plugins"   # Global (low priority)
-        ]
+        
+        # Use config-based search paths if not explicitly provided
+        if search_paths is None:
+            cfg = get_config()
+            self.search_paths = [
+                Path.cwd() / ".cjm" / "plugins",  # Local (high priority)
+                cfg.plugins_dir                    # Config-based (replaces ~/.cjm/plugins)
+            ]
+        else:
+            self.search_paths = search_paths
+        
         self.scheduler = scheduler or PermissiveScheduler()
         self.system_monitor: Optional[PluginInterface] = None
         self.discovered: List[PluginMeta] = []
@@ -48,7 +56,7 @@ class PluginManager:
 
     def register_system_monitor(
         self,
-        plugin_name: str  # Name of the system monitor plugin
+        plugin_name:str # Name of the system monitor plugin
     ) -> None:
         """Bind a loaded plugin to act as the hardware system monitor."""
         self.system_monitor = self.get_plugin(plugin_name)
@@ -57,7 +65,7 @@ class PluginManager:
         else:
             self.logger.warning(f"System monitor plugin not found: {plugin_name}")
 
-    def _get_global_stats(self) -> Dict[str, Any]:  # Current system telemetry
+    def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
         """Fetch real-time stats from the system monitor plugin (sync)."""
         if self.system_monitor:
             try:
@@ -66,7 +74,7 @@ class PluginManager:
                 self.logger.warning(f"Failed to fetch system stats: {e}")
         return {}
 
-    async def _get_global_stats_async(self) -> Dict[str, Any]:  # Current system telemetry
+    async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system telemetry
         """Fetch real-time stats from the system monitor plugin (async)."""
         if self.system_monitor:
             try:
@@ -75,7 +83,7 @@ class PluginManager:
                 self.logger.warning(f"Failed to fetch system stats: {e}")
         return {}
 
-    def discover_manifests(self) -> List[PluginMeta]:  # List of discovered plugin metadata
+    def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
         """Discover plugins via JSON manifests in search paths."""
         self.discovered = []
         seen_plugins = set()
@@ -117,37 +125,37 @@ class PluginManager:
 
     def get_discovered_by_category(
         self,
-        category: str  # Category to filter by (e.g., "transcription")
-    ) -> List[PluginMeta]:  # List of matching discovered plugins
+        category:str # Category to filter by (e.g., "transcription")
+    ) -> List[PluginMeta]: # List of matching discovered plugins
         """Get discovered plugins filtered by category."""
         return [meta for meta in self.discovered if meta.category == category]
 
     def get_plugins_by_category(
         self,
-        category: str  # Category to filter by (e.g., "transcription")
-    ) -> List[PluginMeta]:  # List of matching loaded plugins
+        category:str # Category to filter by (e.g., "transcription")
+    ) -> List[PluginMeta]: # List of matching loaded plugins
         """Get loaded plugins filtered by category."""
         return [meta for meta in self.plugins.values() if meta.category == category]
 
-    def get_discovered_categories(self) -> List[str]:  # List of unique categories
+    def get_discovered_categories(self) -> List[str]: # List of unique categories
         """Get all unique categories among discovered plugins."""
         return list(set(meta.category for meta in self.discovered if meta.category))
 
-    def get_loaded_categories(self) -> List[str]:  # List of unique categories
+    def get_loaded_categories(self) -> List[str]: # List of unique categories
         """Get all unique categories among loaded plugins."""
         return list(set(meta.category for meta in self.plugins.values() if meta.category))
 
     def get_plugin_meta(
         self,
-        plugin_name: str  # Name of the plugin
-    ) -> Optional[PluginMeta]:  # Plugin metadata or None
+        plugin_name:str # Name of the plugin
+    ) -> Optional[PluginMeta]: # Plugin metadata or None
         """Get metadata for a loaded plugin by name."""
         return self.plugins.get(plugin_name)
 
     def get_discovered_meta(
         self,
-        plugin_name: str  # Name of the plugin
-    ) -> Optional[PluginMeta]:  # Plugin metadata or None
+        plugin_name:str # Name of the plugin
+    ) -> Optional[PluginMeta]: # Plugin metadata or None
         """Get metadata for a discovered (not necessarily loaded) plugin by name."""
         for meta in self.discovered:
             if meta.name == plugin_name:
@@ -156,8 +164,8 @@ class PluginManager:
 
     def _extract_defaults_from_schema(
         self,
-        config_schema: Optional[Dict[str, Any]]  # JSON Schema with properties
-    ) -> Dict[str, Any]:  # Default values extracted from schema
+        config_schema:Optional[Dict[str, Any]] # JSON Schema with properties
+    ) -> Dict[str, Any]: # Default values extracted from schema
         """Extract default values from a JSON Schema's properties."""
         if not config_schema:
             return {}
@@ -173,9 +181,9 @@ class PluginManager:
 
     def load_plugin(
         self,
-        plugin_meta: PluginMeta,  # Plugin metadata (with manifest attached)
-        config: Optional[Dict[str, Any]] = None  # Initial configuration
-    ) -> bool:  # True if successfully loaded
+        plugin_meta:PluginMeta, # Plugin metadata (with manifest attached)
+        config:Optional[Dict[str, Any]]=None # Initial configuration
+    ) -> bool: # True if successfully loaded
         """Load a plugin by spawning a Worker subprocess."""
         if not hasattr(plugin_meta, 'manifest'):
             self.logger.error(f"Plugin {plugin_meta.name} has no manifest data")
@@ -207,8 +215,8 @@ class PluginManager:
 
     def load_all(
         self,
-        configs: Optional[Dict[str, Dict[str, Any]]] = None  # Plugin name -> config mapping
-    ) -> Dict[str, bool]:  # Plugin name -> success mapping
+        configs:Optional[Dict[str, Dict[str, Any]]]=None # Plugin name -> config mapping
+    ) -> Dict[str, bool]: # Plugin name -> success mapping
         """Discover and load all available plugins."""
         configs = configs or {}
         results = {}
@@ -222,8 +230,8 @@ class PluginManager:
 
     def unload_plugin(
         self,
-        plugin_name: str  # Name of the plugin to unload
-    ) -> bool:  # True if successfully unloaded
+        plugin_name:str # Name of the plugin to unload
+    ) -> bool: # True if successfully unloaded
         """Unload a plugin and terminate its Worker process."""
         if plugin_name not in self.plugins:
             self.logger.error(f"Plugin {plugin_name} not found")
@@ -249,22 +257,19 @@ class PluginManager:
 
     def get_plugin(
         self,
-        plugin_name: str  # Name of the plugin
-    ) -> Optional[PluginInterface]:  # Plugin proxy instance or None
+        plugin_name:str # Name of the plugin
+    ) -> Optional[PluginInterface]: # Plugin proxy instance or None
         """Get a loaded plugin instance by name."""
         if plugin_name in self.plugins:
             return self.plugins[plugin_name].instance
         return None
 
-    def list_plugins(self) -> List[PluginMeta]:  # List of loaded plugin metadata
+    def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
         """List all loaded plugins."""
         return list(self.plugins.values())
 
-    def _evict_for_resources(self, needed_meta: PluginMeta) -> bool:
-        """
-        Attempt to free resources by unloading/releasing idle plugins.
-        Strategy: Least Recently Used (LRU).
-        """
+    def _evict_for_resources(self, needed_meta:PluginMeta) -> bool:
+        """Attempt to free resources by unloading/releasing idle plugins (LRU)."""
         self.logger.info(f"Attempting eviction to make room for {needed_meta.name}...")
         
         # 1. Identify Candidates: Running plugins that ARE NOT the one we need
@@ -300,10 +305,10 @@ class PluginManager:
 
     def execute_plugin(
         self,
-        plugin_name: str,  # Name of the plugin
+        plugin_name:str, # Name of the plugin
         *args,
         **kwargs
-    ) -> Any:  # Plugin result
+    ) -> Any: # Plugin result
         """Execute a plugin's main functionality (sync)."""
         plugin = self.get_plugin(plugin_name)
         if not plugin:
@@ -338,10 +343,10 @@ class PluginManager:
 
     async def execute_plugin_async(
         self,
-        plugin_name: str,  # Name of the plugin
+        plugin_name:str, # Name of the plugin
         *args,
         **kwargs
-    ) -> Any:  # Plugin result
+    ) -> Any: # Plugin result
         """Execute a plugin's main functionality (async)."""
         plugin = self.get_plugin(plugin_name)
         if not plugin:
@@ -376,8 +381,8 @@ class PluginManager:
 
     def enable_plugin(
         self,
-        plugin_name: str  # Name of the plugin
-    ) -> bool:  # True if plugin was enabled
+        plugin_name:str # Name of the plugin
+    ) -> bool: # True if plugin was enabled
         """Enable a plugin."""
         if plugin_name in self.plugins:
             self.plugins[plugin_name].enabled = True
@@ -386,32 +391,34 @@ class PluginManager:
 
     def disable_plugin(
         self,
-        plugin_name: str  # Name of the plugin
-    ) -> bool:  # True if plugin was disabled
+        plugin_name:str # Name of the plugin
+    ) -> bool: # True if plugin was disabled
         """Disable a plugin without unloading it."""
         if plugin_name in self.plugins:
             self.plugins[plugin_name].enabled = False
             return True
         return False
 
-    def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str:
-            """Read the last N lines of the plugin's log file."""
-            # Find the log path based on convention
-            log_path = Path.home() / ".cjm" / "logs" / f"{plugin_name}.log"
+    def get_plugin_logs(
+        self,
+        plugin_name:str, # Name of the plugin
+        lines:int=50 # Number of lines to return
+    ) -> str: # Log content
+        """Read the last N lines of the plugin's log file."""
+        cfg = get_config()
+        log_path = cfg.logs_dir / f"{plugin_name}.log"
+        
+        if not log_path.exists():
+            return "No logs found."
             
-            if not log_path.exists():
-                return "No logs found."
-                
-            try:
-                # Efficient tail implementation
-                # For small files, reading all is fine. For large, use deque.
-                from collections import deque
-                with open(log_path, 'r') as f:
-                    # Read last N lines
-                    tail = deque(f, maxlen=lines)
-                    return "".join(tail)
-            except Exception as e:
-                return f"Error reading logs: {e}"
+        try:
+            # Efficient tail implementation
+            from collections import deque
+            with open(log_path, 'r') as f:
+                tail = deque(f, maxlen=lines)
+                return "".join(tail)
+        except Exception as e:
+            return f"Error reading logs: {e}"
 
 # %% ../../nbs/core/manager.ipynb 8
 def get_plugin_config(

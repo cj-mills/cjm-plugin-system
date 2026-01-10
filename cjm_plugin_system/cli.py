@@ -11,17 +11,43 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 import typer
 import yaml
 
+from .core.config import load_config, set_config, get_config
+
 app = typer.Typer(help="CJM Plugin System CLI", no_args_is_help=True)
 
 @app.callback()
-def main() -> None:
+def main(
+    ctx:typer.Context,
+    cjm_config:Annotated[Optional[Path], typer.Option(
+        "--cjm-config",
+        help="Path to cjm.yaml configuration file"
+    )]=None,
+    data_dir:Annotated[Optional[Path], typer.Option(
+        "--data-dir",
+        help="Override data directory (manifests, logs)"
+    )]=None,
+    conda_prefix:Annotated[Optional[Path], typer.Option(
+        "--conda-prefix",
+        help="Override conda/mamba prefix path"
+    )]=None,
+    conda_type:Annotated[Optional[str], typer.Option(
+        "--conda-type",
+        help="Conda implementation: micromamba, miniforge, or conda"
+    )]=None,
+) -> None:
     """CJM Plugin System CLI for managing isolated plugin environments."""
-    pass
+    cfg = load_config(
+        config_path=cjm_config,
+        data_dir=data_dir,
+        conda_prefix=conda_prefix,
+        conda_type=conda_type
+    )
+    set_config(cfg)
 
 # %% ../nbs/cli.ipynb 3
 def run_cmd(
@@ -147,10 +173,10 @@ print(json.dumps(meta, indent=2))
 
 # %% ../nbs/cli.ipynb 5
 def _add_conda_env_to_manifest(
-    manifest_dir: Path,  # Directory containing manifest files
-    plugin_name: str,  # Plugin name (used for finding manifest file)
-    env_name: str  # Conda environment name to add
-) -> bool:  # True if successfully updated
+    manifest_dir:Path, # Directory containing manifest files
+    plugin_name:str, # Plugin name (used for finding manifest file)
+    env_name:str # Conda environment name to add
+) -> bool: # True if successfully updated
     """Add conda_env field to an existing manifest file."""
     # Find manifest by scanning for matching name
     for manifest_file in manifest_dir.glob("*.json"):
@@ -174,19 +200,21 @@ def _add_conda_env_to_manifest(
 
 @app.command()
 def install_all(
-    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
-    force: bool = typer.Option(False, help="Force recreation of environments")
+    plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
+    force:bool=typer.Option(False, help="Force recreation of environments")
 ) -> None:
     """Install and register all plugins defined in plugins.yaml."""
-    if not os.path.exists(config_path):
-        typer.echo(f"Config file not found: {config_path}", err=True)
+    cfg = get_config()
+    
+    if not os.path.exists(plugins_path):
+        typer.echo(f"Plugins file not found: {plugins_path}", err=True)
         raise typer.Exit(code=1)
 
-    with open(config_path) as f:
+    with open(plugins_path) as f:
         config = yaml.safe_load(f)
 
-    # Setup manifest directory
-    manifest_dir = Path.home() / ".cjm" / "plugins"
+    # Setup manifest directory using config
+    manifest_dir = cfg.plugins_dir
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
     plugins = config.get('plugins', [])
@@ -262,15 +290,15 @@ def install_all(
 # %% ../nbs/cli.ipynb 7
 @app.command("setup-host")
 def setup_host(
-    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
+    plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
+    yes:bool=typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
 ) -> None:
     """Install interface libraries in the current Python environment."""
-    if not os.path.exists(config_path):
-        typer.echo(f"Config file not found: {config_path}", err=True)
+    if not os.path.exists(plugins_path):
+        typer.echo(f"Plugins file not found: {plugins_path}", err=True)
         raise typer.Exit(code=1)
 
-    with open(config_path) as f:
+    with open(plugins_path) as f:
         config = yaml.safe_load(f)
 
     # Collect unique interface libraries from all plugins
@@ -290,7 +318,7 @@ def setup_host(
         raise typer.Exit(code=0)
 
     # Display what will be installed
-    typer.echo(f"Reading {config_path}...")
+    typer.echo(f"Reading {plugins_path}...")
     typer.echo(f"Found {len(all_libs)} unique interface libraries:")
     for lib in sorted(all_libs):
         typer.echo(f"  - {lib}")
@@ -409,16 +437,16 @@ from typing import List
 
 @app.command("estimate-size")
 def estimate_size(
-    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
-    plugin_name: Optional[str] = typer.Option(None, "--plugin", "-p", help="Estimate for a single plugin"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show per-package breakdown")
+    plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
+    plugin_name:Optional[str]=typer.Option(None, "--plugin", "-p", help="Estimate for a single plugin"),
+    verbose:bool=typer.Option(False, "--verbose", "-v", help="Show per-package breakdown")
 ) -> None:
     """Estimate disk space required for plugin environments."""
-    if not os.path.exists(config_path):
-        typer.echo(f"Config file not found: {config_path}", err=True)
+    if not os.path.exists(plugins_path):
+        typer.echo(f"Plugins file not found: {plugins_path}", err=True)
         raise typer.Exit(code=1)
 
-    with open(config_path) as f:
+    with open(plugins_path) as f:
         config = yaml.safe_load(f)
 
     plugins = config.get('plugins', [])
@@ -496,7 +524,7 @@ def estimate_size(
     typer.echo("      Conda estimates require the environment to not already exist.")
 
 # %% ../nbs/cli.ipynb 12
-def _get_conda_envs() -> set[str]:  # Set of existing conda environment names
+def _get_conda_envs() -> set[str]: # Set of existing conda environment names
     """Get list of existing conda environment names."""
     try:
         result = subprocess.run(
@@ -516,9 +544,13 @@ def _get_conda_envs() -> set[str]:  # Set of existing conda environment names
     return set()
 
 
-def _get_installed_manifests() -> list[dict]:  # List of manifest dictionaries
-    """Load all manifest JSON files from ~/.cjm/plugins/."""
-    manifest_dir = Path.home() / ".cjm" / "plugins"
+def _get_installed_manifests(
+    manifest_dir:Optional[Path]=None # Directory to scan (uses config default if None)
+) -> list[dict]: # List of manifest dictionaries
+    """Load all manifest JSON files from the manifest directory."""
+    if manifest_dir is None:
+        manifest_dir = get_config().plugins_dir
+    
     manifests = []
     
     if not manifest_dir.exists():
@@ -537,8 +569,8 @@ def _get_installed_manifests() -> list[dict]:  # List of manifest dictionaries
 
 
 def _extract_env_from_python_path(
-    python_path: str  # Path like /home/user/miniforge3/envs/my-env/bin/python
-) -> str:  # Extracted environment name or empty string
+    python_path:str # Path like /home/user/miniforge3/envs/my-env/bin/python
+) -> str: # Extracted environment name or empty string
     """Extract conda environment name from python_path."""
     if not python_path:
         return ''
@@ -554,20 +586,21 @@ def _extract_env_from_python_path(
 
 @app.command("list")
 def list_plugins(
-    config_path: Optional[str] = typer.Option(None, "--config", help="Path to config file for cross-reference"),
-    show_envs: bool = typer.Option(False, "--envs", "-e", help="Show conda environment status")
+    plugins_path:Optional[str]=typer.Option(None, "--plugins", help="Path to plugins.yaml for cross-reference"),
+    show_envs:bool=typer.Option(False, "--envs", "-e", help="Show conda environment status")
 ) -> None:
-    """List installed plugins from ~/.cjm/plugins/ manifests."""
+    """List installed plugins from manifest directory."""
+    cfg = get_config()
     manifests = _get_installed_manifests()
     
     if not manifests:
-        typer.echo("No plugins found in ~/.cjm/plugins/")
+        typer.echo(f"No plugins found in {cfg.plugins_dir}")
         raise typer.Exit(code=0)
     
     # Load config for cross-reference if provided
     config_plugins = {}
-    if config_path and os.path.exists(config_path):
-        with open(config_path) as f:
+    if plugins_path and os.path.exists(plugins_path):
+        with open(plugins_path) as f:
             config = yaml.safe_load(f)
         for p in config.get('plugins', []):
             config_plugins[p.get('name')] = p
@@ -599,26 +632,27 @@ def list_plugins(
             typer.echo(f"  Env: (not specified in manifest)")
         
         # Cross-reference with config
-        if config_path:
+        if plugins_path:
             if name in config_plugins:
                 cfg_env = config_plugins[name].get('env_name', '')
                 if cfg_env and cfg_env != env_name:
                     typer.echo(f"  Config env: {cfg_env} (differs from manifest)")
             else:
-                typer.echo(f"  (not in {config_path})")
+                typer.echo(f"  (not in {plugins_path})")
         
         typer.echo("")
 
 # %% ../nbs/cli.ipynb 14
 @app.command("remove")
 def remove_plugin(
-    plugin_name: str = typer.Argument(..., help="Name of the plugin to remove"),
-    config_path: Optional[str] = typer.Option(None, "--config", help="Path to config file for env name lookup"),
-    keep_env: bool = typer.Option(False, "--keep-env", help="Keep the conda environment, only remove manifest"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
+    plugin_name:str=typer.Argument(..., help="Name of the plugin to remove"),
+    plugins_path:Optional[str]=typer.Option(None, "--plugins", help="Path to plugins.yaml for env name lookup"),
+    keep_env:bool=typer.Option(False, "--keep-env", help="Keep the conda environment, only remove manifest"),
+    yes:bool=typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
 ) -> None:
     """Remove a plugin's manifest and conda environment."""
-    manifest_dir = Path.home() / ".cjm" / "plugins"
+    cfg = get_config()
+    manifest_dir = cfg.plugins_dir
     manifest_path = manifest_dir / f"{plugin_name}.json"
     
     # Find the manifest
@@ -642,9 +676,9 @@ def remove_plugin(
     if not env_name:
         env_name = _extract_env_from_python_path(manifest.get('python_path', ''))
     
-    # Fallback 2: Check config file
-    if not env_name and config_path and os.path.exists(config_path):
-        with open(config_path) as f:
+    # Fallback 2: Check plugins file
+    if not env_name and plugins_path and os.path.exists(plugins_path):
+        with open(plugins_path) as f:
             config = yaml.safe_load(f)
         for p in config.get('plugins', []):
             if p.get('name') == plugin_name:

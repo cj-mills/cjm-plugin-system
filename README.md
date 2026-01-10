@@ -12,7 +12,8 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (7)
+    ├── core/ (8)
+    │   ├── config.ipynb      # Project-level configuration for paths, runtime settings, and environment management
     │   ├── interface.ipynb   # Abstract base class defining the generic plugin interface
     │   ├── manager.ipynb     # Plugin discovery, loading, and lifecycle management system
     │   ├── metadata.ipynb    # Data structures for plugin metadata
@@ -24,13 +25,14 @@ pip install cjm_plugin_system
     │   └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
     └── cli.ipynb  # CLI tool for declarative plugin management
 
-Total: 9 notebooks across 2 directories
+Total: 10 notebooks across 2 directories
 
 ## Module Dependencies
 
 ``` mermaid
 graph LR
     cli[cli<br/>cli]
+    core_config[core.config<br/>Configuration]
     core_interface[core.interface<br/>Plugin Interface]
     core_manager[core.manager<br/>Plugin Manager]
     core_metadata[core.metadata<br/>Plugin Metadata]
@@ -40,16 +42,19 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    core_manager --> core_interface
+    cli --> core_config
+    core_manager --> core_config
     core_manager --> core_metadata
-    core_manager --> core_scheduling
+    core_manager --> core_interface
     core_manager --> core_proxy
+    core_manager --> core_scheduling
+    core_proxy --> core_config
     core_proxy --> core_interface
     core_queue --> core_manager
     core_scheduling --> core_metadata
 ```
 
-*7 cross-module dependencies detected*
+*10 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -61,16 +66,20 @@ graph LR
      CJM Plugin System CLI                                                                                    
                                                                                                               
     ╭─ Options ──────────────────────────────────────────────────────────────────────────────────────────────╮
-    │ --install-completion          Install completion for the current shell.                                │
-    │ --show-completion             Show completion for the current shell, to copy it or customize the       │
-    │                               installation.                                                            │
-    │ --help                        Show this message and exit.                                              │
+    │ --cjm-config                PATH  Path to cjm.yaml configuration file                                  │
+    │ --data-dir                  PATH  Override data directory (manifests, logs)                            │
+    │ --conda-prefix              PATH  Override conda/mamba prefix path                                     │
+    │ --conda-type                TEXT  Conda implementation: micromamba, miniforge, or conda                │
+    │ --install-completion              Install completion for the current shell.                            │
+    │ --show-completion                 Show completion for the current shell, to copy it or customize the   │
+    │                                   installation.                                                        │
+    │ --help                            Show this message and exit.                                          │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
     ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
     │ install-all     Install and register all plugins defined in plugins.yaml.                              │
     │ setup-host      Install interface libraries in the current Python environment.                         │
     │ estimate-size   Estimate disk space required for plugin environments.                                  │
-    │ list            List installed plugins from ~/.cjm/plugins/ manifests.                                 │
+    │ list            List installed plugins from manifest directory.                                        │
     │ remove          Remove a plugin's manifest and conda environment.                                      │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
@@ -102,7 +111,25 @@ from cjm_plugin_system.cli import (
 #### Functions
 
 ``` python
-def main() -> None
+def main(
+    ctx:typer.Context,
+    cjm_config:Annotated[Optional[Path], typer.Option(
+        "--cjm-config",
+        help="Path to cjm.yaml configuration file"
+    )]=None,
+    data_dir:Annotated[Optional[Path], typer.Option(
+        "--data-dir",
+        help="Override data directory (manifests, logs)"
+    )]=None,
+    conda_prefix:Annotated[Optional[Path], typer.Option(
+        "--conda-prefix",
+        help="Override conda/mamba prefix path"
+    )]=None,
+    conda_type:Annotated[Optional[str], typer.Option(
+        "--conda-type",
+        help="Conda implementation: micromamba, miniforge, or conda"
+    )]=None,
+) -> None
     "CJM Plugin System CLI for managing isolated plugin environments."
 ```
 
@@ -126,25 +153,25 @@ def _generate_manifest(
 
 ``` python
 def _add_conda_env_to_manifest(
-    manifest_dir: Path,  # Directory containing manifest files
-    plugin_name: str,  # Plugin name (used for finding manifest file)
-    env_name: str  # Conda environment name to add
-) -> bool:  # True if successfully updated
+    manifest_dir:Path, # Directory containing manifest files
+    plugin_name:str, # Plugin name (used for finding manifest file)
+    env_name:str # Conda environment name to add
+) -> bool: # True if successfully updated
     "Add conda_env field to an existing manifest file."
 ```
 
 ``` python
 def install_all(
-    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
-    force: bool = typer.Option(False, help="Force recreation of environments")
+    plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
+    force:bool=typer.Option(False, help="Force recreation of environments")
 ) -> None
     "Install and register all plugins defined in plugins.yaml."
 ```
 
 ``` python
 def setup_host(
-    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
+    plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
+    yes:bool=typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
 ) -> None
     "Install interface libraries in the current Python environment."
 ```
@@ -180,53 +207,160 @@ def _estimate_pip_sizes(
 
 ``` python
 def estimate_size(
-    config_path: str = typer.Option("plugins.yaml", "--config", help="Path to master config file"),
-    plugin_name: Optional[str] = typer.Option(None, "--plugin", "-p", help="Estimate for a single plugin"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show per-package breakdown")
+    plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
+    plugin_name:Optional[str]=typer.Option(None, "--plugin", "-p", help="Estimate for a single plugin"),
+    verbose:bool=typer.Option(False, "--verbose", "-v", help="Show per-package breakdown")
 ) -> None
     "Estimate disk space required for plugin environments."
 ```
 
 ``` python
-def _get_conda_envs() -> set[str]:  # Set of existing conda environment names
+def _get_conda_envs() -> set[str]: # Set of existing conda environment names
     """Get list of existing conda environment names."""
     try
     "Get list of existing conda environment names."
 ```
 
 ``` python
-def _get_installed_manifests() -> list[dict]:  # List of manifest dictionaries
-    """Load all manifest JSON files from ~/.cjm/plugins/."""
-    manifest_dir = Path.home() / ".cjm" / "plugins"
-    manifests = []
-    
-    if not manifest_dir.exists()
-    "Load all manifest JSON files from ~/.cjm/plugins/."
+def _get_installed_manifests(
+    manifest_dir:Optional[Path]=None # Directory to scan (uses config default if None)
+) -> list[dict]: # List of manifest dictionaries
+    "Load all manifest JSON files from the manifest directory."
 ```
 
 ``` python
 def _extract_env_from_python_path(
-    python_path: str  # Path like /home/user/miniforge3/envs/my-env/bin/python
-) -> str:  # Extracted environment name or empty string
+    python_path:str # Path like /home/user/miniforge3/envs/my-env/bin/python
+) -> str: # Extracted environment name or empty string
     "Extract conda environment name from python_path."
 ```
 
 ``` python
 def list_plugins(
-    config_path: Optional[str] = typer.Option(None, "--config", help="Path to config file for cross-reference"),
-    show_envs: bool = typer.Option(False, "--envs", "-e", help="Show conda environment status")
+    plugins_path:Optional[str]=typer.Option(None, "--plugins", help="Path to plugins.yaml for cross-reference"),
+    show_envs:bool=typer.Option(False, "--envs", "-e", help="Show conda environment status")
 ) -> None
-    "List installed plugins from ~/.cjm/plugins/ manifests."
+    "List installed plugins from manifest directory."
 ```
 
 ``` python
 def remove_plugin(
-    plugin_name: str = typer.Argument(..., help="Name of the plugin to remove"),
-    config_path: Optional[str] = typer.Option(None, "--config", help="Path to config file for env name lookup"),
-    keep_env: bool = typer.Option(False, "--keep-env", help="Keep the conda environment, only remove manifest"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
+    plugin_name:str=typer.Argument(..., help="Name of the plugin to remove"),
+    plugins_path:Optional[str]=typer.Option(None, "--plugins", help="Path to plugins.yaml for env name lookup"),
+    keep_env:bool=typer.Option(False, "--keep-env", help="Keep the conda environment, only remove manifest"),
+    yes:bool=typer.Option(False, "--yes", "-y", help="Skip confirmation prompt")
 ) -> None
     "Remove a plugin's manifest and conda environment."
+```
+
+### Configuration (`config.ipynb`)
+
+> Project-level configuration for paths, runtime settings, and
+> environment management
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.config import (
+    RuntimeMode,
+    CondaType,
+    RuntimeConfig,
+    CJMConfig,
+    load_config,
+    get_config,
+    set_config,
+    reset_config
+)
+```
+
+#### Functions
+
+``` python
+def _load_from_yaml(
+    yaml_path:Path # Path to cjm.yaml file
+) -> CJMConfig: # Parsed configuration
+    "Load config from YAML file, resolving relative paths."
+```
+
+``` python
+def load_config(
+    config_path:Optional[Path]=None, # CLI --cjm-config
+    data_dir:Optional[Path]=None, # CLI --data-dir
+    conda_prefix:Optional[Path]=None, # CLI --conda-prefix
+    conda_type:Optional[str]=None # CLI --conda-type
+) -> CJMConfig: # Resolved configuration
+    "Load config with layered resolution (CLI > env vars > yaml > defaults)."
+```
+
+``` python
+def get_config() -> CJMConfig: # Current configuration
+    """Get current config (loads defaults if not set)."""
+    global _current_config
+    if _current_config is None
+    "Get current config (loads defaults if not set)."
+```
+
+``` python
+def set_config(
+    config:CJMConfig # Configuration to set as current
+) -> None
+    "Set current config (called by CLI callback)."
+```
+
+``` python
+def reset_config() -> None
+    "Reset to unloaded state (for testing)."
+```
+
+#### Classes
+
+``` python
+class RuntimeMode(str, Enum):
+    "Runtime mode for the plugin system."
+```
+
+``` python
+class CondaType(str, Enum):
+    "Type of conda implementation to use."
+```
+
+``` python
+@dataclass
+class RuntimeConfig:
+    "Runtime environment configuration."
+    
+    mode: RuntimeMode = RuntimeMode.SYSTEM  # LOCAL for project-local, SYSTEM for global
+    conda_type: CondaType = CondaType.CONDA  # Conda implementation to use
+    prefix: Optional[Path]  # Path to runtime directory (LOCAL mode only)
+    binaries: Dict[str, Path] = field(...)  # Platform-specific binary paths
+```
+
+``` python
+@dataclass
+class CJMConfig:
+    "Main configuration for cjm-plugin-system."
+    
+    runtime: RuntimeConfig = field(...)  # Runtime environment settings
+    data_dir: Path = field(...)  # Base directory for manifests, logs
+    plugins_config: Path = field(...)  # Path to plugins.yaml file
+    models_dir: Optional[Path]  # Directory for model downloads
+    
+    def plugins_dir(self) -> Path: # Directory containing plugin manifests
+            """Directory containing plugin manifests."""
+            return self.data_dir / "plugins"
+    
+        @property
+        def logs_dir(self) -> Path: # Directory containing plugin logs
+        "Directory containing plugin manifests."
+    
+    def logs_dir(self) -> Path: # Directory containing plugin logs
+        "Directory containing plugin logs."
+```
+
+#### Variables
+
+``` python
+_current_config: Optional[CJMConfig] = None
 ```
 
 ### Plugin Interface (`interface.ipynb`)
@@ -420,27 +554,27 @@ async def execute_plugin_stream(
 class PluginManager:
     def __init__(
         self,
-        plugin_interface: Type[PluginInterface] = PluginInterface,  # Base interface for type checking
-        search_paths: Optional[List[Path]] = None,  # Custom manifest search paths
-        scheduler: Optional[ResourceScheduler] = None  # Resource allocation policy
+        plugin_interface:Type[PluginInterface]=PluginInterface, # Base interface for type checking
+        search_paths:Optional[List[Path]]=None, # Custom manifest search paths
+        scheduler:Optional[ResourceScheduler]=None # Resource allocation policy
     )
     "Manages plugin discovery, loading, and lifecycle via process isolation."
     
     def __init__(
             self,
-            plugin_interface: Type[PluginInterface] = PluginInterface,  # Base interface for type checking
-            search_paths: Optional[List[Path]] = None,  # Custom manifest search paths
-            scheduler: Optional[ResourceScheduler] = None  # Resource allocation policy
+            plugin_interface:Type[PluginInterface]=PluginInterface, # Base interface for type checking
+            search_paths:Optional[List[Path]]=None, # Custom manifest search paths
+            scheduler:Optional[ResourceScheduler]=None # Resource allocation policy
         )
         "Initialize the plugin manager."
     
     def register_system_monitor(
             self,
-            plugin_name: str  # Name of the system monitor plugin
+            plugin_name:str # Name of the system monitor plugin
         ) -> None
         "Bind a loaded plugin to act as the hardware system monitor."
     
-    def discover_manifests(self) -> List[PluginMeta]:  # List of discovered plugin metadata
+    def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
             """Discover plugins via JSON manifests in search paths."""
             self.discovered = []
             seen_plugins = set()
@@ -450,62 +584,62 @@ class PluginManager:
     
     def get_discovered_by_category(
             self,
-            category: str  # Category to filter by (e.g., "transcription")
-        ) -> List[PluginMeta]:  # List of matching discovered plugins
+            category:str # Category to filter by (e.g., "transcription")
+        ) -> List[PluginMeta]: # List of matching discovered plugins
         "Get discovered plugins filtered by category."
     
     def get_plugins_by_category(
             self,
-            category: str  # Category to filter by (e.g., "transcription")
-        ) -> List[PluginMeta]:  # List of matching loaded plugins
+            category:str # Category to filter by (e.g., "transcription")
+        ) -> List[PluginMeta]: # List of matching loaded plugins
         "Get loaded plugins filtered by category."
     
-    def get_discovered_categories(self) -> List[str]:  # List of unique categories
+    def get_discovered_categories(self) -> List[str]: # List of unique categories
             """Get all unique categories among discovered plugins."""
             return list(set(meta.category for meta in self.discovered if meta.category))
     
-        def get_loaded_categories(self) -> List[str]:  # List of unique categories
+        def get_loaded_categories(self) -> List[str]: # List of unique categories
         "Get all unique categories among discovered plugins."
     
-    def get_loaded_categories(self) -> List[str]:  # List of unique categories
+    def get_loaded_categories(self) -> List[str]: # List of unique categories
             """Get all unique categories among loaded plugins."""
             return list(set(meta.category for meta in self.plugins.values() if meta.category))
     
         def get_plugin_meta(
             self,
-            plugin_name: str  # Name of the plugin
-        ) -> Optional[PluginMeta]:  # Plugin metadata or None
+            plugin_name:str # Name of the plugin
+        ) -> Optional[PluginMeta]: # Plugin metadata or None
         "Get all unique categories among loaded plugins."
     
     def get_plugin_meta(
             self,
-            plugin_name: str  # Name of the plugin
-        ) -> Optional[PluginMeta]:  # Plugin metadata or None
+            plugin_name:str # Name of the plugin
+        ) -> Optional[PluginMeta]: # Plugin metadata or None
         "Get metadata for a loaded plugin by name."
     
     def get_discovered_meta(
             self,
-            plugin_name: str  # Name of the plugin
-        ) -> Optional[PluginMeta]:  # Plugin metadata or None
+            plugin_name:str # Name of the plugin
+        ) -> Optional[PluginMeta]: # Plugin metadata or None
         "Get metadata for a discovered (not necessarily loaded) plugin by name."
     
     def load_plugin(
             self,
-            plugin_meta: PluginMeta,  # Plugin metadata (with manifest attached)
-            config: Optional[Dict[str, Any]] = None  # Initial configuration
-        ) -> bool:  # True if successfully loaded
+            plugin_meta:PluginMeta, # Plugin metadata (with manifest attached)
+            config:Optional[Dict[str, Any]]=None # Initial configuration
+        ) -> bool: # True if successfully loaded
         "Load a plugin by spawning a Worker subprocess."
     
     def load_all(
             self,
-            configs: Optional[Dict[str, Dict[str, Any]]] = None  # Plugin name -> config mapping
-        ) -> Dict[str, bool]:  # Plugin name -> success mapping
+            configs:Optional[Dict[str, Dict[str, Any]]]=None # Plugin name -> config mapping
+        ) -> Dict[str, bool]: # Plugin name -> success mapping
         "Discover and load all available plugins."
     
     def unload_plugin(
             self,
-            plugin_name: str  # Name of the plugin to unload
-        ) -> bool:  # True if successfully unloaded
+            plugin_name:str # Name of the plugin to unload
+        ) -> bool: # True if successfully unloaded
         "Unload a plugin and terminate its Worker process."
     
     def unload_all(self) -> None:
@@ -515,51 +649,50 @@ class PluginManager:
     
     def get_plugin(
             self,
-            plugin_name: str  # Name of the plugin
-        ) -> Optional[PluginInterface]:  # Plugin proxy instance or None
+            plugin_name:str # Name of the plugin
+        ) -> Optional[PluginInterface]: # Plugin proxy instance or None
         "Get a loaded plugin instance by name."
     
-    def list_plugins(self) -> List[PluginMeta]:  # List of loaded plugin metadata
+    def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
             """List all loaded plugins."""
             return list(self.plugins.values())
     
-        def _evict_for_resources(self, needed_meta: PluginMeta) -> bool
+        def _evict_for_resources(self, needed_meta:PluginMeta) -> bool
         "List all loaded plugins."
     
     def execute_plugin(
             self,
-            plugin_name: str,  # Name of the plugin
+            plugin_name:str, # Name of the plugin
             *args,
             **kwargs
-        ) -> Any:  # Plugin result
+        ) -> Any: # Plugin result
         "Execute a plugin's main functionality (sync)."
     
     async def execute_plugin_async(
             self,
-            plugin_name: str,  # Name of the plugin
+            plugin_name:str, # Name of the plugin
             *args,
             **kwargs
-        ) -> Any:  # Plugin result
+        ) -> Any: # Plugin result
         "Execute a plugin's main functionality (async)."
     
     def enable_plugin(
             self,
-            plugin_name: str  # Name of the plugin
-        ) -> bool:  # True if plugin was enabled
+            plugin_name:str # Name of the plugin
+        ) -> bool: # True if plugin was enabled
         "Enable a plugin."
     
     def disable_plugin(
             self,
-            plugin_name: str  # Name of the plugin
-        ) -> bool:  # True if plugin was disabled
+            plugin_name:str # Name of the plugin
+        ) -> bool: # True if plugin was disabled
         "Disable a plugin without unloading it."
     
-    def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str:
-                """Read the last N lines of the plugin's log file."""
-                # Find the log path based on convention
-                log_path = Path.home() / ".cjm" / "logs" / f"{plugin_name}.log"
-                
-                if not log_path.exists()
+    def get_plugin_logs(
+            self,
+            plugin_name:str, # Name of the plugin
+            lines:int=50 # Number of lines to return
+        ) -> str: # Log content
         "Read the last N lines of the plugin's log file."
 ```
 
@@ -739,13 +872,13 @@ async def __aexit__(self, exc_type, exc_val, exc_tb)
 class RemotePluginProxy:
     def __init__(
         self,
-        manifest: Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+        manifest:Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
     )
     "Proxy that forwards plugin calls to an isolated Worker subprocess."
     
     def __init__(
             self,
-            manifest: Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+            manifest:Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
         )
         "Initialize proxy and start the worker process."
     
@@ -766,7 +899,7 @@ class RemotePluginProxy:
     
     def initialize(
             self,
-            config: Optional[Dict[str, Any]] = None # Configuration dictionary
+            config:Optional[Dict[str, Any]]=None # Configuration dictionary
         ) -> None
         "Initialize or reconfigure the plugin."
     
