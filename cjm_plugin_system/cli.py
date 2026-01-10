@@ -17,6 +17,7 @@ import typer
 import yaml
 
 from .core.config import load_config, set_config, get_config
+from .core.platform import run_shell_command, conda_env_exists
 
 app = typer.Typer(help="CJM Plugin System CLI", no_args_is_help=True)
 
@@ -52,12 +53,13 @@ def main(
 # %% ../nbs/cli.ipynb 3
 def run_cmd(
     cmd: str,  # Shell command to execute
-    shell: bool = True,  # Whether to run through shell
     check: bool = True  # Whether to raise on non-zero exit
 ) -> None:
-    """Run a shell command and stream output."""
-    print(f"Running: {cmd}")
-    subprocess.run(cmd, shell=shell, check=check, executable='/bin/bash')
+    """Run a shell command and stream output.
+    
+    Uses the platform's default shell (no hardcoded /bin/bash).
+    """
+    run_shell_command(cmd, check=check)
 
 # %% ../nbs/cli.ipynb 4
 def _generate_manifest(
@@ -125,13 +127,20 @@ if "config_schema" not in meta:
 print(json.dumps(meta, indent=2))
 '''
     
-    # The introspection command
+    # The introspection command - use conda run which is cross-platform
     introspection_cmd = f"conda run -n {env_name} python -c '{introspection_script}'"
     
     try:
         # Check output, capture stdout
-        result_bytes = subprocess.check_output(introspection_cmd, shell=True, executable='/bin/bash')
-        result_str = result_bytes.decode('utf-8').strip()
+        # Use shell=True without explicit executable for cross-platform support
+        result = subprocess.run(
+            introspection_cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        result_str = result.stdout.strip()
         
         # Robust JSON Parsing: 
         # Sometimes 'conda run' leaks warnings into stdout. We try to find the JSON block.
@@ -167,7 +176,7 @@ print(json.dumps(meta, indent=2))
         
     except subprocess.CalledProcessError as e:
         print(f"Error generating manifest for {env_name}:")
-        print(e.output.decode() if e.output else str(e))
+        print(e.stderr if e.stderr else str(e))
     except Exception as e:
         print(f"Unexpected error generating manifest: {e}")
 
@@ -225,16 +234,8 @@ def install_all(
         env_name = plugin.get('env_name')
         print(f"\n=== Processing {name} ({env_name}) ===")
 
-        # 1. Check if Env Exists
-        env_exists = False
-        try:
-            subprocess.check_call(
-                f"conda env list | grep {env_name}", 
-                shell=True, stdout=subprocess.DEVNULL
-            )
-            env_exists = True
-        except subprocess.CalledProcessError:
-            pass
+        # 1. Check if Env Exists (cross-platform, no grep)
+        env_exists = conda_env_exists(env_name)
 
         # 2. Create Environment
         if not env_exists or force:

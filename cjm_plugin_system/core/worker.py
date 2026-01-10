@@ -11,7 +11,6 @@ import dataclasses
 import importlib
 import json
 import os
-import signal
 import sys
 import threading
 import time
@@ -21,6 +20,8 @@ import psutil
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+
+from .platform import terminate_self
 
 import logging
 logging.basicConfig(
@@ -46,7 +47,11 @@ class EnhancedJSONEncoder(json.JSONEncoder):
 def parent_monitor(
     ppid: int # Parent process ID to monitor
 ) -> None:
-    """Monitor parent process and terminate self if parent dies."""
+    """Monitor parent process and terminate self if parent dies.
+    
+    This implements the "Suicide Pact" pattern: if the Host process dies,
+    the Worker must terminate itself to prevent zombie processes.
+    """
     try:
         while True:
             parent = psutil.Process(ppid)
@@ -55,7 +60,8 @@ def parent_monitor(
             time.sleep(1)
     except (psutil.NoSuchProcess, ProcessLookupError):
         print(f"[Worker {os.getpid()}] Parent {ppid} gone. Shutting down.")
-        os.kill(os.getpid(), signal.SIGTERM)
+        # Use cross-platform self-termination
+        terminate_self()
 
 # %% ../../nbs/core/worker.ipynb 12
 def create_app(

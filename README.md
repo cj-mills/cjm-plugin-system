@@ -12,11 +12,12 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (8)
+    ├── core/ (9)
     │   ├── config.ipynb      # Project-level configuration for paths, runtime settings, and environment management
     │   ├── interface.ipynb   # Abstract base class defining the generic plugin interface
     │   ├── manager.ipynb     # Plugin discovery, loading, and lifecycle management system
     │   ├── metadata.ipynb    # Data structures for plugin metadata
+    │   ├── platform.ipynb    # Cross-platform utilities for process management, path handling, and system detection
     │   ├── proxy.ipynb       # Bridge between Host application and isolated Worker processes
     │   ├── queue.ipynb       # Resource-aware job queue for sequential plugin execution with cancellation support
     │   ├── scheduling.ipynb  # Resource scheduling policies for plugin execution
@@ -25,7 +26,7 @@ pip install cjm_plugin_system
     │   └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
     └── cli.ipynb  # CLI tool for declarative plugin management
 
-Total: 10 notebooks across 2 directories
+Total: 11 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -36,25 +37,29 @@ graph LR
     core_interface[core.interface<br/>Plugin Interface]
     core_manager[core.manager<br/>Plugin Manager]
     core_metadata[core.metadata<br/>Plugin Metadata]
+    core_platform[core.platform<br/>Platform Utilities]
     core_proxy[core.proxy<br/>Remote Plugin Proxy]
     core_queue[core.queue<br/>Job Queue]
     core_scheduling[core.scheduling<br/>Scheduling]
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
+    cli --> core_platform
     cli --> core_config
-    core_manager --> core_config
-    core_manager --> core_metadata
-    core_manager --> core_interface
     core_manager --> core_proxy
     core_manager --> core_scheduling
-    core_proxy --> core_config
+    core_manager --> core_interface
+    core_manager --> core_metadata
+    core_manager --> core_config
     core_proxy --> core_interface
+    core_proxy --> core_config
+    core_proxy --> core_platform
     core_queue --> core_manager
     core_scheduling --> core_metadata
+    core_worker --> core_platform
 ```
 
-*10 cross-module dependencies detected*
+*13 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -136,10 +141,13 @@ def main(
 ``` python
 def run_cmd(
     cmd: str,  # Shell command to execute
-    shell: bool = True,  # Whether to run through shell
     check: bool = True  # Whether to raise on non-zero exit
 ) -> None
-    "Run a shell command and stream output."
+    """
+    Run a shell command and stream output.
+    
+    Uses the platform's default shell (no hardcoded /bin/bash).
+    """
 ```
 
 ``` python
@@ -726,6 +734,179 @@ class PluginMeta:
     instance: Optional[Any]  # Plugin instance (PluginInterface subclass)
     enabled: bool = True  # Whether the plugin is enabled
     last_executed: float = 0.0  # Unix timestamp
+```
+
+### Platform Utilities (`platform.ipynb`)
+
+> Cross-platform utilities for process management, path handling, and
+> system detection
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.platform import (
+    is_windows,
+    is_macos,
+    is_linux,
+    is_apple_silicon,
+    get_current_platform,
+    get_python_in_env,
+    get_popen_isolation_kwargs,
+    terminate_process,
+    terminate_self,
+    run_shell_command,
+    conda_env_exists
+)
+```
+
+#### Functions
+
+``` python
+def is_windows() -> bool:
+    """Check if running on Windows."""
+    return platform.system() == "Windows"
+
+
+def is_macos() -> bool
+    "Check if running on Windows."
+```
+
+``` python
+def is_macos() -> bool:
+    """Check if running on macOS."""
+    return platform.system() == "Darwin"
+
+
+def is_linux() -> bool
+    "Check if running on macOS."
+```
+
+``` python
+def is_linux() -> bool:
+    """Check if running on Linux."""
+    return platform.system() == "Linux"
+
+
+def is_apple_silicon() -> bool
+    "Check if running on Linux."
+```
+
+``` python
+def is_apple_silicon() -> bool
+    "Check if running on Apple Silicon Mac (for MPS detection)."
+```
+
+``` python
+def get_current_platform() -> str:
+    """Get current platform string for manifest filtering.
+    
+    Returns strings like 'linux-x64', 'darwin-arm64', 'win-x64'.
+    """
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    
+    # Normalize system names
+    if system == "darwin"
+    """
+    Get current platform string for manifest filtering.
+    
+    Returns strings like 'linux-x64', 'darwin-arm64', 'win-x64'.
+    """
+```
+
+``` python
+def get_python_in_env(
+    env_path: Path  # Path to conda environment root
+) -> Path:  # Path to Python executable
+    """
+    Get the Python executable path for a conda environment.
+    
+    On Windows: env_path/python.exe
+    On Unix: env_path/bin/python
+    """
+```
+
+``` python
+def get_popen_isolation_kwargs() -> Dict[str, Any]:
+    """Return kwargs for process isolation in subprocess.Popen.
+    
+    On Unix: Returns {'start_new_session': True}
+    On Windows: Returns {'creationflags': CREATE_NEW_PROCESS_GROUP}
+    
+    Usage:
+        process = subprocess.Popen(cmd, **get_popen_isolation_kwargs(), ...)
+    """
+    if is_windows()
+    """
+    Return kwargs for process isolation in subprocess.Popen.
+    
+    On Unix: Returns {'start_new_session': True}
+    On Windows: Returns {'creationflags': CREATE_NEW_PROCESS_GROUP}
+    
+    Usage:
+        process = subprocess.Popen(cmd, **get_popen_isolation_kwargs(), ...)
+    """
+```
+
+``` python
+def terminate_process(
+    process: subprocess.Popen,  # Process to terminate
+    timeout: float = 2.0  # Seconds to wait before force kill
+) -> None
+    """
+    Terminate a subprocess gracefully, with fallback to force kill.
+    
+    On all platforms:
+    1. Calls process.terminate() (SIGTERM on Unix, TerminateProcess on Windows)
+    2. Waits for timeout seconds
+    3. If still running, calls process.kill() (SIGKILL on Unix, TerminateProcess on Windows)
+    """
+```
+
+``` python
+def terminate_self() -> None:
+    """Terminate the current process (for worker suicide pact).
+    
+    On Unix: Sends SIGTERM to self for graceful shutdown
+    On Windows: Calls os._exit() since Windows lacks SIGTERM
+    """
+    if is_windows()
+    """
+    Terminate the current process (for worker suicide pact).
+    
+    On Unix: Sends SIGTERM to self for graceful shutdown
+    On Windows: Calls os._exit() since Windows lacks SIGTERM
+    """
+```
+
+``` python
+def run_shell_command(
+    cmd: str,  # Shell command to execute
+    check: bool = True,  # Whether to raise on non-zero exit
+    capture_output: bool = False,  # Whether to capture stdout/stderr
+    **kwargs  # Additional kwargs passed to subprocess.run
+) -> subprocess.CompletedProcess
+    """
+    Run a shell command cross-platform.
+    
+    Unlike using shell=True with executable='/bin/bash', this function
+    uses the platform's default shell:
+    - Linux/macOS: /bin/sh (or $SHELL)
+    - Windows: cmd.exe
+    """
+```
+
+``` python
+def conda_env_exists(
+    env_name: str,  # Name of the conda environment
+    conda_cmd: str = "conda"  # Conda command (conda, mamba, micromamba)
+) -> bool
+    """
+    Check if a conda environment exists (cross-platform).
+    
+    Uses 'conda env list --json' instead of piping to grep,
+    which doesn't work on Windows.
+    """
 ```
 
 ### Remote Plugin Proxy (`proxy.ipynb`)
@@ -1396,7 +1577,12 @@ from cjm_plugin_system.core.worker import (
 def parent_monitor(
     ppid: int # Parent process ID to monitor
 ) -> None
-    "Monitor parent process and terminate self if parent dies."
+    """
+    Monitor parent process and terminate self if parent dies.
+    
+    This implements the "Suicide Pact" pattern: if the Host process dies,
+    the Worker must terminate itself to prevent zombie processes.
+    """
 ```
 
 ``` python

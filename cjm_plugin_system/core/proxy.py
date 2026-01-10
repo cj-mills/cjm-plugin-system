@@ -19,6 +19,7 @@ import httpx
 
 from .config import get_config
 from .interface import FileBackedDTO, PluginInterface
+from .platform import get_popen_isolation_kwargs, terminate_process
 
 # %% ../../nbs/core/proxy.ipynb 6
 class RemotePluginProxy(PluginInterface):
@@ -86,12 +87,16 @@ class RemotePluginProxy(PluginInterface):
         # 3. Redirect Output to File
         # We merge stderr into stdout for a single timeline
         print(f"[{self.name}] Logs: {self.log_path}")
+        
+        # Get cross-platform process isolation kwargs
+        isolation_kwargs = get_popen_isolation_kwargs()
+        
         self.process = subprocess.Popen(
             cmd,
             stdout=self.log_file,
             stderr=subprocess.STDOUT, # Merge stderr into stdout
-            start_new_session=True,
-            env=env
+            env=env,
+            **isolation_kwargs
         )
         self._wait_for_ready()
 
@@ -163,14 +168,9 @@ class RemotePluginProxy(PluginInterface):
         except Exception:
             pass  # Worker may already be gone
         
-        # Terminate the subprocess
-        if self.process:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-            self.process = None
+        # Terminate the subprocess using cross-platform utility
+        terminate_process(self.process, timeout=2.0)
+        self.process = None
 
         # Close file handle
         if hasattr(self, 'log_file') and self.log_file:
