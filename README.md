@@ -46,20 +46,21 @@ graph LR
 
     cli --> core_platform
     cli --> core_config
-    core_manager --> core_proxy
     core_manager --> core_scheduling
-    core_manager --> core_interface
     core_manager --> core_metadata
     core_manager --> core_config
-    core_proxy --> core_interface
+    core_manager --> core_proxy
+    core_manager --> core_interface
+    core_platform --> core_config
     core_proxy --> core_config
     core_proxy --> core_platform
+    core_proxy --> core_interface
     core_queue --> core_manager
     core_scheduling --> core_metadata
     core_worker --> core_platform
 ```
 
-*13 cross-module dependencies detected*
+*14 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -81,6 +82,7 @@ graph LR
     │ --help                            Show this message and exit.                                          │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
     ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
+    │ setup-runtime   Download and setup micromamba runtime for project-local mode.                          │
     │ install-all     Install and register all plugins defined in plugins.yaml.                              │
     │ setup-host      Install interface libraries in the current Python environment.                         │
     │ estimate-size   Estimate disk space required for plugin environments.                                  │
@@ -104,6 +106,7 @@ Detailed documentation for each module in the project:
 from cjm_plugin_system.cli import (
     app,
     main,
+    setup_runtime,
     run_cmd,
     install_all,
     setup_host,
@@ -139,6 +142,47 @@ def main(
 ```
 
 ``` python
+def setup_runtime(
+    force:bool=typer.Option(False, "--force", "-f", help="Re-download even if binary exists")
+) -> None
+    "Download and setup micromamba runtime for project-local mode."
+```
+
+``` python
+def _check_runtime_available() -> None:
+    """Check if the configured conda runtime is available, exit with helpful message if not."""
+    cfg = get_config()
+    
+    if not ensure_runtime_available(cfg)
+    "Check if the configured conda runtime is available, exit with helpful message if not."
+```
+
+``` python
+def _get_conda_cmd_str() -> str
+    "Get the conda/micromamba command string for shell commands."
+```
+
+``` python
+def _download_url_to_temp(
+    url: str,  # URL to download
+    suffix: str = ".yml"  # File suffix for temp file
+) -> Optional[Path]:  # Path to temp file or None if failed
+    "Download a URL to a temporary file. Returns None if download fails."
+```
+
+``` python
+def _resolve_env_file(
+    env_file: str  # Path or URL to environment file
+) -> tuple[str, Optional[Path]]:  # (resolved_path, temp_file_to_cleanup)
+    """
+    Resolve env_file to a local path, downloading if it's a URL.
+    
+    Returns (local_path, temp_file) where temp_file is set if we created
+    a temporary file that should be cleaned up later.
+    """
+```
+
+``` python
 def run_cmd(
     cmd: str,  # Shell command to execute
     check: bool = True  # Whether to raise on non-zero exit
@@ -166,6 +210,13 @@ def _add_conda_env_to_manifest(
     env_name:str # Conda environment name to add
 ) -> bool: # True if successfully updated
     "Add conda_env field to an existing manifest file."
+```
+
+``` python
+def _conda_env_exists_configured(
+    env_name: str  # Name of the conda environment
+) -> bool:  # True if environment exists
+    "Check if conda environment exists using configured conda command."
 ```
 
 ``` python
@@ -200,7 +251,7 @@ def _get_pypi_size(
 
 ``` python
 def _estimate_conda_size(
-    env_file: str,  # Path to environment.yml
+    env_file: str,  # Path or URL to environment.yml
     env_name: str  # Target environment name
 ) -> tuple[int, int]:  # (total_bytes, package_count)
     "Estimate conda package sizes using dry-run."
@@ -224,9 +275,12 @@ def estimate_size(
 
 ``` python
 def _get_conda_envs() -> set[str]: # Set of existing conda environment names
-    """Get list of existing conda environment names."""
+    """Get list of existing conda environment names using configured conda command."""
+    cfg = get_config()
+    cmd_parts = build_conda_command(cfg, "env", "list", "--json")
+    
     try
-    "Get list of existing conda environment names."
+    "Get list of existing conda environment names using configured conda command."
 ```
 
 ``` python
@@ -362,7 +416,21 @@ class CJMConfig:
         "Directory containing plugin manifests."
     
     def logs_dir(self) -> Path: # Directory containing plugin logs
+            """Directory containing plugin logs."""
+            return self.data_dir / "logs"
+    
+        @property
+        def conda_binary_path(self) -> Optional[Path]: # Path to conda/micromamba binary or None
         "Directory containing plugin logs."
+    
+    def conda_binary_path(self) -> Optional[Path]: # Path to conda/micromamba binary or None
+            """Get the configured binary path for the current platform."""
+            # Inline platform detection to avoid circular imports
+            system = platform_mod.system().lower()
+            machine = platform_mod.machine().lower()
+            
+            if system == "windows"
+        "Get the configured binary path for the current platform."
 ```
 
 #### Variables
@@ -745,6 +813,7 @@ class PluginMeta:
 
 ``` python
 from cjm_plugin_system.core.platform import (
+    MICROMAMBA_URLS,
     is_windows,
     is_macos,
     is_linux,
@@ -755,7 +824,13 @@ from cjm_plugin_system.core.platform import (
     terminate_process,
     terminate_self,
     run_shell_command,
-    conda_env_exists
+    conda_env_exists,
+    get_micromamba_download_url,
+    download_micromamba,
+    get_conda_command,
+    build_conda_command,
+    get_micromamba_binary_path,
+    ensure_runtime_available
 )
 ```
 
@@ -907,6 +982,57 @@ def conda_env_exists(
     Uses 'conda env list --json' instead of piping to grep,
     which doesn't work on Windows.
     """
+```
+
+``` python
+def get_micromamba_download_url(
+    platform_str: Optional[str] = None  # Platform string (e.g., 'linux-x64'), uses current if None
+) -> str:  # Download URL for micromamba binary
+    "Get the micromamba download URL for the specified or current platform."
+```
+
+``` python
+def download_micromamba(
+    dest_path: Path,  # Destination path for the micromamba binary
+    platform_str: Optional[str] = None,  # Platform string, uses current if None
+    show_progress: bool = True  # Whether to print progress messages
+) -> bool:  # True if download succeeded
+    "Download and extract micromamba binary to the specified path."
+```
+
+``` python
+def get_conda_command(
+    config: "CJMConfig"  # Configuration object with runtime settings
+) -> List[str]:  # Base command with prefix args if needed
+    "Get the conda/mamba/micromamba base command with prefix args for local mode."
+```
+
+``` python
+def build_conda_command(
+    config: "CJMConfig",  # Configuration object with runtime settings
+    *args: str  # Additional command arguments
+) -> List[str]:  # Complete command ready for subprocess
+    "Build a complete conda/mamba/micromamba command."
+```
+
+``` python
+def get_micromamba_binary_path(
+    config: "CJMConfig"  # Configuration object with runtime settings
+) -> Optional[Path]:  # Path to micromamba binary or None
+    "Get the configured micromamba binary path for the current platform."
+```
+
+``` python
+def ensure_runtime_available(
+    config: "CJMConfig"  # Configuration object with runtime settings
+) -> bool:  # True if runtime is available
+    "Check if the configured conda/micromamba runtime is available."
+```
+
+#### Variables
+
+``` python
+MICROMAMBA_URLS: Dict[str, str]
 ```
 
 ### Remote Plugin Proxy (`proxy.ipynb`)

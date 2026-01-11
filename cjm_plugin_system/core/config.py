@@ -7,6 +7,7 @@ __all__ = ['RuntimeMode', 'CondaType', 'RuntimeConfig', 'CJMConfig', 'load_confi
 
 # %% ../../nbs/core/config.ipynb 3
 import os
+import platform as platform_mod
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -54,6 +55,34 @@ class CJMConfig:
     def logs_dir(self) -> Path: # Directory containing plugin logs
         """Directory containing plugin logs."""
         return self.data_dir / "logs"
+
+    @property
+    def conda_binary_path(self) -> Optional[Path]: # Path to conda/micromamba binary or None
+        """Get the configured binary path for the current platform."""
+        # Inline platform detection to avoid circular imports
+        system = platform_mod.system().lower()
+        machine = platform_mod.machine().lower()
+        
+        if system == "windows":
+            system = "win"
+        if machine in ("x86_64", "amd64"):
+            arch = "x64"
+        elif machine in ("arm64", "aarch64"):
+            arch = "arm64"
+        else:
+            arch = machine
+        
+        platform_key = f"{system}-{arch}"
+        
+        if self.runtime.binaries and platform_key in self.runtime.binaries:
+            return self.runtime.binaries[platform_key]
+        
+        # Default location if prefix is set
+        if self.runtime.prefix:
+            binary_name = "micromamba.exe" if system == "win" else "micromamba"
+            return self.runtime.prefix / "bin" / binary_name
+        
+        return None
 
 # %% ../../nbs/core/config.ipynb 10
 # Module-level configuration singleton
