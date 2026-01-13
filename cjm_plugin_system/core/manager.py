@@ -42,8 +42,8 @@ class PluginManager:
         if search_paths is None:
             cfg = get_config()
             self.search_paths = [
-                Path.cwd() / ".cjm" / "plugins",  # Local (high priority)
-                cfg.plugins_dir                    # Config-based (replaces ~/.cjm/plugins)
+                Path.cwd() / ".cjm" / "manifests",  # Local (high priority)
+                cfg.manifests_dir                    # Config-based (replaces ~/.cjm/manifests)
             ]
         else:
             self.search_paths = search_paths

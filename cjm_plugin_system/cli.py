@@ -193,6 +193,7 @@ def _generate_manifest(
 ) -> None:
     """Run introspection script inside the target env to generate manifest."""
     print(f"[{env_name}] Generating manifest...")
+    cfg = get_config()
     
     # Robust Module Name Extraction
     if package_name.startswith("git+"):
@@ -251,6 +252,12 @@ if "config_schema" not in meta:
 print(json.dumps(meta, indent=2))
 '''
     
+    # Build environment with CJM paths for plugin introspection
+    env = dict(os.environ)
+    env["CJM_DATA_DIR"] = str(cfg.plugin_data_dir)
+    if cfg.models_dir:
+        env["CJM_MODELS_DIR"] = str(cfg.models_dir)
+    
     # The introspection command - use configurable conda command
     conda_cmd = _get_conda_cmd_str()
     introspection_cmd = f"{conda_cmd} run -n {env_name} python -c '{introspection_script}'"
@@ -258,12 +265,14 @@ print(json.dumps(meta, indent=2))
     try:
         # Check output, capture stdout
         # Use shell=True without explicit executable for cross-platform support
+        # Pass env to propagate CJM paths to the introspection script
         result = subprocess.run(
             introspection_cmd,
             shell=True,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            env=env
         )
         result_str = result.stdout.strip()
         
@@ -392,7 +401,7 @@ def install_all(
         config = yaml.safe_load(f)
 
     # Setup manifest directory using config
-    manifest_dir = cfg.plugins_dir
+    manifest_dir = cfg.manifests_dir
     manifest_dir.mkdir(parents=True, exist_ok=True)
 
     plugins = config.get('plugins', [])
@@ -777,7 +786,7 @@ def _get_installed_manifests(
 ) -> list[dict]: # List of manifest dictionaries
     """Load all manifest JSON files from the manifest directory."""
     if manifest_dir is None:
-        manifest_dir = get_config().plugins_dir
+        manifest_dir = get_config().manifests_dir
     
     manifests = []
     
@@ -822,7 +831,7 @@ def list_plugins(
     manifests = _get_installed_manifests()
     
     if not manifests:
-        typer.echo(f"No plugins found in {cfg.plugins_dir}")
+        typer.echo(f"No plugins found in {cfg.manifests_dir}")
         raise typer.Exit(code=0)
     
     # Load config for cross-reference if provided
@@ -880,7 +889,7 @@ def remove_plugin(
 ) -> None:
     """Remove a plugin's manifest and conda environment."""
     cfg = get_config()
-    manifest_dir = cfg.plugins_dir
+    manifest_dir = cfg.manifests_dir
     manifest_path = manifest_dir / f"{plugin_name}.json"
     
     # Find the manifest

@@ -47,9 +47,14 @@ class CJMConfig:
     models_dir:Optional[Path]=None # Directory for model downloads
 
     @property
-    def plugins_dir(self) -> Path: # Directory containing plugin manifests
+    def manifests_dir(self) -> Path: # Directory containing plugin manifests
         """Directory containing plugin manifests."""
-        return self.data_dir / "plugins"
+        return self.data_dir / "manifests"
+
+    @property
+    def plugin_data_dir(self) -> Path: # Directory for plugin runtime data
+        """Directory for plugin runtime data (databases, caches)."""
+        return self.data_dir / "data"
 
     @property
     def logs_dir(self) -> Path: # Directory containing plugin logs

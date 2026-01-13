@@ -82,6 +82,11 @@ class RemotePluginProxy(PluginInterface):
         # Merge environment variables from manifest
         env = dict(os.environ)
         env.update(self.manifest.get('env_vars', {}))
+        
+        # Inject CJM paths for plugin runtime
+        env["CJM_DATA_DIR"] = str(cfg.plugin_data_dir)
+        if cfg.models_dir:
+            env["CJM_MODELS_DIR"] = str(cfg.models_dir)
 
         print(f"[{self.name}] Starting worker on port {self.port}...")
         # 3. Redirect Output to File

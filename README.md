@@ -46,14 +46,14 @@ graph LR
 
     cli --> core_platform
     cli --> core_config
-    core_manager --> core_scheduling
     core_manager --> core_metadata
     core_manager --> core_config
-    core_manager --> core_proxy
     core_manager --> core_interface
+    core_manager --> core_scheduling
+    core_manager --> core_proxy
     core_platform --> core_config
-    core_proxy --> core_config
     core_proxy --> core_platform
+    core_proxy --> core_config
     core_proxy --> core_interface
     core_queue --> core_manager
     core_scheduling --> core_metadata
@@ -407,13 +407,21 @@ class CJMConfig:
     plugins_config: Path = field(...)  # Path to plugins.yaml file
     models_dir: Optional[Path]  # Directory for model downloads
     
-    def plugins_dir(self) -> Path: # Directory containing plugin manifests
+    def manifests_dir(self) -> Path: # Directory containing plugin manifests
             """Directory containing plugin manifests."""
-            return self.data_dir / "plugins"
+            return self.data_dir / "manifests"
+    
+        @property
+        def plugin_data_dir(self) -> Path: # Directory for plugin runtime data
+        "Directory containing plugin manifests."
+    
+    def plugin_data_dir(self) -> Path: # Directory for plugin runtime data
+            """Directory for plugin runtime data (databases, caches)."""
+            return self.data_dir / "data"
     
         @property
         def logs_dir(self) -> Path: # Directory containing plugin logs
-        "Directory containing plugin manifests."
+        "Directory for plugin runtime data (databases, caches)."
     
     def logs_dir(self) -> Path: # Directory containing plugin logs
             """Directory containing plugin logs."""
@@ -1002,14 +1010,14 @@ def download_micromamba(
 
 ``` python
 def get_conda_command(
-    config: "CJMConfig"  # Configuration object with runtime settings
+    config: CJMConfig  # Configuration object with runtime settings
 ) -> List[str]:  # Base command with prefix args if needed
     "Get the conda/mamba/micromamba base command with prefix args for local mode."
 ```
 
 ``` python
 def build_conda_command(
-    config: "CJMConfig",  # Configuration object with runtime settings
+    config: CJMConfig,  # Configuration object with runtime settings
     *args: str  # Additional command arguments
 ) -> List[str]:  # Complete command ready for subprocess
     "Build a complete conda/mamba/micromamba command."
@@ -1017,14 +1025,14 @@ def build_conda_command(
 
 ``` python
 def get_micromamba_binary_path(
-    config: "CJMConfig"  # Configuration object with runtime settings
+    config: CJMConfig  # Configuration object with runtime settings
 ) -> Optional[Path]:  # Path to micromamba binary or None
     "Get the configured micromamba binary path for the current platform."
 ```
 
 ``` python
 def ensure_runtime_available(
-    config: "CJMConfig"  # Configuration object with runtime settings
+    config: CJMConfig  # Configuration object with runtime settings
 ) -> bool:  # True if runtime is available
     "Check if the configured conda/micromamba runtime is available."
 ```
