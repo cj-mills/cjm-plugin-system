@@ -41,8 +41,12 @@ async def run_graph_federation():
     manager.discover_manifests()
 
     # 2. Identify Plugins
-    transcriber_name = "cjm-transcription-plugin-voxtral-hf"
+    # transcriber_name = "cjm-transcription-plugin-voxtral-hf"
+    transcriber_name = "cjm-transcription-plugin-whisper"
     graph_name = "cjm-graph-plugin-sqlite"
+
+    # transcriber_config = {"device": "cuda", "model_id": "mistralai/Voxtral-Mini-3B-2507"}
+    transcriber_config = {"device": "cuda", "model": "large-v2"}
 
     transcriber_meta = next((item for item in manager.discovered if item.name == transcriber_name), None)
     graph_meta = next((item for item in manager.discovered if item.name == graph_name), None)
@@ -59,7 +63,7 @@ async def run_graph_federation():
     print(f"\n--- Loading Plugins ---")
 
     # Load Voxtral (CUDA)
-    if not manager.load_plugin(transcriber_meta, {"device": "cuda", "model_id": "mistralai/Voxtral-Mini-3B-2507"}):
+    if not manager.load_plugin(transcriber_meta, transcriber_config):
         print(f"Failed to load {transcriber_name}")
         return
     print(f"  Loaded: {transcriber_name}")
@@ -98,7 +102,7 @@ async def run_graph_federation():
 
         # Wait for result
         print("Waiting for transcription...")
-        job = await queue.wait_for_job(queue_job_id, timeout=300)
+        job = await queue.wait_for_job(queue_job_id, timeout=900)
 
         if job.status != JobStatus.completed:
             print(f"Transcription failed: {job.error}")
