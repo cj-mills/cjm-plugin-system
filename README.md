@@ -44,17 +44,17 @@ graph LR
     core_worker[core.worker<br/>Universal Worker]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    cli --> core_platform
     cli --> core_config
+    cli --> core_platform
     core_manager --> core_metadata
-    core_manager --> core_config
-    core_manager --> core_interface
     core_manager --> core_scheduling
     core_manager --> core_proxy
+    core_manager --> core_interface
+    core_manager --> core_config
     core_platform --> core_config
     core_proxy --> core_platform
-    core_proxy --> core_config
     core_proxy --> core_interface
+    core_proxy --> core_config
     core_queue --> core_manager
     core_scheduling --> core_metadata
     core_worker --> core_platform
