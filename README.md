@@ -22,11 +22,12 @@ pip install cjm_plugin_system
     │   ├── queue.ipynb       # Resource-aware job queue for sequential plugin execution with cancellation support
     │   ├── scheduling.ipynb  # Resource scheduling policies for plugin execution
     │   └── worker.ipynb      # FastAPI server that runs inside isolated plugin environments
-    ├── utils/ (1)
+    ├── utils/ (2)
+    │   ├── hashing.ipynb     # Shared cryptographic hashing primitives for content integrity verification
     │   └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
     └── cli.ipynb  # CLI tool for declarative plugin management
 
-Total: 11 notebooks across 2 directories
+Total: 12 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -42,18 +43,19 @@ graph LR
     core_queue[core.queue<br/>Job Queue]
     core_scheduling[core.scheduling<br/>Scheduling]
     core_worker[core.worker<br/>Universal Worker]
+    utils_hashing[utils.hashing<br/>Content Hashing Utilities]
     utils_validation[utils.validation<br/>Configuration Validation]
 
     cli --> core_platform
     cli --> core_config
-    core_manager --> core_proxy
     core_manager --> core_metadata
     core_manager --> core_scheduling
-    core_manager --> core_interface
     core_manager --> core_config
+    core_manager --> core_proxy
+    core_manager --> core_interface
     core_platform --> core_config
-    core_proxy --> core_interface
     core_proxy --> core_platform
+    core_proxy --> core_interface
     core_proxy --> core_config
     core_queue --> core_manager
     core_scheduling --> core_metadata
@@ -445,6 +447,48 @@ class CJMConfig:
 
 ``` python
 _current_config: Optional[CJMConfig] = None
+```
+
+### Content Hashing Utilities (`hashing.ipynb`)
+
+> Shared cryptographic hashing primitives for content integrity
+> verification
+
+#### Import
+
+``` python
+from cjm_plugin_system.utils.hashing import (
+    hash_bytes,
+    hash_file,
+    verify_hash
+)
+```
+
+#### Functions
+
+``` python
+def hash_bytes(
+    content: bytes,  # Byte content to hash
+    algo: str = "sha256"  # Hash algorithm name (e.g., "sha256", "sha3_256")
+) -> str:  # Hash string in "algo:hexdigest" format
+    "Compute a hash of byte content."
+```
+
+``` python
+def hash_file(
+    path: Union[str, Path],  # Path to file to hash
+    algo: str = "sha256",  # Hash algorithm name
+    chunk_size: int = 8192  # Read chunk size in bytes
+) -> str:  # Hash string in "algo:hexdigest" format
+    "Stream-hash a file without loading it entirely into memory."
+```
+
+``` python
+def verify_hash(
+    content: bytes,  # Content to verify
+    expected: str  # Expected hash in "algo:hexdigest" format
+) -> bool:  # True if content matches expected hash
+    "Verify content against an expected hash string."
 ```
 
 ### Plugin Interface (`interface.ipynb`)
