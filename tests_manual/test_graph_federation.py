@@ -122,11 +122,14 @@ async def run_graph_federation():
     # 6. EXECUTION PHASE 2: EXTRACTING ENTITIES (USING DOMAIN LIBRARY)
     print(f"\n--- Phase 2: Extracting Entities (Using cjm-graph-domains) ---")
     
+    content_hash = SourceRef.compute_hash(transcript_text.encode())
+
     # Define the Source Reference
     ref = SourceRef(
         plugin_name=transcriber_name,
         table_name="transcriptions",
         row_id=shared_job_id,
+        content_hash=content_hash,
         segment_slice="full_text"
     )
     
