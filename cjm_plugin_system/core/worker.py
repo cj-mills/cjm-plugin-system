@@ -7,6 +7,7 @@ __all__ = ['EnhancedJSONEncoder', 'parent_monitor', 'create_app', 'run_worker']
 
 # %% ../../nbs/core/worker.ipynb #exports
 import argparse
+import asyncio
 import dataclasses
 import importlib
 import json
@@ -143,13 +144,20 @@ def create_app(
 
     @app.post("/execute")
     async def execute(request: Request) -> Any:
-        """Execute plugin's main functionality."""
+        """Execute plugin's main functionality.
+        
+        Runs in a thread pool so the event loop stays free to serve
+        concurrent requests (e.g., /progress polling during long operations).
+        """
         data = await request.json()
         args = data.get("args", [])
         kwargs = data.get("kwargs", {})
         
         try:
-            result = plugin_instance.execute(*args, **kwargs)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None, lambda: plugin_instance.execute(*args, **kwargs)
+            )
             # Serialize result (handles dataclasses)
             json_str = json.dumps(result, cls=EnhancedJSONEncoder)
             return json.loads(json_str)

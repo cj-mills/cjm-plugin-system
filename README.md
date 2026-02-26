@@ -48,11 +48,11 @@ graph LR
 
     cli --> core_platform
     cli --> core_config
-    core_manager --> core_metadata
-    core_manager --> core_scheduling
-    core_manager --> core_config
-    core_manager --> core_proxy
     core_manager --> core_interface
+    core_manager --> core_scheduling
+    core_manager --> core_metadata
+    core_manager --> core_proxy
+    core_manager --> core_config
     core_platform --> core_config
     core_proxy --> core_platform
     core_proxy --> core_interface
@@ -84,12 +84,12 @@ graph LR
     │ --help                            Show this message and exit.                                          │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
     ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
-    │ setup-runtime   Download and setup micromamba runtime for project-local mode.                          │
-    │ install-all     Install and register all plugins defined in plugins.yaml.                              │
-    │ setup-host      Install interface libraries in the current Python environment.                         │
-    │ estimate-size   Estimate disk space required for plugin environments.                                  │
-    │ list            List installed plugins from manifest directory.                                        │
-    │ remove          Remove a plugin's manifest and conda environment.                                      │
+    │ setup-runtime  Download and setup micromamba runtime for project-local mode.                           │
+    │ install-all    Install and register all plugins defined in plugins.yaml.                               │
+    │ setup-host     Install interface libraries in the current Python environment.                          │
+    │ estimate-size  Estimate disk space required for plugin environments.                                   │
+    │ list           List installed plugins from manifest directory.                                         │
+    │ remove         Remove a plugin's manifest and conda environment.                                       │
     ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 
 For detailed help on any command, use `cjm-ctl <command> --help`.
