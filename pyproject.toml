@@ -29,6 +29,6 @@ cjm-ctl = "cjm_plugin_system.cli:app"
 version = {attr = "cjm_plugin_system.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["cjm_plugin_system"]
+include = ["cjm_plugin_system*"]
 
 [tool.nbdev]
