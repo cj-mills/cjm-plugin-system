@@ -190,7 +190,7 @@ def _generate_manifest(
     env_name: str,  # Name of the Conda environment
     package_name: str,  # Package source string (git URL or package name)
     manifest_dir: Path  # Directory to write manifest JSON files
-) -> None:
+) -> Optional[Path]:  # Path to the manifest written, or None on failure
     """Run introspection script inside the target env to generate manifest."""
     print(f"[{env_name}] Generating manifest...")
     cfg = get_config()
@@ -290,7 +290,7 @@ print(json.dumps(meta, indent=2))
         except json.JSONDecodeError as e:
             print(f"ERROR: Failed to parse JSON from introspection output.")
             print(f"Raw Output:\n{result_str}")
-            return
+            return None
 
         plugin_name = meta_json.get('name', 'unknown')
         out_file = manifest_dir / f"{plugin_name}.json"
@@ -307,12 +307,17 @@ print(json.dumps(meta, indent=2))
             f.write(json.dumps(meta_json, indent=2))
             
         print(f"[{env_name}] Wrote manifest to {out_file}")
+        # SG-3: return the path so callers can update the manifest by exact
+        # file rather than scanning `manifest_dir` with a substring match.
+        return out_file
         
     except subprocess.CalledProcessError as e:
         print(f"Error generating manifest for {env_name}:")
         print(e.stderr if e.stderr else str(e))
+        return None
     except Exception as e:
         print(f"Unexpected error generating manifest: {e}")
+        return None
 
 # %% ../nbs/cli.ipynb #d448fe11
 def _add_conda_env_to_manifest(
@@ -458,28 +463,23 @@ def install_all(
 
             # 4. Generate Manifest
             pkg_source = plugin['package']
-            _generate_manifest(env_name, pkg_source, manifest_dir)
+            manifest_path = _generate_manifest(env_name, pkg_source, manifest_dir)
             
-            # 5. Add conda_env to the generated manifest
-            # Find the manifest that was just created and add the env_name
-            for manifest_file in manifest_dir.glob("*.json"):
+            # 5. Add conda_env to the manifest we just wrote.
+            # SG-3: use the path returned by _generate_manifest directly
+            # instead of scanning the manifest dir with an `env_name in
+            # python_path` substring match (which corrupts manifests when env
+            # names share a prefix, e.g., "whisper" matching ".../whisper-vllm/...").
+            if manifest_path is not None:
                 try:
-                    with open(manifest_file) as f:
+                    with open(manifest_path) as f:
                         manifest = json.load(f)
-                    
-                    # Check if this manifest needs conda_env added
-                    # (recently generated manifests won't have it)
-                    if 'conda_env' not in manifest:
-                        # Verify this is likely the right manifest by checking python_path
-                        python_path = manifest.get('python_path', '')
-                        if env_name in python_path:
-                            manifest['conda_env'] = env_name
-                            with open(manifest_file, 'w') as f:
-                                json.dump(manifest, f, indent=2)
-                            print(f"[{env_name}] Added conda_env to manifest")
-                            break
-                except (json.JSONDecodeError, IOError):
-                    continue
+                    manifest['conda_env'] = env_name
+                    with open(manifest_path, 'w') as f:
+                        json.dump(manifest, f, indent=2)
+                    print(f"[{env_name}] Added conda_env to manifest")
+                except (json.JSONDecodeError, IOError) as e:
+                    print(f"[{env_name}] Warning: failed to add conda_env to {manifest_path}: {e}")
 
         print("\n All operations complete.")
     
