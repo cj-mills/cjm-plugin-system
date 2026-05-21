@@ -10,7 +10,7 @@ __all__ = ['PluginError', 'PluginInputError', 'PluginTransientError', 'PluginRes
 # %% ../../nbs/core/errors.ipynb #exports
 import warnings
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, ClassVar, List, Literal, Optional
 
@@ -285,7 +285,7 @@ def map_bare_exception_to_job_error(
     plugin_name: Optional[str] = None,  # Name of the plugin that raised
     plugin_instance_id: Optional[str] = None,  # Per CR-10
     traceback_policy: TracebackPolicy = TracebackPolicy.FULL,  # How much detail to record
-    occurred_at: Optional[datetime] = None,  # Override; defaults to datetime.utcnow()
+    occurred_at: Optional[datetime] = None,  # Override; defaults to datetime.now(timezone.utc)
 ) -> JobError:
     """Convert any exception into a structured `JobError`.
     
@@ -323,5 +323,8 @@ def map_bare_exception_to_job_error(
         resource_shortfall=resource_shortfall,
         plugin_name=plugin_name,
         plugin_instance_id=plugin_instance_id,
-        occurred_at=occurred_at or datetime.utcnow(),
+        # datetime.now(timezone.utc) — `datetime.utcnow()` is deprecated in
+        # Python 3.12+ and returns a naive datetime; the timezone-aware form
+        # is the canonical 3.12+ replacement and survives the eventual removal.
+        occurred_at=occurred_at or datetime.now(timezone.utc),
     )
