@@ -211,17 +211,40 @@ def _generate_manifest(
 
     print(f"[{env_name}] Introspecting module: {module_name}")
     
-    # Enhanced introspection script that also captures config_schema
+    # Enhanced introspection script that also captures config_schema and verifies
+    # the declared interface FQN (SG-7).
     # The script:
     # 1. Gets metadata from get_plugin_metadata()
-    # 2. Instantiates the plugin class to get config_schema
-    # 3. Merges config_schema into metadata (if not already present)
+    # 2. SG-7: imports the interface class declared in meta["interface"]; fails
+    #    manifest generation if the FQN doesn't resolve (catches typos +
+    #    stale interface library references at install time, not runtime).
+    # 3. Instantiates the plugin class to get config_schema
+    # 4. Merges config_schema into metadata (if not already present)
     introspection_script = f'''
 import json
 import importlib
 from {module_name}.meta import get_plugin_metadata
 
 meta = get_plugin_metadata()
+
+# SG-7: verify the declared interface FQN actually resolves. The previous
+# substrate shipped a sqlite-graph manifest whose interface field pointed to
+# a non-existent module; nothing caught it until runtime discovery.
+iface_fqn = meta.get("interface") or ""
+if not iface_fqn:
+    raise SystemExit("[introspection] interface FQN is missing in get_plugin_metadata()")
+if "." not in iface_fqn:
+    raise SystemExit(f"[introspection] interface FQN must be a dotted path, got: {{iface_fqn!r}}")
+_iface_mod_path, _iface_cls_name = iface_fqn.rsplit(".", 1)
+try:
+    _iface_mod = importlib.import_module(_iface_mod_path)
+except ImportError as e:
+    raise SystemExit(f"[introspection] interface module not importable: {{_iface_mod_path}} ({{e}})")
+if not hasattr(_iface_mod, _iface_cls_name):
+    raise SystemExit(
+        f"[introspection] interface class {{_iface_cls_name!r}} not found in module "
+        f"{{_iface_mod_path}}"
+    )
 
 # Try to get config_schema from plugin instance if not in metadata
 if "config_schema" not in meta:
