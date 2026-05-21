@@ -16,8 +16,9 @@ class PluginMeta:
     name:str # Plugin's unique identifier
     version:str # Plugin's version string
     description:str="" # Brief description of the plugin's functionality
-    author:str="" # Plugin author's name or organization
-    package_name:str="" # Python package name containing the plugin
+    # SG-35: `author` and `package_name` removed — author lives in pyproject.toml
+    # + importlib.metadata; package_name is derivable from the import system.
+    # `description` is retained and validated by SG-6's manifest checker.
     category:str="" # Plugin category (e.g., "transcription", "system_monitor")
     interface:str="" # Fully qualified interface class name
     config_schema:Optional[Dict[str, Any]]=None # JSON Schema for plugin configuration

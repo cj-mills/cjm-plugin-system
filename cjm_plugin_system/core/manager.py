@@ -131,13 +131,13 @@ class PluginManager:
                     if not name or name in seen_plugins:
                         continue  # Skip duplicates (local shadows global)
                     
-                    # Create metadata with manifest attached
+                    # Create metadata with manifest attached.
+                    # SG-35: `author` + `package_name` removed; `description`
+                    # kept and validated by SG-6.
                     meta = PluginMeta(
                         name=name,
                         version=manifest.get('version', '0.0.0'),
                         description=manifest.get('description', ''),
-                        author=manifest.get('author', ''),
-                        package_name=manifest.get('module', ''),
                         category=manifest.get('category', ''),
                         interface=manifest.get('interface', ''),
                         config_schema=manifest.get('config_schema')
