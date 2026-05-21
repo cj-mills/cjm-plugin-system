@@ -1020,15 +1020,21 @@ def _validate_manifest_dict(
     
     Returns a list of error messages — empty means the manifest passes. Checks
     the fields PluginManager.discover_manifests + RemotePluginProxy expect:
-    name, version, module, class, interface (dotted), python_path. Optional
-    fields are type-checked when present.
+    name, version, description, module, class, interface (dotted), python_path.
+    Optional fields are type-checked when present.
+    
+    `description` is required per OQ-3 (reconciled with SG-35: author +
+    package_name are gone from PluginMeta, description stays as the
+    substrate-owned human-readable plugin label).
     """
     errors: List[str] = []
     if not isinstance(data, dict):
         return [f"manifest must be a JSON object, got {type(data).__name__}"]
     
-    # Required string fields
-    for key in ("name", "version", "module", "class", "interface", "python_path"):
+    # Required string fields. `description` is required per OQ-3 — it's the
+    # one human-readable label the substrate genuinely owns + has consumers
+    # for; making it dead-letter optional is what SG-6 explicitly fixes.
+    for key in ("name", "version", "description", "module", "class", "interface", "python_path"):
         val = data.get(key)
         if val is None or val == "":
             errors.append(f"manifest: required field {key!r} is missing or empty")
@@ -1044,8 +1050,9 @@ def _validate_manifest_dict(
             f"(expected 'module.subpackage.ClassName')"
         )
     
-    # Optional fields — type-check only
-    for key in ("description", "author", "category", "conda_env", "db_path"):
+    # Optional fields — type-check only. `author` removed per SG-35 (it
+    # was dropped from PluginMeta); validator no longer recognizes it.
+    for key in ("category", "conda_env", "db_path"):
         if key in data and not isinstance(data[key], str):
             errors.append(f"manifest: field {key!r} must be a string when present")
     
