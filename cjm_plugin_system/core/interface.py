@@ -79,6 +79,28 @@ class PluginInterface(ABC):
         """Cancel the current execution. Override for cooperative cancellation support."""
         pass  # Default: no-op (plugins opt-in to cancellation)
 
+    def on_disable(self) -> None:
+        """CR-2: signal that the substrate has marked this plugin as disabled.
+        
+        Worker stays alive; plugin can release heavy resources here (e.g., free
+        GPU memory, close model files). The substrate fires this hook AFTER any
+        in-flight job for this plugin finishes — see PluginManager.disable_plugin
+        deferred-hook semantics. Default: no-op; plugins opt in by overriding.
+        
+        CR-4 will later add prefetch / reconfigure-split / cancellation primitives
+        without redefining what CR-2 introduces here.
+        """
+        pass
+
+    def on_enable(self) -> None:
+        """CR-2: signal that the substrate has marked this plugin as re-enabled.
+        
+        Plugin can eagerly re-acquire heavy resources here, or rely on lazy
+        re-acquisition via the next execute() call (substrate doesn't prefer
+        one strategy over the other). Default: no-op; plugins opt in by overriding.
+        """
+        pass
+
     def report_progress(
         self,
         progress: float, # 0.0 to 1.0, or -1.0 for indeterminate

@@ -4,7 +4,7 @@
 
 # %% auto #0
 __all__ = ['RemotePluginProxy', 'execute_async', 'execute_stream_sync', 'execute_stream', 'get_stats', 'is_alive', 'cancel',
-           'cancel_async', 'get_progress', 'get_progress_async']
+           'cancel_async', 'get_progress', 'get_progress_async', 'on_disable', 'on_enable']
 
 # %% ../../nbs/core/proxy.ipynb #exports
 import json
@@ -339,6 +339,42 @@ RemotePluginProxy.cancel = cancel
 RemotePluginProxy.cancel_async = cancel_async
 RemotePluginProxy.get_progress = get_progress
 RemotePluginProxy.get_progress_async = get_progress_async
+
+# %% ../../nbs/core/proxy.ipynb #a14ab958
+def on_disable(self) -> bool:  # True if hook signal accepted by worker
+    """CR-2: forward the substrate's on_disable signal to the worker process.
+    
+    Plugin can opt in via PluginInterface.on_disable(); default implementation
+    is a no-op so silent-pass-through is the norm. Failures to reach the
+    worker (already terminated, network blip) are logged-and-swallowed —
+    the substrate-side enable/disable bookkeeping doesn't depend on the
+    hook actually firing.
+    """
+    try:
+        with httpx.Client(timeout=5) as client:
+            resp = client.post(f"{self.base_url}/on_disable")
+        return resp.status_code == 200
+    except httpx.ConnectError:
+        return False  # Worker may have died; substrate carries on
+
+
+def on_enable(self) -> bool:  # True if hook signal accepted by worker
+    """CR-2: forward the substrate's on_enable signal to the worker process.
+    
+    Same delivery semantics as on_disable: best-effort, errors logged-and-
+    swallowed. The plugin's hook (default no-op) decides whether to eagerly
+    re-acquire resources or rely on lazy re-load at next execute().
+    """
+    try:
+        with httpx.Client(timeout=5) as client:
+            resp = client.post(f"{self.base_url}/on_enable")
+        return resp.status_code == 200
+    except httpx.ConnectError:
+        return False
+
+
+RemotePluginProxy.on_disable = on_disable
+RemotePluginProxy.on_enable = on_enable
 
 # %% ../../nbs/core/proxy.ipynb #context-manager
 def __enter__(self):

@@ -208,6 +208,39 @@ def create_app(
             "message": getattr(plugin_instance, '_status_message', "")
         }
 
+    @app.post("/on_disable")
+    def on_disable() -> Dict[str, str]:
+        """CR-2: forward the substrate's on_disable signal to the loaded plugin.
+        
+        Worker stays alive; plugin's on_disable() hook gets a chance to
+        release heavy resources (GPU memory, model files, etc.). Default
+        PluginInterface.on_disable() is a no-op so plugins that don't
+        opt in see no behavior change.
+        """
+        if hasattr(plugin_instance, 'on_disable'):
+            try:
+                plugin_instance.on_disable()
+                return {"status": "disabled"}
+            except Exception as e:
+                return {"status": "error", "detail": str(e)}
+        return {"status": "not_supported"}
+
+    @app.post("/on_enable")
+    def on_enable() -> Dict[str, str]:
+        """CR-2: forward the substrate's on_enable signal to the loaded plugin.
+        
+        Plugin can eagerly re-acquire heavy resources or rely on lazy
+        re-acquisition via the next execute() call. Default
+        PluginInterface.on_enable() is a no-op.
+        """
+        if hasattr(plugin_instance, 'on_enable'):
+            try:
+                plugin_instance.on_enable()
+                return {"status": "enabled"}
+            except Exception as e:
+                return {"status": "error", "detail": str(e)}
+        return {"status": "not_supported"}
+
     @app.post("/cleanup")
     def cleanup() -> Dict[str, str]:
         """Clean up plugin resources."""

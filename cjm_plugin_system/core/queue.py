@@ -97,7 +97,23 @@ async def submit(
     priority: int = 0,  # Higher = more urgent
     **kwargs
 ) -> str:  # Returns job_id
-    """Submit a job to the queue."""
+    """Submit a job to the queue.
+    
+    CR-2: rejects jobs for disabled plugins at submit time (typed
+    PluginDisabledError) so the failure surface matches PluginManager.
+    execute_plugin's disabled gate. Submitting to a disabled plugin would
+    otherwise sit in the queue until execution, then raise — moving the
+    check earlier gives operators an actionable signal immediately.
+    """
+    # CR-2: late import to avoid pulling errors module into queue's import
+    # path during library load (keeps the worker.py-via-queue.py import
+    # chain minimal).
+    from cjm_plugin_system.core.errors import PluginDisabledError
+    
+    meta = self.manager.get_plugin_meta(plugin_name)
+    if meta is not None and not meta.enabled:
+        raise PluginDisabledError(plugin_name)
+    
     job_id = str(uuid.uuid4())
     job = Job(
         id=job_id,
