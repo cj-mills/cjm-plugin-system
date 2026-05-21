@@ -138,8 +138,10 @@ async def cancel(
             job.completed_at = time.time()
             self._pending = [j for j in self._pending if j.id != job_id]
             heapq.heapify(self._pending)
-            self._move_to_history(job)
+            # SG-13: signal before moving to history so the just-cancelled job's
+            # event is set before any eviction could pop it from the dict.
             self._signal_job_completed(job_id)
+            self._move_to_history(job)
             self.logger.info(f"Cancelled pending job {job_id[:8]}")
             return True
         
@@ -293,8 +295,12 @@ def _move_to_history(self, job: Job) -> None:
     self._history.append(job)
     if len(self._history) > self.max_history:
         old_job = self._history.pop(0)
-        # Clean up completion event
-        self._job_completed_events.pop(old_job.id, None)
+        # SG-13: set the evicted event before popping so any in-flight waiter
+        # still holding the reference resolves immediately. Idempotent if the
+        # event was already set by `_signal_job_completed`; protective if not.
+        evicted = self._job_completed_events.pop(old_job.id, None)
+        if evicted is not None:
+            evicted.set()
 
 def _signal_job_completed(self, job_id: str) -> None:
     """Signal that a job has completed."""
@@ -379,8 +385,10 @@ async def _execute_job(self, job: Job) -> None:
     self._running = None
     
     async with self._lock:
-        self._move_to_history(job)
+        # SG-13: signal before moving to history so this job's event is set
+        # before any eviction could pop it from the dict.
         self._signal_job_completed(job.id)
+        self._move_to_history(job)
     
     self.logger.info(f"Job {job.id[:8]} {job.status.value}")
 
