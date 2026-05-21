@@ -4,14 +4,32 @@
 
 # %% auto #0
 __all__ = ['T', 'SCHEMA_TITLE', 'SCHEMA_DESC', 'SCHEMA_MIN', 'SCHEMA_MAX', 'SCHEMA_ENUM', 'SCHEMA_MIN_LEN', 'SCHEMA_MAX_LEN',
-           'SCHEMA_PATTERN', 'SCHEMA_FORMAT', 'validate_field_value', 'validate_config', 'config_to_dict',
-           'dict_to_config', 'extract_defaults', 'dataclass_to_jsonschema']
+           'SCHEMA_PATTERN', 'SCHEMA_FORMAT', 'PluginConfigError', 'validate_field_value', 'validate_config',
+           'config_to_dict', 'dict_to_config', 'extract_defaults', 'dataclass_to_jsonschema']
 
 # %% ../../nbs/utils/validation.ipynb #d63b45d9
+import logging
 from dataclasses import fields, is_dataclass, asdict, MISSING
 from typing import Dict, Any, Tuple, Optional, Type, TypeVar, get_type_hints, get_origin, get_args, Union
 
 T = TypeVar('T')
+
+_logger = logging.getLogger(__name__)
+
+
+class PluginConfigError(ValueError):
+    """Raised when a config dict contains keys not declared on the target dataclass.
+    
+    SG-8 introduced this as the substrate-side rejection path for unknown
+    config keys. Subclasses `ValueError` so `except ValueError:` callsites
+    still catch it; future CR-5 work will reparent this under
+    `PluginInputError` without breaking those callers.
+    """
+    
+    def __init__(self, message: str, *, unknown_keys: Optional[list] = None, config_class_name: str = ""):
+        super().__init__(message)
+        self.unknown_keys = list(unknown_keys) if unknown_keys else []
+        self.config_class_name = config_class_name
 
 # %% ../../nbs/utils/validation.ipynb #qpdvkb9f5z
 SCHEMA_TITLE = "title"        # Display title for the field
@@ -93,9 +111,15 @@ def config_to_dict(
 def dict_to_config(
     config_class:Type[T], # Configuration dataclass type
     data:Optional[Dict[str, Any]]=None, # Dictionary with configuration values
-    validate:bool=False # Whether to validate against metadata constraints
+    validate:bool=False, # Whether to validate against metadata constraints
+    strict:bool=True # SG-8: reject unknown keys (default); set False to log+filter for forward-compat
 ) -> T: # Instance of the configuration dataclass
-    """Create a configuration dataclass instance from a dictionary."""
+    """Create a configuration dataclass instance from a dictionary.
+    
+    SG-8: by default, unknown keys raise `PluginConfigError`. The previous
+    behavior (silently filter unknowns) is available via `strict=False`,
+    which logs a warning so the drift is still visible in operator logs.
+    """
     if not is_dataclass(config_class):
         raise TypeError(f"Expected dataclass type, got {type(config_class).__name__}")
     
@@ -104,8 +128,23 @@ def dict_to_config(
     
     # Get valid field names for this dataclass
     valid_fields = {f.name for f in fields(config_class)}
+    unknown_keys = sorted(set(data) - valid_fields)
     
-    # Filter data to only include valid fields
+    if unknown_keys:
+        if strict:
+            raise PluginConfigError(
+                f"Unknown config keys for {config_class.__name__}: {unknown_keys}. "
+                f"Pass strict=False to ignore unknown keys (forward-compat).",
+                unknown_keys=unknown_keys,
+                config_class_name=config_class.__name__,
+            )
+        else:
+            _logger.warning(
+                "%s: ignoring unknown config keys %s (lenient mode)",
+                config_class.__name__, unknown_keys,
+            )
+    
+    # Filter data to only include valid fields (lenient mode falls through here)
     filtered_data = {k: v for k, v in data.items() if k in valid_fields}
     
     # Create the config instance
