@@ -4,7 +4,7 @@
 
 # %% auto #0
 __all__ = ['PluginManager', 'get_plugin_config', 'get_plugin_config_schema', 'get_all_plugin_configs', 'update_plugin_config',
-           'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream']
+           'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream', 'PluginBinding', 'bind']
 
 # %% ../../nbs/core/manager.ipynb #31a5a9f1
 import json
@@ -676,11 +676,128 @@ async def execute_plugin_stream(
 # Add to PluginManager
 PluginManager.execute_plugin_stream = execute_plugin_stream
 
+# %% ../../nbs/core/manager.ipynb #c8ebac45
+from dataclasses import dataclass, field as _field
+
+
+@dataclass
+class PluginBinding:
+    """Pre-bound view of a single plugin through a shared PluginManager.
+    
+    Eliminates the wrapper-class duplication audited across 8 consumer services
+    (SG-17). Methods forward to the manager with `plugin_name` pre-supplied;
+    `default_config` is the fallback used when `load()` is called without an
+    explicit config (matches the manifest-default behavior in `load_plugin`).
+    """
+    manager: "PluginManager"  # The shared PluginManager
+    plugin_name: str  # Name of the plugin this binding targets
+    default_config: Dict[str, Any] = _field(default_factory=dict)  # Used when load() called without config
+    
+    # --- Observation ---
+    
+    @property
+    def meta(self) -> Optional[PluginMeta]:
+        """The PluginMeta if the plugin is loaded, else None."""
+        return self.manager.get_plugin_meta(self.plugin_name)
+    
+    @property
+    def is_loaded(self) -> bool:
+        """True if the plugin is loaded in the bound manager."""
+        return self.manager.get_plugin(self.plugin_name) is not None
+    
+    @property
+    def is_enabled(self) -> bool:
+        """True if the plugin is loaded AND not currently disabled."""
+        m = self.meta
+        return m is not None and m.enabled
+    
+    # --- Lifecycle ---
+    
+    def load(
+        self,
+        config: Optional[Dict[str, Any]] = None,  # Override default_config when provided
+        strict: bool = True  # SG-5 strict validation
+    ) -> bool:  # True if loaded successfully
+        """Load via the bound manager. Uses `default_config` if no `config` provided."""
+        meta = self.manager.get_discovered_meta(self.plugin_name)
+        if meta is None:
+            self.manager.logger.error(f"Plugin {self.plugin_name!r} not discovered")
+            return False
+        effective = config if config is not None else dict(self.default_config)
+        return self.manager.load_plugin(meta, effective, strict=strict)
+    
+    def unload(self) -> bool:  # True if unloaded
+        """Unload the bound plugin."""
+        return self.manager.unload_plugin(self.plugin_name)
+    
+    def reload(
+        self,
+        config: Optional[Dict[str, Any]] = None  # Optional new config; current config used if None
+    ) -> bool:
+        """Reload the bound plugin (terminate + restart worker)."""
+        return self.manager.reload_plugin(self.plugin_name, config)
+    
+    def enable(self) -> bool:
+        """Enable the bound plugin."""
+        return self.manager.enable_plugin(self.plugin_name)
+    
+    def disable(self) -> bool:
+        """Disable the bound plugin (worker stays alive; jobs rejected)."""
+        return self.manager.disable_plugin(self.plugin_name)
+    
+    # --- Execution ---
+    
+    def execute(self, *args, **kwargs) -> Any:
+        """Execute via the bound manager (sync)."""
+        return self.manager.execute_plugin(self.plugin_name, *args, **kwargs)
+    
+    async def execute_async(self, *args, **kwargs) -> Any:
+        """Execute via the bound manager (async)."""
+        return await self.manager.execute_plugin_async(self.plugin_name, *args, **kwargs)
+    
+    # --- Configuration ---
+    
+    def update_config(
+        self,
+        config: Dict[str, Any],  # New config values
+        strict: bool = True  # SG-5 strict validation
+    ) -> bool:
+        """Hot-reload the bound plugin's configuration."""
+        return self.manager.update_plugin_config(self.plugin_name, config, strict=strict)
+    
+    def get_config(self) -> Optional[Dict[str, Any]]:
+        """Current configuration values (None if not loaded)."""
+        return self.manager.get_plugin_config(self.plugin_name)
+    
+    def get_config_schema(self) -> Optional[Dict[str, Any]]:
+        """JSON Schema describing this plugin's configuration."""
+        return self.manager.get_plugin_config_schema(self.plugin_name)
+    
+    def get_stats(self) -> Optional[Dict[str, Any]]:
+        """Resource telemetry for the bound plugin's worker process."""
+        return self.manager.get_plugin_stats(self.plugin_name)
+
+
+def bind(
+    self,
+    plugin_name: str,  # Name of the plugin to pre-bind
+    default_config: Optional[Dict[str, Any]] = None  # Default config used by binding.load()
+) -> PluginBinding:  # Bound view ready for instance-style use
+    """Create a PluginBinding pre-bound to this manager + plugin_name."""
+    return PluginBinding(
+        manager=self,
+        plugin_name=plugin_name,
+        default_config=dict(default_config) if default_config else {},
+    )
+
+
+PluginManager.bind = bind
+
 # %% ../../nbs/core/manager.ipynb #5c1b890e
-# SG-15: curate __all__ to expose only the class symbol.
+# SG-15: curate __all__ to expose only the class symbols.
 # The patched PluginManager methods (get_plugin_config, reload_plugin, etc.)
 # remain accessible as PluginManager.method() — they're removed from the
 # module's `from ... import *` surface because invoking them standalone
 # fails (they expect `self`). nbdev's auto-`__all__` lists them as free
 # names; this override runs after that assignment and wins by being last.
-__all__ = ['PluginManager']
+__all__ = ['PluginManager', 'PluginBinding']
