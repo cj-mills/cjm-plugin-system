@@ -222,6 +222,38 @@ class PluginManager:
         
         return dict(config)
 
+    def _check_config_schema_drift(
+        self,
+        proxy:Any, # RemotePluginProxy with a live worker
+        plugin_meta:PluginMeta, # Metadata to flag if drift is detected
+        manifest_schema:Optional[Dict[str, Any]] # Schema stored in the manifest
+    ) -> None:
+        """SG-9: compare live worker `/config_schema` to the manifest's stored
+        schema. On mismatch: log a warning + set `plugin_meta.config_schema_drift`
+        + populate `plugin_meta.live_config_schema`. Substrate keeps using the
+        manifest schema for defaults + validation; the drift signal surfaces
+        stale manifests that need regeneration (CR-8 `cjm-ctl regenerate-manifest`).
+        
+        Standalone scope: direct dict comparison rather than CR-8's nested-format
+        hash-based check; same intent, smaller landing.
+        """
+        try:
+            live_schema = proxy.get_config_schema()
+        except Exception as e:
+            self.logger.debug(
+                f"Skipping drift detection for {plugin_meta.name}: live schema fetch failed ({e})"
+            )
+            return
+        
+        # Compare. dict equality is deep and order-insensitive in Python.
+        if (manifest_schema or {}) != (live_schema or {}):
+            plugin_meta.config_schema_drift = True
+            plugin_meta.live_config_schema = live_schema
+            self.logger.warning(
+                f"Config schema drift for {plugin_meta.name}: manifest disagrees with live worker. "
+                f"Run `cjm-ctl regenerate-manifest {plugin_meta.name}` to refresh the manifest."
+            )
+
     def load_plugin(
         self,
         plugin_meta:PluginMeta, # Plugin metadata (with manifest attached)
@@ -238,6 +270,9 @@ class PluginManager:
             proxy = RemotePluginProxy(plugin_meta.manifest)
 
             config_schema = plugin_meta.manifest.get("config_schema")
+            
+            # SG-9: detect drift between manifest-declared schema and live worker.
+            self._check_config_schema_drift(proxy, plugin_meta, config_schema)
             
             # If config is None or empty, extract defaults from the plugin's config schema
             if not config:

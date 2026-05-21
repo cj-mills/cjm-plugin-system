@@ -24,3 +24,11 @@ class PluginMeta:
     instance:Optional[Any]=None # Plugin instance (PluginInterface subclass)
     enabled:bool=True # Whether the plugin is enabled
     last_executed:float=0.0 # Unix timestamp
+    # SG-9: drift detection — set by PluginManager.load_plugin when the live
+    # worker's /config_schema disagrees with the manifest's stored config_schema.
+    # `live_config_schema` holds the worker-reported shape so callers can pick
+    # which to honor (substrate keeps using `config_schema` for defaults +
+    # validation; tooling and the future plugin-config UI library can inspect
+    # `live_config_schema` for the post-regenerate-manifest preview).
+    config_schema_drift:bool=False
+    live_config_schema:Optional[Dict[str, Any]]=None
