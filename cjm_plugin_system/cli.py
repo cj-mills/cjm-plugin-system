@@ -342,32 +342,6 @@ print(json.dumps(meta, indent=2))
             pass
 
 # %% ../nbs/cli.ipynb #d448fe11
-def _add_conda_env_to_manifest(
-    manifest_dir:Path, # Directory containing manifest files
-    plugin_name:str, # Plugin name (used for finding manifest file)
-    env_name:str # Conda environment name to add
-) -> bool: # True if successfully updated
-    """Add conda_env field to an existing manifest file."""
-    # Find manifest by scanning for matching name
-    for manifest_file in manifest_dir.glob("*.json"):
-        try:
-            with open(manifest_file) as f:
-                manifest = json.load(f)
-            
-            # Check if this is the right manifest (by plugin name in config won't match,
-            # so we need to check if it was just created - use the file we just wrote)
-            if manifest.get('name'):
-                # Add conda_env and write back
-                manifest['conda_env'] = env_name
-                with open(manifest_file, 'w') as f:
-                    json.dump(manifest, f, indent=2)
-                return True
-        except (json.JSONDecodeError, IOError):
-            continue
-    
-    return False
-
-
 def _conda_env_exists_configured(
     env_name: str  # Name of the conda environment
 ) -> bool:  # True if environment exists
@@ -575,44 +549,66 @@ def _format_size(
     return f"{size_bytes:.1f} PB"
 
 
+# SG-37: in-process cache of PyPI 404 responses so a single estimate-size run
+# doesn't re-query the same missing name across multiple plugins.
+_PYPI_404_CACHE: set[str] = set()
+
+
 def _get_pypi_size(
     package_spec: str  # Package name or git URL
 ) -> tuple[int, str]:  # (size_bytes, package_name)
-    """Query PyPI for package download size."""
-    # Extract package name from various formats
-    package_name = package_spec
+    """Query PyPI for package download size.
     
-    # Handle git+https://github.com/user/repo-name.git
+    SG-37: PyPI normalizes package names to dash-form per PEP 503, so we try
+    the dash form first and fall back to the underscore form. Without this,
+    cjm-* packages (whose repo names contain dashes) silently 404 because
+    the old heuristic only tried the underscored form.
+    """
+    # Extract a raw repo-name fragment from various spec formats.
+    raw_name = package_spec
     if 'github.com' in package_spec and '.git' in package_spec:
-        # Extract repo name and convert to package name
-        repo_part = package_spec.split('/')[-1]
-        package_name = repo_part.replace('.git', '').replace('-', '_')
-    # Handle git+https://github.com/user/repo-name (no .git suffix)
+        raw_name = package_spec.split('/')[-1].replace('.git', '')
     elif package_spec.startswith('git+'):
-        repo_part = package_spec.rstrip('/').split('/')[-1]
-        package_name = repo_part.replace('-', '_')
-    # Handle package[extras] or package>=version
+        raw_name = package_spec.rstrip('/').split('/')[-1]
     elif '[' in package_spec:
-        package_name = package_spec.split('[')[0]
+        raw_name = package_spec.split('[')[0]
     elif '>=' in package_spec:
-        package_name = package_spec.split('>=')[0]
+        raw_name = package_spec.split('>=')[0]
     elif '==' in package_spec:
-        package_name = package_spec.split('==')[0]
+        raw_name = package_spec.split('==')[0]
     
-    try:
-        url = f"https://pypi.org/pypi/{package_name}/json"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-        
-        # Get the largest file size (usually the wheel)
-        urls = data.get('urls', [])
-        if urls:
-            max_size = max(u.get('size', 0) for u in urls)
-            return max_size, package_name
-    except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
-        pass
+    # Build ordered candidate list: dash-form first (canonical per PEP 503),
+    # then underscore-form as fallback. Dedupe while preserving order.
+    dash_form = raw_name.replace('_', '-')
+    underscore_form = raw_name.replace('-', '_')
+    candidates: List[str] = []
+    for cand in (dash_form, underscore_form):
+        if cand and cand not in candidates:
+            candidates.append(cand)
     
-    return 0, package_name
+    for package_name in candidates:
+        if package_name in _PYPI_404_CACHE:
+            continue
+        try:
+            url = f"https://pypi.org/pypi/{package_name}/json"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            
+            # Get the largest file size (usually the wheel)
+            urls = data.get('urls', [])
+            if urls:
+                max_size = max(u.get('size', 0) for u in urls)
+                return max_size, package_name
+            return 0, package_name
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                _PYPI_404_CACHE.add(package_name)
+                continue
+        except (urllib.error.URLError, json.JSONDecodeError):
+            pass
+    
+    # Nothing matched; surface the canonical form to the caller for display.
+    return 0, candidates[0] if candidates else raw_name
 
 
 def _estimate_conda_size(

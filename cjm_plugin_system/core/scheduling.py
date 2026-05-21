@@ -13,12 +13,9 @@ from typing import Dict, Any, Callable, Awaitable, Set
 
 from .metadata import PluginMeta
 
+# SG-39: library modules use `logging.getLogger(__name__)` and let the host
+# (CLI entry point, FastHTML app, worker subprocess) own `basicConfig`.
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[ResourceScheduler] %(message)s',
-    force=True
-)
 
 # %% ../../nbs/core/scheduling.ipynb #fe1a7f2e
 class ResourceScheduler(ABC):

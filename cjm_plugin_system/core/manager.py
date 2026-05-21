@@ -18,12 +18,12 @@ from .metadata import PluginMeta
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
 
+# SG-39: library modules use `logging.getLogger(__name__)` and let the host
+# (CLI entry point, FastHTML app, worker subprocess) own `basicConfig`.
+# Previously each module called `logging.basicConfig(force=True, format=...)`
+# at import time; the last-imported module's format silently overrode the
+# others.
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[PluginManager] %(message)s',
-    force=True
-)
 
 # %% ../../nbs/core/manager.ipynb #ad3d4194
 class PluginManager:
@@ -542,3 +542,12 @@ async def execute_plugin_stream(
 
 # Add to PluginManager
 PluginManager.execute_plugin_stream = execute_plugin_stream
+
+# %% ../../nbs/core/manager.ipynb #5c1b890e
+# SG-15: curate __all__ to expose only the class symbol.
+# The patched PluginManager methods (get_plugin_config, reload_plugin, etc.)
+# remain accessible as PluginManager.method() — they're removed from the
+# module's `from ... import *` surface because invoking them standalone
+# fails (they expect `self`). nbdev's auto-`__all__` lists them as free
+# names; this override runs after that assignment and wins by being last.
+__all__ = ['PluginManager']

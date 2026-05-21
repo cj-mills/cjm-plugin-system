@@ -18,12 +18,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from .manager import PluginManager
 
+# SG-39: library modules use `logging.getLogger(__name__)` and let the host
+# (CLI entry point, FastHTML app, worker subprocess) own `basicConfig`.
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='[JobQueue] %(message)s',
-    force=True
-)
 
 # %% ../../nbs/core/queue.ipynb #status-enum
 class JobStatus(str, Enum):
@@ -459,3 +456,12 @@ JobQueue._process_loop = _process_loop
 JobQueue._execute_job = _execute_job
 JobQueue._execute_with_cancellation = _execute_with_cancellation
 JobQueue._poll_progress = _poll_progress
+
+# %% ../../nbs/core/queue.ipynb #e31875a2
+# SG-15: curate __all__ to expose only the class + value symbols.
+# The patched JobQueue methods (submit, cancel, wait_for_job, etc.) remain
+# accessible as JobQueue.method() — they're removed from the module's
+# `from ... import *` surface because invoking them standalone fails
+# (they expect `self`). nbdev's auto-`__all__` lists them as free names;
+# this override runs after that assignment and wins by being last.
+__all__ = ['JobStatus', 'Job', 'JobQueue']
