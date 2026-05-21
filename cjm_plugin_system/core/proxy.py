@@ -13,13 +13,13 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, Generator, Optional
+from typing import Any, AsyncGenerator, Dict, Generator, Optional, Tuple
 
 import httpx
 
 from .config import get_config
 from .interface import FileBackedDTO, PluginInterface
-from .platform import get_popen_isolation_kwargs, terminate_process
+from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
 
 # %% ../../nbs/core/proxy.ipynb #proxy-class
 class RemotePluginProxy(PluginInterface):
@@ -32,7 +32,11 @@ class RemotePluginProxy(PluginInterface):
         """Initialize proxy and start the worker process."""
         self.manifest = manifest
         self.process: Optional[subprocess.Popen] = None
-        self.port = self._get_free_port()
+        # SG-4: bind the listening socket in the parent and (on Unix) pass the
+        # FD to the worker via subprocess inheritance, closing the
+        # bind-then-close-then-reopen TOCTOU race that would otherwise let
+        # another process steal the port between parent close and worker bind.
+        self._listen_sock, self.port = self._bind_listen_socket()
         self.base_url = f"http://127.0.0.1:{self.port}"
         self._start_process()
 
@@ -46,11 +50,14 @@ class RemotePluginProxy(PluginInterface):
         """Plugin version."""
         return self.manifest.get('version', '0.0.0')
 
-    def _get_free_port(self) -> int:
-        """Find an available port for the worker."""
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', 0))
-            return s.getsockname()[1]
+    def _bind_listen_socket(self) -> Tuple[socket.socket, int]:
+        """Bind a listening socket on a kernel-chosen ephemeral port.
+        The socket is kept open so its FD can be inherited by the worker
+        subprocess (Unix). Returns (socket, port)."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('127.0.0.1', 0))
+        sock.listen(128)
+        return sock, sock.getsockname()[1]
 
     def _start_process(self) -> None:
         """Launch the worker subprocess."""
@@ -70,12 +77,26 @@ class RemotePluginProxy(PluginInterface):
         self.log_file.write(f"\n--- Starting {self.name} at {time.ctime()} ---\n")
         self.log_file.flush()
         
+        # SG-4: prefer FD inheritance over bind-then-close. `pass_fds` is
+        # Unix-only; Windows falls back to the legacy port-handoff (TOCTOU
+        # latent there until cross-platform CI matrix per SG-32).
+        popen_kwargs: Dict[str, Any] = {}
+        if is_windows():
+            self._listen_sock.close()
+            self._listen_sock = None
+            port_args = ["--port", str(self.port)]
+        else:
+            fd = self._listen_sock.fileno()
+            os.set_inheritable(fd, True)
+            popen_kwargs["pass_fds"] = (fd,)
+            port_args = ["--fd", str(fd)]
+
         cmd = [
             python_path,
             "-m", "cjm_plugin_system.core.worker",
             "--module", self.manifest['module'],
             "--class", self.manifest['class'],
-            "--port", str(self.port),
+            *port_args,
             "--ppid", str(os.getpid())  # Enable suicide pact
         ]
         
@@ -101,8 +122,14 @@ class RemotePluginProxy(PluginInterface):
             stdout=self.log_file,
             stderr=subprocess.STDOUT, # Merge stderr into stdout
             env=env,
-            **isolation_kwargs
+            **isolation_kwargs,
+            **popen_kwargs,
         )
+        # Parent releases its copy of the listening socket once the worker has
+        # inherited the FD; the worker now owns it via uvicorn's --fd path.
+        if self._listen_sock is not None:
+            self._listen_sock.close()
+            self._listen_sock = None
         self._wait_for_ready()
 
     def _wait_for_ready(

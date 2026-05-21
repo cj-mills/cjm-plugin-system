@@ -223,9 +223,19 @@ def run_worker() -> None:
     parser = argparse.ArgumentParser(description="Universal Plugin Worker")
     parser.add_argument("--module", required=True, help="Plugin module path")
     parser.add_argument("--class", dest="class_name", required=True, help="Plugin class name")
-    parser.add_argument("--port", type=int, required=True, help="Port to listen on")
+    # SG-4: parent-bound listening-socket FD inheritance closes the
+    # bind-then-close-then-reopen TOCTOU race. --fd is preferred on Unix;
+    # --port stays as the Windows fallback (pass_fds is Unix-only) and as a
+    # diagnostic escape hatch when invoking the worker directly.
+    parser.add_argument("--fd", type=int, required=False, default=None,
+                        help="Inherited listening-socket file descriptor (Unix; preferred)")
+    parser.add_argument("--port", type=int, required=False, default=None,
+                        help="Port to bind (used when --fd is not provided)")
     parser.add_argument("--ppid", type=int, required=False, help="Parent PID to monitor")
     args = parser.parse_args()
+
+    if args.fd is None and args.port is None:
+        parser.error("one of --fd or --port is required")
 
     # Start watchdog if parent PID provided
     if args.ppid:
@@ -237,7 +247,10 @@ def run_worker() -> None:
         watchdog.start()
 
     app = create_app(args.module, args.class_name)
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    if args.fd is not None:
+        uvicorn.run(app, fd=args.fd, log_level="warning")
+    else:
+        uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
 
 # %% ../../nbs/core/worker.ipynb #module-main
 #| eval: false
