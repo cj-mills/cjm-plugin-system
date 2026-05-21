@@ -4,7 +4,8 @@
 
 # %% auto #0
 __all__ = ['PluginManager', 'get_plugin_config', 'get_plugin_config_schema', 'get_all_plugin_configs', 'update_plugin_config',
-           'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream', 'PluginBinding', 'bind']
+           'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream', 'PluginBinding', 'bind', 'get_by_role',
+           'get_by_domain', 'get_canonical', 'get_compatible_for_current_platform']
 
 # %% ../../nbs/core/manager.ipynb #31a5a9f1
 import json
@@ -14,7 +15,7 @@ from typing import Any, Dict, List, Optional, Type
 
 from .config import get_config
 from .interface import PluginInterface
-from .metadata import PluginMeta
+from .metadata import PluginMeta, PluginTaxonomy, ResourceRequirements
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
 from ..utils.validation import PluginConfigError
@@ -113,6 +114,67 @@ class PluginManager:
             return False
         return True
 
+    def _parse_taxonomy(
+        self,
+        manifest: Dict[str, Any]  # Loaded manifest dict
+    ) -> Optional[PluginTaxonomy]:
+        """CR-1: parse the manifest's taxonomy block into a PluginTaxonomy.
+        
+        Returns None when the manifest predates CR-1 (no taxonomy block).
+        Substrate-side construction is pure string-shuffling — no host-side
+        imports of interface libraries needed per the CR-1 derivation
+        contract.
+        """
+        tax_dict = manifest.get("taxonomy")
+        if not tax_dict or not isinstance(tax_dict, dict):
+            return None
+        return PluginTaxonomy(
+            domain=tax_dict.get("domain", ""),
+            role=tax_dict.get("role", ""),
+            interface_fqcn=tax_dict.get("interface_fqcn", manifest.get("interface", "")),
+        )
+
+    def _parse_resources(
+        self,
+        manifest: Dict[str, Any]  # Loaded manifest dict
+    ) -> Optional[ResourceRequirements]:
+        """Phase 5a: parse the manifest's resources block into a ResourceRequirements.
+        
+        Returns None when the manifest predates Phase 5a (no resources block).
+        """
+        res_dict = manifest.get("resources")
+        if not res_dict or not isinstance(res_dict, dict):
+            return None
+        return ResourceRequirements(
+            requires_gpu=bool(res_dict.get("requires_gpu", False)),
+            platforms=list(res_dict.get("platforms", [])),
+            accelerators=list(res_dict.get("accelerators", [])),
+        )
+
+    def _derive_category(
+        self,
+        manifest: Dict[str, Any],  # Loaded manifest dict
+        taxonomy: Optional[PluginTaxonomy]  # Parsed taxonomy (or None for legacy manifests)
+    ) -> str:
+        """CR-1: derive the human-readable category label.
+        
+        Resolution order:
+          1. `category_override` from the manifest (when the plugin author
+             wants a custom display label not derivable from domain).
+          2. Title-Case of `taxonomy.domain` with underscores → spaces
+             (e.g., "transcription" → "Transcription", "forced_alignment" →
+             "Forced Alignment").
+          3. Legacy `category` string from the manifest (pre-CR-1 plugins).
+          4. Empty string fallback.
+        """
+        override = manifest.get("category_override")
+        if isinstance(override, str) and override:
+            return override
+        if taxonomy and taxonomy.domain:
+            return taxonomy.domain.replace("_", " ").title()
+        legacy = manifest.get("category", "")
+        return legacy if isinstance(legacy, str) else ""
+
     def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
         """Discover plugins via JSON manifests in search paths."""
         self.discovered = []
@@ -131,15 +193,27 @@ class PluginManager:
                     if not name or name in seen_plugins:
                         continue  # Skip duplicates (local shadows global)
                     
-                    # Create metadata with manifest attached.
+                    # CR-1: parse taxonomy block (substrate stores strings only;
+                    # no host-side imports of interface libraries).
+                    # Phase 5a: parse resources block (binary hard-facts only;
+                    # quantitative resource amounts dropped per CR-7 reframe).
+                    taxonomy = self._parse_taxonomy(manifest)
+                    resources = self._parse_resources(manifest)
+                    
+                    # Derived category (CR-1) preserves backward-compat with
+                    # legacy manifests' `category` field.
+                    derived_category = self._derive_category(manifest, taxonomy)
+                    
                     # SG-35: `author` + `package_name` removed; `description`
                     # kept and validated by SG-6.
                     meta = PluginMeta(
                         name=name,
                         version=manifest.get('version', '0.0.0'),
                         description=manifest.get('description', ''),
-                        category=manifest.get('category', ''),
+                        category=derived_category,
                         interface=manifest.get('interface', ''),
+                        taxonomy=taxonomy,
+                        resources=resources,
                         config_schema=manifest.get('config_schema')
                     )
                     meta.manifest = manifest
@@ -794,6 +868,71 @@ def bind(
 
 
 PluginManager.bind = bind
+
+# %% ../../nbs/core/manager.ipynb #66b13ecf
+def get_by_role(
+    self,
+    role: str  # Interface class name segment of the FQCN (e.g., "TranscriptionPlugin")
+) -> List[PluginMeta]:  # Discovered plugins matching the role
+    """CR-1: return discovered plugins implementing the given interface role."""
+    return [m for m in self.discovered if m.taxonomy and m.taxonomy.role == role]
+
+
+def get_by_domain(
+    self,
+    domain: str  # Domain segment of the taxonomy (e.g., "transcription")
+) -> List[PluginMeta]:  # Discovered plugins in the domain
+    """CR-1: return discovered plugins in the given domain."""
+    return [m for m in self.discovered if m.taxonomy and m.taxonomy.domain == domain]
+
+
+def get_canonical(
+    self,
+    role: str  # Interface class name to look up
+) -> Optional[PluginMeta]:  # The unique matching plugin or None
+    """CR-1: return the single canonical plugin for a role.
+    
+    Returns None if zero or multiple plugins implement the role — useful for
+    substrate-internal use cases (e.g., the graph storage plugin) where the
+    expectation is exactly one implementation. Callers that want
+    multi-implementation handling use `get_by_role()` directly.
+    """
+    matches = self.get_by_role(role)
+    return matches[0] if len(matches) == 1 else None
+
+
+def get_compatible_for_current_platform(self) -> List[PluginMeta]:  # Plugins compatible with current platform
+    """Phase 5a: return discovered plugins compatible with the host platform.
+    
+    Filters by `resources.platforms`. Plugins with an empty (or absent)
+    platforms list are considered universally compatible — that's the
+    introspection-time convention when a plugin author didn't declare a
+    platform constraint. Plugins lacking the entire `resources` block
+    (legacy / pre-Phase-5a manifests) also pass through as universal.
+    
+    Does NOT filter on `requires_gpu` — substrate doesn't know whether a
+    GPU is present without invoking a system monitor plugin. Callers gate
+    on GPU availability separately if needed.
+    """
+    # Late import: platform module brings in subprocess + json; defer to call time.
+    from cjm_plugin_system.core.platform import get_current_platform
+    current = get_current_platform()
+    out: List[PluginMeta] = []
+    for m in self.discovered:
+        if not m.resources or not m.resources.platforms:
+            # No platform constraint declared; assume universal.
+            out.append(m)
+            continue
+        if current in m.resources.platforms:
+            out.append(m)
+    return out
+
+
+# Attach to PluginManager
+PluginManager.get_by_role = get_by_role
+PluginManager.get_by_domain = get_by_domain
+PluginManager.get_canonical = get_canonical
+PluginManager.get_compatible_for_current_platform = get_compatible_for_current_platform
 
 # %% ../../nbs/core/manager.ipynb #5c1b890e
 # SG-15: curate __all__ to expose only the class symbols.
