@@ -4,7 +4,7 @@
 
 # %% auto #0
 __all__ = ['app', 'main', 'setup_runtime', 'run_cmd', 'install_all', 'setup_host', 'estimate_size', 'list_plugins',
-           'remove_plugin']
+           'remove_plugin', 'validate_file']
 
 # %% ../nbs/cli.ipynb #8385ac8c
 import json
@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Annotated, Optional, List
+from typing import Annotated, Any, Optional, List
 
 import typer
 import yaml
@@ -1011,3 +1011,174 @@ def remove_plugin(
         raise typer.Exit(code=1)
     
     typer.echo(f"\nPlugin '{plugin_name}' removed successfully.")
+
+# %% ../nbs/cli.ipynb #df2c4524
+def _validate_manifest_dict(
+    data: Any  # Loaded manifest JSON
+) -> List[str]:  # List of human-readable error messages (empty == valid)
+    """Structural validation of a manifest dict against the substrate's flat schema.
+    
+    Returns a list of error messages — empty means the manifest passes. Checks
+    the fields PluginManager.discover_manifests + RemotePluginProxy expect:
+    name, version, module, class, interface (dotted), python_path. Optional
+    fields are type-checked when present.
+    """
+    errors: List[str] = []
+    if not isinstance(data, dict):
+        return [f"manifest must be a JSON object, got {type(data).__name__}"]
+    
+    # Required string fields
+    for key in ("name", "version", "module", "class", "interface", "python_path"):
+        val = data.get(key)
+        if val is None or val == "":
+            errors.append(f"manifest: required field {key!r} is missing or empty")
+        elif not isinstance(val, str):
+            errors.append(f"manifest: field {key!r} must be a string, got {type(val).__name__}")
+    
+    # Interface FQN must be a dotted path (SG-7 format check; substrate cannot
+    # import the class without the interface library installed locally)
+    iface = data.get("interface", "")
+    if isinstance(iface, str) and iface and "." not in iface:
+        errors.append(
+            f"manifest: field 'interface' {iface!r} is not a dotted FQN "
+            f"(expected 'module.subpackage.ClassName')"
+        )
+    
+    # Optional fields — type-check only
+    for key in ("description", "author", "category", "conda_env", "db_path"):
+        if key in data and not isinstance(data[key], str):
+            errors.append(f"manifest: field {key!r} must be a string when present")
+    
+    if "env_vars" in data and not isinstance(data["env_vars"], dict):
+        errors.append("manifest: field 'env_vars' must be an object when present")
+    
+    if "config_schema" in data and data["config_schema"] is not None:
+        cs = data["config_schema"]
+        if not isinstance(cs, dict):
+            errors.append("manifest: field 'config_schema' must be an object when present")
+        elif "properties" in cs and not isinstance(cs["properties"], dict):
+            errors.append("manifest: 'config_schema.properties' must be an object when present")
+    
+    if "resources" in data and not isinstance(data["resources"], dict):
+        errors.append("manifest: field 'resources' must be an object when present")
+    
+    return errors
+
+
+def _validate_plugins_yaml_dict(
+    data: Any  # Loaded plugins.yaml content
+) -> List[str]:  # List of human-readable error messages (empty == valid)
+    """Structural validation of a plugins.yaml file.
+    
+    Each plugin entry must have name + env_name + package, plus either env_file
+    or python_version (one defines how the conda env is created).
+    """
+    errors: List[str] = []
+    if not isinstance(data, dict):
+        return [f"plugins.yaml must be a YAML mapping at the top level, got {type(data).__name__}"]
+    
+    plugins = data.get("plugins")
+    if plugins is None:
+        return ["plugins.yaml: top-level key 'plugins' is missing"]
+    if not isinstance(plugins, list):
+        return [f"plugins.yaml: 'plugins' must be a list, got {type(plugins).__name__}"]
+    
+    seen_names: set[str] = set()
+    for i, plugin in enumerate(plugins):
+        prefix = f"plugins.yaml: plugins[{i}]"
+        if not isinstance(plugin, dict):
+            errors.append(f"{prefix}: must be a mapping, got {type(plugin).__name__}")
+            continue
+        
+        # Required string fields
+        for key in ("name", "env_name", "package"):
+            val = plugin.get(key)
+            if val is None or val == "":
+                errors.append(f"{prefix}: required field {key!r} is missing or empty")
+            elif not isinstance(val, str):
+                errors.append(f"{prefix}: field {key!r} must be a string")
+        
+        # Name uniqueness
+        name = plugin.get("name")
+        if isinstance(name, str) and name:
+            if name in seen_names:
+                errors.append(f"{prefix}: duplicate plugin name {name!r}")
+            seen_names.add(name)
+        
+        # Env creation: env_file OR python_version (at least one)
+        if "env_file" not in plugin and "python_version" not in plugin:
+            errors.append(
+                f"{prefix}: must declare either 'env_file' or 'python_version' "
+                f"to specify how the conda env is created"
+            )
+        
+        if "interface_libs" in plugin and not isinstance(plugin["interface_libs"], list):
+            errors.append(f"{prefix}: 'interface_libs' must be a list when present")
+    
+    return errors
+
+
+def _detect_manifest_format(
+    path: Path  # File to inspect
+) -> Optional[str]:  # 'manifest' | 'plugins_yaml' | None
+    """Auto-detect file format from extension."""
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        return "manifest"
+    if suffix in (".yaml", ".yml"):
+        return "plugins_yaml"
+    return None
+
+# %% ../nbs/cli.ipynb #babd0a83
+@app.command("validate")
+def validate_file(
+    path:Path=typer.Argument(..., help="Manifest JSON or plugins.yaml to validate"),
+    format:Optional[str]=typer.Option(
+        None, "--format", "-f",
+        help="Override format detection: 'manifest' or 'plugins_yaml'",
+    ),
+) -> None:
+    """SG-6: validate a manifest JSON or plugins.yaml file's structure.
+    
+    Auto-detects format from the file extension (`.json` → manifest,
+    `.yaml`/`.yml` → plugins.yaml). Exits non-zero with a list of validation
+    errors if any check fails.
+    """
+    if not path.exists():
+        typer.echo(f"File not found: {path}", err=True)
+        raise typer.Exit(code=1)
+    
+    fmt = format or _detect_manifest_format(path)
+    if fmt is None:
+        typer.echo(
+            f"Cannot detect format from extension {path.suffix!r}. "
+            f"Pass --format manifest or --format plugins_yaml.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    
+    try:
+        if fmt == "manifest":
+            with open(path) as f:
+                data = json.load(f)
+            errors = _validate_manifest_dict(data)
+            kind = "manifest"
+        elif fmt == "plugins_yaml":
+            with open(path) as f:
+                data = yaml.safe_load(f)
+            errors = _validate_plugins_yaml_dict(data)
+            kind = "plugins.yaml"
+        else:
+            typer.echo(f"Unknown format: {fmt!r}", err=True)
+            raise typer.Exit(code=1)
+    except (json.JSONDecodeError, yaml.YAMLError) as e:
+        typer.echo(f"Parse error in {path}: {e}", err=True)
+        raise typer.Exit(code=1)
+    
+    if errors:
+        typer.echo(f"✗ {path} ({kind}): {len(errors)} error(s)", err=True)
+        for err in errors:
+            typer.echo(f"  - {err}", err=True)
+        raise typer.Exit(code=1)
+    
+    typer.echo(f"✓ {path} ({kind}): valid")
