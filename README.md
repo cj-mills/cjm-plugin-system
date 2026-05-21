@@ -48,11 +48,11 @@ graph LR
 
     cli --> core_platform
     cli --> core_config
+    core_manager --> core_proxy
+    core_manager --> core_metadata
+    core_manager --> core_config
     core_manager --> core_interface
     core_manager --> core_scheduling
-    core_manager --> core_metadata
-    core_manager --> core_proxy
-    core_manager --> core_config
     core_platform --> core_config
     core_proxy --> core_platform
     core_proxy --> core_interface
@@ -66,33 +66,7 @@ graph LR
 
 ## CLI Reference
 
-### `cjm-ctl` Command
-
-                                                                                                              
-     Usage: cjm-ctl [OPTIONS] COMMAND [ARGS]...                                                               
-                                                                                                              
-     CJM Plugin System CLI                                                                                    
-                                                                                                              
-    ╭─ Options ──────────────────────────────────────────────────────────────────────────────────────────────╮
-    │ --cjm-config                PATH  Path to cjm.yaml configuration file                                  │
-    │ --data-dir                  PATH  Override data directory (manifests, logs)                            │
-    │ --conda-prefix              PATH  Override conda/mamba prefix path                                     │
-    │ --conda-type                TEXT  Conda implementation: micromamba, miniforge, or conda                │
-    │ --install-completion              Install completion for the current shell.                            │
-    │ --show-completion                 Show completion for the current shell, to copy it or customize the   │
-    │                                   installation.                                                        │
-    │ --help                            Show this message and exit.                                          │
-    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-    ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
-    │ setup-runtime  Download and setup micromamba runtime for project-local mode.                           │
-    │ install-all    Install and register all plugins defined in plugins.yaml.                               │
-    │ setup-host     Install interface libraries in the current Python environment.                          │
-    │ estimate-size  Estimate disk space required for plugin environments.                                   │
-    │ list           List installed plugins from manifest directory.                                         │
-    │ remove         Remove a plugin's manifest and conda environment.                                       │
-    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-
-For detailed help on any command, use `cjm-ctl <command> --help`.
+No CLI commands found in this project.
 
 ## Module Overview
 

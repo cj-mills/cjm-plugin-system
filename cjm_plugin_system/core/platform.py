@@ -248,7 +248,8 @@ def download_micromamba(
         
         try:
             with tarfile.open(archive_path, "r:bz2") as tar:
-                tar.extractall(tmpdir_path)
+                # PEP 706: `filter='data'` required to avoid hard-error on Python 3.14+.
+                tar.extractall(tmpdir_path, filter='data')
         except tarfile.TarError as e:
             if show_progress:
                 print(f"Failed to extract archive: {e}")
