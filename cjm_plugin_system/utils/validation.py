@@ -4,8 +4,8 @@
 
 # %% auto #0
 __all__ = ['T', 'SCHEMA_TITLE', 'SCHEMA_DESC', 'SCHEMA_MIN', 'SCHEMA_MAX', 'SCHEMA_ENUM', 'SCHEMA_MIN_LEN', 'SCHEMA_MAX_LEN',
-           'SCHEMA_PATTERN', 'SCHEMA_FORMAT', 'PluginConfigError', 'validate_field_value', 'validate_config',
-           'config_to_dict', 'dict_to_config', 'extract_defaults', 'dataclass_to_jsonschema']
+           'SCHEMA_PATTERN', 'SCHEMA_FORMAT', 'validate_field_value', 'validate_config', 'config_to_dict',
+           'dict_to_config', 'extract_defaults', 'dataclass_to_jsonschema']
 
 # %% ../../nbs/utils/validation.ipynb #d63b45d9
 import logging
@@ -17,19 +17,15 @@ T = TypeVar('T')
 _logger = logging.getLogger(__name__)
 
 
-class PluginConfigError(ValueError):
-    """Raised when a config dict contains keys not declared on the target dataclass.
-    
-    SG-8 introduced this as the substrate-side rejection path for unknown
-    config keys. Subclasses `ValueError` so `except ValueError:` callsites
-    still catch it; future CR-5 work will reparent this under
-    `PluginInputError` without breaking those callers.
-    """
-    
-    def __init__(self, message: str, *, unknown_keys: Optional[list] = None, config_class_name: str = ""):
-        super().__init__(message)
-        self.unknown_keys = list(unknown_keys) if unknown_keys else []
-        self.config_class_name = config_class_name
+# CR-5: PluginConfigError moved to `cjm_plugin_system.core.errors` as part of
+# the typed error hierarchy (reparented under PluginInputError). The re-export
+# below preserves SG-8-era import paths
+# (`from cjm_plugin_system.utils.validation import PluginConfigError`) so
+# existing call sites continue to work without churn during the SG-47 plugin
+# cascade.
+# REMOVE-AFTER-OVERHAUL: drop the re-export after SG-47 cascade migrates
+# plugins to import directly from core.errors.
+from ..core.errors import PluginConfigError  # noqa: F401
 
 # %% ../../nbs/utils/validation.ipynb #qpdvkb9f5z
 SCHEMA_TITLE = "title"        # Display title for the field
@@ -132,10 +128,12 @@ def dict_to_config(
     
     if unknown_keys:
         if strict:
+            # CR-5: pass via `fields_invalid=` (canonical PluginInputError kwarg);
+            # `unknown_keys=` is the SG-8-era deprecated alias.
             raise PluginConfigError(
                 f"Unknown config keys for {config_class.__name__}: {unknown_keys}. "
                 f"Pass strict=False to ignore unknown keys (forward-compat).",
-                unknown_keys=unknown_keys,
+                fields_invalid=unknown_keys,
                 config_class_name=config_class.__name__,
             )
         else:

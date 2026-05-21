@@ -239,11 +239,13 @@ class PluginManager:
         
         if unknown_keys:
             if strict:
+                # CR-5: pass via `fields_invalid=` (canonical PluginInputError kwarg);
+                # `unknown_keys=` is the SG-8-era deprecated alias.
                 raise PluginConfigError(
                     f"Unknown config keys for plugin {plugin_name!r}: {unknown_keys}. "
                     f"Accepted keys per manifest config_schema: {sorted(valid_keys)}. "
                     f"Pass strict=False to ignore unknown keys (forward-compat).",
-                    unknown_keys=unknown_keys,
+                    fields_invalid=unknown_keys,
                     config_class_name=plugin_name,
                 )
             else:
