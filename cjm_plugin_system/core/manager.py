@@ -17,6 +17,7 @@ from .interface import PluginInterface
 from .metadata import PluginMeta
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
+from ..utils.validation import PluginConfigError
 
 # SG-39: library modules use `logging.getLogger(__name__)` and let the host
 # (CLI entry point, FastHTML app, worker subprocess) own `basicConfig`.
@@ -179,10 +180,53 @@ class PluginManager:
 
         return defaults
 
+    def _validate_config_against_schema(
+        self,
+        config:Optional[Dict[str, Any]], # Caller-provided config dict (or None)
+        config_schema:Optional[Dict[str, Any]], # Plugin's JSON Schema from manifest
+        plugin_name:str, # For error messages and warnings
+        strict:bool=True # Reject unknown keys (default); set False to log+filter
+    ) -> Dict[str, Any]: # Validated (possibly filtered) config dict
+        """SG-5: validate a config dict against the manifest's `config_schema`
+        before forwarding to the plugin's `initialize()`.
+        
+        Substrate-side gate that catches unknown keys at the host boundary
+        rather than relying on the worker process to silently drop them. The
+        manifest's `config_schema.properties` is the authority for what keys
+        are accepted.
+        """
+        if config is None:
+            return {}
+        if not config_schema or "properties" not in config_schema:
+            # No schema declared; substrate cannot validate. Pass through.
+            return dict(config)
+        
+        valid_keys = set(config_schema["properties"].keys())
+        unknown_keys = sorted(set(config) - valid_keys)
+        
+        if unknown_keys:
+            if strict:
+                raise PluginConfigError(
+                    f"Unknown config keys for plugin {plugin_name!r}: {unknown_keys}. "
+                    f"Accepted keys per manifest config_schema: {sorted(valid_keys)}. "
+                    f"Pass strict=False to ignore unknown keys (forward-compat).",
+                    unknown_keys=unknown_keys,
+                    config_class_name=plugin_name,
+                )
+            else:
+                self.logger.warning(
+                    "%s: ignoring unknown config keys %s (lenient mode)",
+                    plugin_name, unknown_keys,
+                )
+                return {k: v for k, v in config.items() if k in valid_keys}
+        
+        return dict(config)
+
     def load_plugin(
         self,
         plugin_meta:PluginMeta, # Plugin metadata (with manifest attached)
-        config:Optional[Dict[str, Any]]=None # Initial configuration
+        config:Optional[Dict[str, Any]]=None, # Initial configuration
+        strict:bool=True # SG-5: reject unknown keys against manifest config_schema (default)
     ) -> bool: # True if successfully loaded
         """Load a plugin by spawning a Worker subprocess."""
         if not hasattr(plugin_meta, 'manifest'):
@@ -193,12 +237,19 @@ class PluginManager:
             self.logger.info(f"Launching worker for {plugin_meta.name}...")
             proxy = RemotePluginProxy(plugin_meta.manifest)
 
+            config_schema = plugin_meta.manifest.get("config_schema")
+            
             # If config is None or empty, extract defaults from the plugin's config schema
             if not config:
-                config_schema = plugin_meta.manifest.get("config_schema")
                 config = self._extract_defaults_from_schema(config_schema)
                 if config:
                     self.logger.info(f"Using default config for {plugin_meta.name}: {list(config.keys())}")
+            else:
+                # SG-5: validate caller-provided config against manifest schema
+                # before forwarding to the worker.
+                config = self._validate_config_against_schema(
+                    config, config_schema, plugin_meta.name, strict=strict,
+                )
 
             # Initialize with config (defaults or provided)
             if config:
@@ -453,7 +504,8 @@ def get_all_plugin_configs(self) -> Dict[str, Dict[str, Any]]: # Plugin name -> 
 def update_plugin_config(
     self,
     plugin_name: str, # Name of the plugin
-    config: Dict[str, Any] # New configuration values
+    config: Dict[str, Any], # New configuration values
+    strict: bool = True # SG-5: reject unknown keys against manifest config_schema (default)
 ) -> bool: # True if successful
     """Update a plugin's configuration (hot-reload without restart)."""
     plugin = self.get_plugin(plugin_name)
@@ -462,9 +514,22 @@ def update_plugin_config(
         return False
 
     try:
-        plugin.initialize(config)
+        # SG-5: validate caller-provided config against manifest schema
+        # before forwarding to the worker. PluginConfigError propagates so
+        # callers can distinguish substrate-side validation failures from
+        # worker-side runtime errors.
+        meta = self.plugins[plugin_name]
+        config_schema = meta.manifest.get("config_schema") if hasattr(meta, "manifest") else None
+        validated_config = self._validate_config_against_schema(
+            config, config_schema, plugin_name, strict=strict,
+        )
+        plugin.initialize(validated_config)
         self.logger.info(f"Updated configuration for plugin: {plugin_name}")
         return True
+    except PluginConfigError:
+        # Let typed validation errors propagate to callers; substrate-side
+        # rejection is a programmer/operator signal, not a "soft" failure.
+        raise
     except Exception as e:
         self.logger.error(f"Error updating plugin {plugin_name} config: {e}")
         return False
