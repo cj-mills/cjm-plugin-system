@@ -896,8 +896,20 @@ def get_canonical(
     substrate-internal use cases (e.g., the graph storage plugin) where the
     expectation is exactly one implementation. Callers that want
     multi-implementation handling use `get_by_role()` directly.
+    
+    Multi-match is logged at WARNING level because it's a substrate-visible
+    configuration-time surprise — without the warning, the caller's None-handling
+    branch can't distinguish "no plugins installed for this role" from
+    "multiple plugins competing for an exactly-one role." Zero-match is silent
+    because absence-of-optional-plugin is a normal probe outcome.
     """
     matches = self.get_by_role(role)
+    if len(matches) > 1:
+        self.logger.warning(
+            f"get_canonical({role!r}): {len(matches)} matches found "
+            f"({[m.name for m in matches]}); returning None per exactly-one contract. "
+            f"Use get_by_role() if multi-match is intentional."
+        )
     return matches[0] if len(matches) == 1 else None
 
 
