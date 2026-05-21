@@ -258,66 +258,88 @@ print(json.dumps(meta, indent=2))
     if cfg.models_dir:
         env["CJM_MODELS_DIR"] = str(cfg.models_dir)
     
-    # The introspection command - use configurable conda command
-    conda_cmd = _get_conda_cmd_str()
-    introspection_cmd = f"{conda_cmd} run -n {env_name} python -c '{introspection_script}'"
-    
+    # SG-2: write the introspection script to a temp .py file rather than
+    # passing it inline via `python -c '...'`. cmd.exe does not honor POSIX
+    # single quotes, so the inline form silently breaks Windows installs.
+    # delete=False because we must close the file before another process
+    # (the conda-env python interpreter) reads it on Windows; the finally
+    # block unlinks it.
+    introspection_fd, introspection_path = tempfile.mkstemp(
+        prefix=f"cjm_introspect_{env_name}_",
+        suffix=".py",
+    )
     try:
-        # Check output, capture stdout
-        # Use shell=True without explicit executable for cross-platform support
-        # Pass env to propagate CJM paths to the introspection script
-        result = subprocess.run(
-            introspection_cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            check=True,
-            env=env
-        )
-        result_str = result.stdout.strip()
+        with os.fdopen(introspection_fd, "w") as f:
+            f.write(introspection_script)
         
-        # Robust JSON Parsing: 
-        # Sometimes 'conda run' leaks warnings into stdout. We try to find the JSON block.
+        # The introspection command - use configurable conda command.
+        # Double-quote the script path so paths with spaces (common on
+        # Windows) work in either shell.
+        conda_cmd = _get_conda_cmd_str()
+        introspection_cmd = f'{conda_cmd} run -n {env_name} python "{introspection_path}"'
+        
         try:
-            start = result_str.find('{')
-            end = result_str.rfind('}') + 1
-            if start != -1 and end != 0:
-                json_str = result_str[start:end]
-                meta_json = json.loads(json_str)
-            else:
-                # Fallback to full string if brackets not found
-                meta_json = json.loads(result_str)
-        except json.JSONDecodeError as e:
-            print(f"ERROR: Failed to parse JSON from introspection output.")
-            print(f"Raw Output:\n{result_str}")
-            return None
-
-        plugin_name = meta_json.get('name', 'unknown')
-        out_file = manifest_dir / f"{plugin_name}.json"
-        
-        # Log detected metadata
-        if 'category' in meta_json:
-            print(f"[{env_name}] Category: {meta_json['category']}")
-        if 'interface' in meta_json:
-            print(f"[{env_name}] Interface: {meta_json['interface']}")
-        if 'config_schema' in meta_json:
-            print(f"[{env_name}] Config schema: captured")
-        
-        with open(out_file, 'w') as f:
-            f.write(json.dumps(meta_json, indent=2))
+            # Check output, capture stdout
+            # Use shell=True without explicit executable for cross-platform support
+            # Pass env to propagate CJM paths to the introspection script
+            result = subprocess.run(
+                introspection_cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env
+            )
+            result_str = result.stdout.strip()
             
-        print(f"[{env_name}] Wrote manifest to {out_file}")
-        # SG-3: return the path so callers can update the manifest by exact
-        # file rather than scanning `manifest_dir` with a substring match.
-        return out_file
-        
-    except subprocess.CalledProcessError as e:
-        print(f"Error generating manifest for {env_name}:")
-        print(e.stderr if e.stderr else str(e))
-        return None
-    except Exception as e:
-        print(f"Unexpected error generating manifest: {e}")
-        return None
+            # Robust JSON Parsing: 
+            # Sometimes 'conda run' leaks warnings into stdout. We try to find the JSON block.
+            try:
+                start = result_str.find('{')
+                end = result_str.rfind('}') + 1
+                if start != -1 and end != 0:
+                    json_str = result_str[start:end]
+                    meta_json = json.loads(json_str)
+                else:
+                    # Fallback to full string if brackets not found
+                    meta_json = json.loads(result_str)
+            except json.JSONDecodeError as e:
+                print(f"ERROR: Failed to parse JSON from introspection output.")
+                print(f"Raw Output:\n{result_str}")
+                return None
+
+            plugin_name = meta_json.get('name', 'unknown')
+            out_file = manifest_dir / f"{plugin_name}.json"
+            
+            # Log detected metadata
+            if 'category' in meta_json:
+                print(f"[{env_name}] Category: {meta_json['category']}")
+            if 'interface' in meta_json:
+                print(f"[{env_name}] Interface: {meta_json['interface']}")
+            if 'config_schema' in meta_json:
+                print(f"[{env_name}] Config schema: captured")
+            
+            with open(out_file, 'w') as f:
+                f.write(json.dumps(meta_json, indent=2))
+                
+            print(f"[{env_name}] Wrote manifest to {out_file}")
+            # SG-3: return the path so callers can update the manifest by exact
+            # file rather than scanning `manifest_dir` with a substring match.
+            return out_file
+            
+        except subprocess.CalledProcessError as e:
+            print(f"Error generating manifest for {env_name}:")
+            print(e.stderr if e.stderr else str(e))
+            return None
+        except Exception as e:
+            print(f"Unexpected error generating manifest: {e}")
+            return None
+    finally:
+        # Best-effort cleanup of the temp introspection script.
+        try:
+            os.unlink(introspection_path)
+        except OSError:
+            pass
 
 # %% ../nbs/cli.ipynb #d448fe11
 def _add_conda_env_to_manifest(
