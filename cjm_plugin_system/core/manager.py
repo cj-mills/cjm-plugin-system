@@ -19,7 +19,7 @@ from cjm_plugin_system.core.config_store import (
 )
 from .errors import PluginConfigError, PluginDisabledError
 from .interface import PluginInterface
-from .metadata import PluginMeta, PluginTaxonomy, ResourceRequirements
+from .metadata import PluginInstance, PluginMeta, PluginTaxonomy, ResourceRequirements
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
 
@@ -58,6 +58,10 @@ class PluginManager:
         self.system_monitor: Optional[PluginInterface] = None
         self.discovered: List[PluginMeta] = []
         self.plugins: Dict[str, PluginMeta] = {}
+        # CR-10: per-instance state keyed by instance_id. Default-loaded plugins
+        # populate self.instances[plugin_name] alongside self.plugins[plugin_name]
+        # for backward compat; multi-instance loads populate self.instances only.
+        self.instances: Dict[str, PluginInstance] = {}
         self.logger = logging.getLogger(f"{__name__}.{type(self).__name__}")
         
         # CR-2: persistence + lifecycle hook bookkeeping.
@@ -429,27 +433,94 @@ class PluginManager:
 
     def _maybe_fire_disable_hook(
         self,
-        plugin_name: str  # Plugin whose in-flight job just finished
+        name_or_id: str  # instance_id (or legacy plugin_name) whose in-flight job just finished
     ) -> None:
-        """CR-2: if disable_plugin() deferred the on_disable hook while a job
-        was in flight, fire it now. Idempotent — no-op if the plugin wasn't
-        deferred."""
-        if plugin_name not in self._pending_disable_hooks:
+        """CR-2 + CR-10: fire deferred on_disable for `name_or_id` if pending.
+        
+        Idempotent. Resolves via self.instances first; falls back to
+        self.plugins[name].instance for legacy code paths.
+        """
+        if name_or_id not in self._pending_disable_hooks:
             return
-        self._pending_disable_hooks.discard(plugin_name)
-        meta = self.plugins.get(plugin_name)
-        if meta is None or meta.instance is None:
+        self._pending_disable_hooks.discard(name_or_id)
+        proxy = None
+        inst = self.instances.get(name_or_id)
+        if inst is not None:
+            proxy = inst.proxy
+        else:
+            meta = self.plugins.get(name_or_id)
+            if meta is not None:
+                proxy = meta.instance
+        if proxy is None:
             return
         try:
-            meta.instance.on_disable()
+            proxy.on_disable()
         except Exception as e:
-            self.logger.warning(f"on_disable() raised for {plugin_name}: {e}")
+            self.logger.warning(f"on_disable() raised for {name_or_id}: {e}")
 
+    # ------------------------------------------------------------------
+    # CR-10: multi-instance bookkeeping helpers
+    # ------------------------------------------------------------------
+    
+    def _validate_instance_id(self, instance_id: str) -> None:
+        """Reject malformed explicit instance_ids at load time.
+        
+        Pattern: alphanumeric + underscore + hyphen, length 1..64. Raises
+        ValueError on invalid input so the caller sees the constraint failure
+        immediately rather than at first execute / unload.
+        """
+        import re as _re
+        if not isinstance(instance_id, str):
+            raise ValueError(
+                f"instance_id must be str, got {type(instance_id).__name__}"
+            )
+        if not _re.fullmatch(r"[A-Za-z0-9_-]{1,64}", instance_id):
+            raise ValueError(
+                f"instance_id {instance_id!r} must match pattern [A-Za-z0-9_-]{{1,64}}"
+            )
+    
+    def _generate_instance_id(self, plugin_name: str) -> str:
+        """Generate a unique instance_id of form `{plugin_name}-{6-char-hex}`.
+        
+        Used when load_plugin is called with new_instance=True and no explicit
+        instance_id. Retries up to 16 times if a collision occurs in self.instances.
+        """
+        import secrets as _secrets
+        for _ in range(16):
+            candidate = f"{plugin_name}-{_secrets.token_hex(3)}"
+            if candidate not in self.instances:
+                return candidate
+        raise RuntimeError(
+            f"Could not generate unique instance_id for {plugin_name!r} after 16 attempts"
+        )
+    
+    def get_instance(
+        self,
+        name_or_id: str  # Plugin name (default-loaded) or explicit instance_id
+    ) -> Optional[PluginInstance]:
+        """Return the PluginInstance for `name_or_id`, or None if not loaded.
+        
+        Lookup is keyed by instance_id (which equals plugin_name for default-
+        loaded plugins). Multi-instance IDs only exist in self.instances.
+        """
+        return self.instances.get(name_or_id)
+    
+    def list_instances(
+        self,
+        plugin_name: Optional[str] = None  # If given, filter to this plugin's instances
+    ) -> List[PluginInstance]:
+        """List all loaded instances, optionally filtered by underlying plugin name."""
+        if plugin_name is None:
+            return list(self.instances.values())
+        return [i for i in self.instances.values() if i.plugin_name == plugin_name]
+    
     def load_plugin(
         self,
         plugin_meta:PluginMeta, # Plugin metadata (with manifest attached)
         config:Optional[Dict[str, Any]]=None, # Initial configuration
-        strict:bool=True # SG-5: reject unknown keys against manifest config_schema (default)
+        strict:bool=True, # SG-5: reject unknown keys against manifest config_schema (default)
+        instance_id:Optional[str]=None, # CR-10: explicit instance_id; None defaults to plugin_name
+        new_instance:bool=False # CR-10: auto-generate `{name}-{hex}` instance_id (with instance_id=None)
     ) -> bool: # True if successfully loaded
         """Load a plugin by spawning a Worker subprocess.
         
@@ -459,23 +530,49 @@ class PluginManager:
         as the effective input. The persisted `enabled` flag is applied to
         `plugin_meta.enabled` so disabled plugins stay disabled across
         process restarts.
+        
+        CR-10: optional `instance_id` allows multi-instance loading.
+        - instance_id=None, new_instance=False (default): instance_id =
+          plugin_meta.name. Populates self.plugins[plugin_name] + self.instances
+          [plugin_name] together (single-instance backward compat).
+        - instance_id="custom": validated against `[A-Za-z0-9_-]{1,64}`. Populates
+          self.instances[custom]. Persistence is keyed by plugin_name and only
+          applied to the default instance.
+        - instance_id=None, new_instance=True: auto-generates `{name}-{6-hex}`.
+        Idempotent: re-load against an existing instance_id returns True without
+        re-spawning.
         """
         if not hasattr(plugin_meta, 'manifest'):
             self.logger.error(f"Plugin {plugin_meta.name} has no manifest data")
             return False
+        
+        # CR-10: resolve instance_id + idempotency check
+        if instance_id is None:
+            resolved_id = self._generate_instance_id(plugin_meta.name) if new_instance else plugin_meta.name
+        else:
+            self._validate_instance_id(instance_id)
+            resolved_id = instance_id
+        if resolved_id in self.instances:
+            self.logger.info(f"Instance {resolved_id!r} already loaded; idempotent skip")
+            return True
+        is_default = (resolved_id == plugin_meta.name)
 
         # CR-2: read persisted record (config + enabled flag) before launching.
-        # Falls through gracefully when no record exists (fresh install).
+        # Persistence is per-plugin (keyed by plugin_name), not per-instance, so
+        # multi-instance loads ignore the persisted state.
         persisted: Optional[PluginConfigRecord] = None
-        try:
-            persisted = self.config_store.get(plugin_meta.name)
-        except Exception as e:
-            self.logger.debug(
-                f"config_store.get({plugin_meta.name}) raised; falling through: {e}"
-            )
+        if is_default:
+            try:
+                persisted = self.config_store.get(plugin_meta.name)
+            except Exception as e:
+                self.logger.debug(
+                    f"config_store.get({plugin_meta.name}) raised; falling through: {e}"
+                )
 
         try:
-            self.logger.info(f"Launching worker for {plugin_meta.name}...")
+            self.logger.info(
+                f"Launching worker for {plugin_meta.name} (instance_id={resolved_id})..."
+            )
             proxy = RemotePluginProxy(plugin_meta.manifest)
 
             config_schema = plugin_meta.manifest.get("config_schema")
@@ -483,7 +580,7 @@ class PluginManager:
             # SG-9: detect drift between manifest-declared schema and live worker.
             self._check_config_schema_drift(proxy, plugin_meta, config_schema)
             
-            # CR-2: effective config = caller > persisted > manifest defaults.
+            # CR-2: effective config = caller > persisted (default-only) > manifest defaults.
             if not config and persisted is not None and persisted.config:
                 config = dict(persisted.config)
                 self.logger.info(
@@ -507,20 +604,43 @@ class PluginManager:
             if config:
                 proxy.initialize(config)
 
-            # CR-2: restore the persisted enabled state. Default (no record)
-            # is enabled=True per PluginMeta dataclass default.
-            if persisted is not None:
-                plugin_meta.enabled = persisted.enabled
+            # CR-10: per-instance enabled flag. Default instance restores from
+            # persistence; multi-instance starts enabled.
+            effective_enabled = True
+            if is_default and persisted is not None:
+                effective_enabled = persisted.enabled
+                plugin_meta.enabled = effective_enabled
             
-            plugin_meta.instance = proxy
-            self.plugins[plugin_meta.name] = plugin_meta
+            # CR-10: always record the per-instance state
+            self.instances[resolved_id] = PluginInstance(
+                instance_id=resolved_id,
+                plugin_name=plugin_meta.name,
+                config=dict(config or {}),
+                proxy=proxy,
+                enabled=effective_enabled,
+            )
+            
+            # Default-instance only: maintain backward-compat single-instance
+            # references (PluginMeta.instance, self.plugins[plugin_name]).
+            if is_default:
+                plugin_meta.instance = proxy
+                self.plugins[plugin_meta.name] = plugin_meta
+            elif plugin_meta.name not in self.plugins:
+                # First-ever instance for this plugin is multi-instance — record
+                # the PluginMeta so list_plugins / get_plugin_meta still work,
+                # but leave meta.instance=None (no canonical instance exists).
+                self.plugins[plugin_meta.name] = plugin_meta
+            
             self.logger.info(
-                f"Loaded plugin: {plugin_meta.name} (enabled={plugin_meta.enabled})"
+                f"Loaded plugin: {plugin_meta.name} "
+                f"(instance_id={resolved_id}, enabled={effective_enabled})"
             )
             return True
 
         except Exception as e:
-            self.logger.error(f"Failed to load plugin {plugin_meta.name}: {e}")
+            self.logger.error(
+                f"Failed to load plugin {plugin_meta.name} (instance_id={resolved_id}): {e}"
+            )
             return False
 
     def load_all(
@@ -540,43 +660,79 @@ class PluginManager:
 
     def unload_plugin(
         self,
-        plugin_name:str # Name of the plugin to unload
+        name_or_id:str # Plugin name (default-loaded) or instance_id (multi-instance)
     ) -> bool: # True if successfully unloaded
-        """Unload a plugin and terminate its Worker process."""
-        if plugin_name not in self.plugins:
-            self.logger.error(f"Plugin {plugin_name} not found")
+        """Unload a plugin instance and terminate its Worker process (CR-10).
+        
+        If name_or_id resolves to the default instance (instance_id == plugin_name)
+        and no other instances remain for the same plugin, also removes the
+        PluginMeta from self.plugins. Otherwise removes only the instance and
+        clears PluginMeta.instance if it pointed at the unloaded canonical.
+        """
+        inst = self.instances.get(name_or_id)
+        if inst is None:
+            self.logger.error(f"Plugin/instance {name_or_id!r} not found")
             return False
-
+        plugin_name = inst.plugin_name
+        instance_id = inst.instance_id
         try:
-            plugin_meta = self.plugins[plugin_name]
-            if plugin_meta.instance:
-                plugin_meta.instance.cleanup()
-
-            del self.plugins[plugin_name]
-            # CR-2: clear any deferred-hook bookkeeping for this plugin
-            # since the worker is gone.
+            if inst.proxy is not None:
+                inst.proxy.cleanup()
+            del self.instances[instance_id]
+            self._pending_disable_hooks.discard(instance_id)
+            self._running_executions.discard(instance_id)
+            # Backward-compat: also clear plugin_name keys for the canonical instance
             self._pending_disable_hooks.discard(plugin_name)
             self._running_executions.discard(plugin_name)
-            self.logger.info(f"Unloaded plugin: {plugin_name}")
+            
+            remaining = [i for i in self.instances.values() if i.plugin_name == plugin_name]
+            if not remaining:
+                # No instances of this plugin at all (whether the unloaded one
+                # was canonical or multi-instance) — drop the PluginMeta entry.
+                self.plugins.pop(plugin_name, None)
+            elif instance_id == plugin_name:
+                # Canonical instance unloaded but multi-instances remain — clear
+                # the now-stale canonical reference; PluginMeta stays so
+                # list_plugins / get_plugin_meta still surface the plugin.
+                meta = self.plugins.get(plugin_name)
+                if meta is not None:
+                    meta.instance = None
+            self.logger.info(f"Unloaded plugin: {plugin_name} (instance_id={instance_id})")
             return True
-
         except Exception as e:
-            self.logger.error(f"Error unloading plugin {plugin_name}: {e}")
+            self.logger.error(f"Error unloading {name_or_id!r}: {e}")
             return False
 
     def unload_all(self) -> None:
-        """Unload all plugins and terminate all Worker processes."""
+        """Unload all plugin instances and terminate all Worker processes (CR-10).
+        
+        Iterates self.instances (CR-10 keying) rather than self.plugins so all
+        multi-instance entries get torn down, not just the canonical instances.
+        """
+        for inst_id in list(self.instances.keys()):
+            self.unload_plugin(inst_id)
+        # Catch any legacy plugin entries that didn't have a corresponding instance
+        # (shouldn't happen post-CR-10 but defensive cleanup)
         for name in list(self.plugins.keys()):
             self.unload_plugin(name)
 
     def get_plugin(
         self,
-        plugin_name:str # Name of the plugin
+        name_or_id:str # Plugin name (default-loaded) or instance_id (multi-instance)
     ) -> Optional[PluginInterface]: # Plugin proxy instance or None
-        """Get a loaded plugin instance by name."""
-        if plugin_name in self.plugins:
-            return self.plugins[plugin_name].instance
-        return None
+        """Get a loaded plugin's proxy by name or instance_id (CR-10).
+        
+        Lookup order: self.instances first (covers both default plugin_name and
+        multi-instance IDs), falling back to PluginMeta.instance for any
+        legacy code path that populated self.plugins without self.instances
+        (defensive — shouldn't happen post-CR-10 since load_plugin always
+        records the instance).
+        """
+        inst = self.instances.get(name_or_id)
+        if inst is not None:
+            return inst.proxy
+        meta = self.plugins.get(name_or_id)
+        return meta.instance if meta else None
 
     def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
         """List all loaded plugins."""
@@ -608,137 +764,157 @@ class PluginManager:
 
     def execute_plugin(
         self,
-        plugin_name:str, # Name of the plugin
+        name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
         *args,
         **kwargs
     ) -> Any: # Plugin result
-        """Execute a plugin's main functionality (sync).
+        """Execute a plugin instance's main functionality (sync).
         
-        CR-2: raises PluginDisabledError (typed) instead of bare ValueError
-        when the plugin is disabled. Tracks the execution in
-        `_running_executions` so disable_plugin() can defer its on_disable
-        hook until after the job finishes.
+        CR-10: resolves `name_or_id` via self.instances; per-instance enabled
+        flag gates execution. `_running_executions` tracks by instance_id so
+        concurrent multi-instance executes don't collide.
+        
+        CR-2: raises PluginDisabledError (typed) when the instance is disabled.
         """
-        plugin = self.get_plugin(plugin_name)
-        if not plugin:
-            raise ValueError(f"Plugin {plugin_name} not found or not loaded")
-
-        if not self.plugins[plugin_name].enabled:
-            raise PluginDisabledError(plugin_name)
-
-        plugin_meta = self.plugins[plugin_name]
-        plugin_meta.last_executed = time.time()
+        inst = self.instances.get(name_or_id)
+        if inst is None:
+            raise ValueError(f"Plugin/instance {name_or_id!r} not found or not loaded")
+        if not inst.enabled:
+            raise PluginDisabledError(inst.instance_id)
+        
+        # Per-instance last_executed + canonical PluginMeta sync (scheduler
+        # eviction reads from PluginMeta, so keep it in sync for default
+        # instance at minimum).
+        inst.last_executed = time.time()
+        plugin_meta = self.plugins.get(inst.plugin_name)
+        if plugin_meta is not None:
+            plugin_meta.last_executed = inst.last_executed
         stats_provider = self._get_global_stats
-
-        if not self.scheduler.allocate(plugin_meta, stats_provider):
-            self.logger.warning(f"Resources busy for {plugin_name}. Triggering eviction protocol.")
+        
+        # Scheduler allocation uses PluginMeta (plugin-level resource constraints).
+        if plugin_meta is not None and not self.scheduler.allocate(plugin_meta, stats_provider):
+            self.logger.warning(f"Resources busy for {name_or_id}. Triggering eviction protocol.")
             if self._evict_for_resources(plugin_meta):
                 self.logger.info("Eviction successful. Resources acquired.")
             else:
-                raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name} (Eviction failed)")
+                raise RuntimeError(
+                    f"ResourceScheduler blocked execution of {name_or_id} (Eviction failed)"
+                )
 
-        # CR-2: track in-flight execution so disable_plugin() can defer hook.
-        self._running_executions.add(plugin_name)
-        self.scheduler.on_execution_start(plugin_name)
+        # CR-10: track per-instance to allow concurrent multi-instance executes.
+        self._running_executions.add(inst.instance_id)
+        self.scheduler.on_execution_start(inst.instance_id)
         try:
-            return plugin.execute(*args, **kwargs)
+            return inst.proxy.execute(*args, **kwargs)
         finally:
-            self.scheduler.on_execution_finish(plugin_name)
-            self._running_executions.discard(plugin_name)
+            self.scheduler.on_execution_finish(inst.instance_id)
+            self._running_executions.discard(inst.instance_id)
             # If disable_plugin() deferred on_disable while this job ran, fire now.
-            self._maybe_fire_disable_hook(plugin_name)
+            self._maybe_fire_disable_hook(inst.instance_id)
 
     async def execute_plugin_async(
         self,
-        plugin_name:str, # Name of the plugin
+        name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
         *args,
         **kwargs
     ) -> Any: # Plugin result
-        """Execute a plugin's main functionality (async).
+        """Execute a plugin instance's main functionality (async).
         
-        CR-2: same disabled-error + deferred-hook semantics as execute_plugin.
+        CR-10 + CR-2: same semantics as execute_plugin, async-flavored. Scheduler
+        allocation goes through allocate_async for non-blocking polling.
         """
-        plugin = self.get_plugin(plugin_name)
-        if not plugin:
-            raise ValueError(f"Plugin {plugin_name} not found or not loaded")
-
-        if not self.plugins[plugin_name].enabled:
-            raise PluginDisabledError(plugin_name)
-
-        plugin_meta = self.plugins[plugin_name]
-        plugin_meta.last_executed = time.time()
-        stats_provider = self._get_global_stats
-
-        if not await self.scheduler.allocate_async(self.plugins[plugin_name], self._get_global_stats_async):
-            self.logger.warning(f"Resources busy for {plugin_name}. Triggering eviction protocol.")
+        inst = self.instances.get(name_or_id)
+        if inst is None:
+            raise ValueError(f"Plugin/instance {name_or_id!r} not found or not loaded")
+        if not inst.enabled:
+            raise PluginDisabledError(inst.instance_id)
+        
+        inst.last_executed = time.time()
+        plugin_meta = self.plugins.get(inst.plugin_name)
+        if plugin_meta is not None:
+            plugin_meta.last_executed = inst.last_executed
+        
+        if plugin_meta is not None and not await self.scheduler.allocate_async(plugin_meta, self._get_global_stats_async):
+            self.logger.warning(f"Resources busy for {name_or_id}. Triggering eviction protocol.")
             if self._evict_for_resources(plugin_meta):
                 self.logger.info("Eviction successful. Resources acquired.")
             else:
-                raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name} (Eviction failed)")
+                raise RuntimeError(
+                    f"ResourceScheduler blocked execution of {name_or_id} (Eviction failed)"
+                )
 
-        # CR-2: track in-flight execution so disable_plugin() can defer hook.
-        self._running_executions.add(plugin_name)
-        self.scheduler.on_execution_start(plugin_name)
+        self._running_executions.add(inst.instance_id)
+        self.scheduler.on_execution_start(inst.instance_id)
         try:
-            return await plugin.execute_async(*args, **kwargs)
+            return await inst.proxy.execute_async(*args, **kwargs)
         finally:
-            self.scheduler.on_execution_finish(plugin_name)
-            self._running_executions.discard(plugin_name)
-            self._maybe_fire_disable_hook(plugin_name)
+            self.scheduler.on_execution_finish(inst.instance_id)
+            self._running_executions.discard(inst.instance_id)
+            self._maybe_fire_disable_hook(inst.instance_id)
 
     def enable_plugin(
         self,
-        plugin_name:str # Name of the plugin
-    ) -> bool: # True if plugin was enabled
-        """Enable a plugin.
+        name_or_id:str # Plugin name (default instance) or instance_id (multi-instance)
+    ) -> bool: # True if instance was enabled
+        """Enable a plugin instance (CR-10 multi-instance aware).
         
-        CR-2: persists the new state via `config_store` and (when state
-        actually changes from disabled→enabled) fires the plugin's on_enable
-        hook. Idempotent for already-enabled plugins (no hook re-fire).
+        CR-2: persists the new state via `config_store` (default-instance only;
+        persistence is per-plugin, not per-instance) and fires the plugin's
+        on_enable hook on state-change. Idempotent for already-enabled instances.
         """
-        if plugin_name not in self.plugins:
+        inst = self.instances.get(name_or_id)
+        if inst is None:
             return False
-        meta = self.plugins[plugin_name]
-        was_disabled = not meta.enabled
-        meta.enabled = True
-        self._persist_config(plugin_name)
-        if was_disabled and meta.instance is not None:
+        was_disabled = not inst.enabled
+        inst.enabled = True
+        # Default instance: also sync the PluginMeta.enabled flag (backward compat)
+        # and persist via config_store (per-plugin persistence).
+        if inst.instance_id == inst.plugin_name:
+            meta = self.plugins.get(inst.plugin_name)
+            if meta is not None:
+                meta.enabled = True
+            self._persist_config(inst.plugin_name)
+        if was_disabled and inst.proxy is not None:
             try:
-                meta.instance.on_enable()
+                inst.proxy.on_enable()
             except Exception as e:
-                self.logger.warning(f"on_enable() raised for {plugin_name}: {e}")
+                self.logger.warning(f"on_enable() raised for {name_or_id}: {e}")
         return True
 
     def disable_plugin(
         self,
-        plugin_name:str # Name of the plugin
-    ) -> bool: # True if plugin was disabled
-        """Disable a plugin without unloading it.
+        name_or_id:str # Plugin name (default instance) or instance_id (multi-instance)
+    ) -> bool: # True if instance was disabled
+        """Disable a plugin instance without unloading it (CR-10 multi-instance aware).
         
-        CR-2: persists the new state via `config_store` and fires the plugin's
-        on_disable hook — but defers the hook until any in-flight job for this
-        plugin finishes (per audit semantics: the hook means "release heavy
-        resources" which is only safe once the running job releases its grip).
-        Idempotent for already-disabled plugins.
+        CR-2: persists the new state (default-instance only) and fires the
+        plugin's on_disable hook — but defers the hook until any in-flight job
+        for THIS instance finishes (the per-instance `_running_executions` key
+        is the instance_id, so a concurrent execute on a different instance of
+        the same plugin doesn't gate this instance's hook).
         """
-        if plugin_name not in self.plugins:
+        inst = self.instances.get(name_or_id)
+        if inst is None:
             return False
-        meta = self.plugins[plugin_name]
-        was_enabled = meta.enabled
-        meta.enabled = False
-        self._persist_config(plugin_name)
-        if was_enabled and meta.instance is not None:
-            if plugin_name in self._running_executions:
-                # Defer the hook until the in-flight job finishes.
-                self._pending_disable_hooks.add(plugin_name)
+        was_enabled = inst.enabled
+        inst.enabled = False
+        # Default instance: sync PluginMeta.enabled + persist
+        if inst.instance_id == inst.plugin_name:
+            meta = self.plugins.get(inst.plugin_name)
+            if meta is not None:
+                meta.enabled = False
+            self._persist_config(inst.plugin_name)
+        if was_enabled and inst.proxy is not None:
+            if inst.instance_id in self._running_executions:
+                self._pending_disable_hooks.add(inst.instance_id)
                 self.logger.debug(
-                    f"Deferring on_disable() for {plugin_name} until in-flight job finishes"
+                    f"Deferring on_disable() for {inst.instance_id} until in-flight job finishes"
                 )
             else:
                 try:
-                    meta.instance.on_disable()
+                    inst.proxy.on_disable()
                 except Exception as e:
-                    self.logger.warning(f"on_disable() raised for {plugin_name}: {e}")
+                    self.logger.warning(f"on_disable() raised for {name_or_id}: {e}")
         return True
 
     def get_plugin_logs(
@@ -793,77 +969,88 @@ def get_all_plugin_configs(self) -> Dict[str, Dict[str, Any]]: # Plugin name -> 
 
 def update_plugin_config(
     self,
-    plugin_name: str, # Name of the plugin
+    name_or_id: str, # Plugin name (default instance) or instance_id (multi-instance)
     config: Dict[str, Any], # New configuration values
     strict: bool = True # SG-5: reject unknown keys against manifest config_schema (default)
 ) -> bool: # True if successful
-    """Update a plugin's configuration (hot-reload without restart).
+    """Update a plugin instance's configuration (CR-10 multi-instance aware).
     
-    CR-2: on successful reconfigure, persists the new config (paired with the
-    current `meta.enabled` flag) via `self.config_store` so the config
-    survives substrate restarts.
+    CR-2: on successful reconfigure, persists the new config (default instance
+    only; multi-instance loads don't persist). Per-instance `inst.config` is
+    updated regardless.
+    SG-5: validates against the underlying plugin's config_schema (per-plugin,
+    not per-instance, so all instances share the same schema).
     """
-    plugin = self.get_plugin(plugin_name)
-    if not plugin:
-        self.logger.error(f"Plugin {plugin_name} not found")
+    inst = self.instances.get(name_or_id)
+    if inst is None:
+        self.logger.error(f"Plugin/instance {name_or_id!r} not found")
         return False
 
     try:
-        # SG-5: validate caller-provided config against manifest schema
-        # before forwarding to the worker. PluginConfigError propagates so
-        # callers can distinguish substrate-side validation failures from
-        # worker-side runtime errors.
-        meta = self.plugins[plugin_name]
-        config_schema = meta.manifest.get("config_schema") if hasattr(meta, "manifest") else None
+        meta = self.plugins.get(inst.plugin_name)
+        config_schema = (meta.manifest.get("config_schema") 
+                        if (meta is not None and hasattr(meta, "manifest")) else None)
         validated_config = self._validate_config_against_schema(
-            config, config_schema, plugin_name, strict=strict,
+            config, config_schema, inst.plugin_name, strict=strict,
         )
-        plugin.initialize(validated_config)
-        self.logger.info(f"Updated configuration for plugin: {plugin_name}")
-        # CR-2: persist after worker confirms reconfigure succeeded.
-        self._persist_config(plugin_name)
+        inst.proxy.initialize(validated_config)
+        inst.config = dict(validated_config)
+        self.logger.info(f"Updated configuration for instance: {inst.instance_id}")
+        # CR-2 + CR-10: persist only for the default instance (persistence is
+        # per-plugin, not per-instance).
+        if inst.instance_id == inst.plugin_name:
+            self._persist_config(inst.plugin_name)
         return True
     except PluginConfigError:
-        # Let typed validation errors propagate to callers; substrate-side
-        # rejection is a programmer/operator signal, not a "soft" failure.
         raise
     except Exception as e:
-        self.logger.error(f"Error updating plugin {plugin_name} config: {e}")
+        self.logger.error(f"Error updating {name_or_id!r} config: {e}")
         return False
 
 def reload_plugin(
     self,
-    plugin_name: str, # Name of the plugin
+    name_or_id: str, # Plugin name (default instance) or instance_id (multi-instance)
     config: Optional[Dict[str, Any]] = None # Optional new configuration
 ) -> bool: # True if successful
-    """Reload a plugin by terminating and restarting its Worker."""
-    if plugin_name not in self.plugins:
-        self.logger.error(f"Plugin {plugin_name} not found")
+    """Reload a plugin instance by terminating and restarting its Worker (CR-10)."""
+    inst = self.instances.get(name_or_id)
+    if inst is None:
+        self.logger.error(f"Plugin/instance {name_or_id!r} not found")
         return False
-
+    
+    plugin_meta = self.plugins.get(inst.plugin_name)
+    if plugin_meta is None:
+        self.logger.error(f"PluginMeta for {inst.plugin_name!r} missing — cannot reload")
+        return False
+    
     try:
-        plugin_meta = self.plugins[plugin_name]
+        # Capture current config if caller didn't supply one
+        effective_config = config
+        if effective_config is None and inst.proxy is not None:
+            effective_config = inst.proxy.get_current_config()
         
-        # Get current config if not provided
-        if config is None and plugin_meta.instance:
-            config = plugin_meta.instance.get_current_config()
+        # Capture instance_id BEFORE unload (unload_plugin removes the entry)
+        target_instance_id = inst.instance_id
         
-        # Unload and reload
-        self.unload_plugin(plugin_name)
-        return self.load_plugin(plugin_meta, config)
-
+        self.unload_plugin(target_instance_id)
+        # Re-load using the same instance_id to preserve the addressing for callers
+        return self.load_plugin(
+            plugin_meta,
+            effective_config,
+            instance_id=target_instance_id,
+        )
     except Exception as e:
-        self.logger.error(f"Error reloading plugin {plugin_name}: {e}")
+        self.logger.error(f"Error reloading {name_or_id!r}: {e}")
         return False
 
 def get_plugin_stats(
     self,
-    plugin_name: str # Name of the plugin
+    name_or_id: str # Plugin name (default instance) or instance_id (multi-instance)
 ) -> Optional[Dict[str, Any]]: # Resource telemetry or None
-    """Get resource usage stats for a plugin's Worker process."""
-    plugin = self.get_plugin(plugin_name)
-    if plugin and hasattr(plugin, 'get_stats'):
-        return plugin.get_stats()
+    """Get resource usage stats for a plugin instance's Worker process (CR-10)."""
+    inst = self.instances.get(name_or_id)
+    if inst is not None and inst.proxy is not None and hasattr(inst.proxy, 'get_stats'):
+        return inst.proxy.get_stats()
     return None
 
 # Add methods to PluginManager
@@ -879,28 +1066,32 @@ from typing import AsyncGenerator
 
 async def execute_plugin_stream(
     self,
-    plugin_name: str,  # Name of the plugin
+    name_or_id: str,  # Plugin name (default instance) or instance_id (multi-instance)
     *args,
     **kwargs
 ) -> AsyncGenerator[Any, None]:  # Async generator yielding results
-    """Execute a plugin with streaming response."""
-    plugin = self.get_plugin(plugin_name)
-    if not plugin:
-        raise ValueError(f"Plugin {plugin_name} not found or not loaded")
+    """Execute a plugin instance with streaming response (CR-10 multi-instance aware).
+    
+    Same per-instance resolution as execute_plugin_async; scheduler allocation
+    keys off the PluginMeta (plugin-level), execution + bookkeeping key off
+    the PluginInstance (per-instance).
+    """
+    inst = self.instances.get(name_or_id)
+    if inst is None:
+        raise ValueError(f"Plugin/instance {name_or_id!r} not found or not loaded")
+    if not inst.enabled:
+        raise ValueError(f"Plugin/instance {name_or_id!r} is disabled")
+    
+    plugin_meta = self.plugins.get(inst.plugin_name)
+    if plugin_meta is not None and not await self.scheduler.allocate_async(plugin_meta, self._get_global_stats_async):
+        raise RuntimeError(f"ResourceScheduler blocked execution of {name_or_id}")
 
-    if not self.plugins[plugin_name].enabled:
-        raise ValueError(f"Plugin {plugin_name} is disabled")
-
-    # Async scheduling check (pass async method for non-blocking polling)
-    if not await self.scheduler.allocate_async(self.plugins[plugin_name], self._get_global_stats_async):
-        raise RuntimeError(f"ResourceScheduler blocked execution of {plugin_name}")
-
-    self.scheduler.on_execution_start(plugin_name)
+    self.scheduler.on_execution_start(inst.instance_id)
     try:
-        async for chunk in plugin.execute_stream(*args, **kwargs):
+        async for chunk in inst.proxy.execute_stream(*args, **kwargs):
             yield chunk
     finally:
-        self.scheduler.on_execution_finish(plugin_name)
+        self.scheduler.on_execution_finish(inst.instance_id)
 
 # Add to PluginManager
 PluginManager.execute_plugin_stream = execute_plugin_stream
