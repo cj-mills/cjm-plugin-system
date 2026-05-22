@@ -22,6 +22,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from .errors import PluginCancelledError
 from .platform import terminate_self
 
 import logging
@@ -126,6 +127,45 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    @app.post("/prefetch")
+    def prefetch() -> Dict[str, str]:
+        """CR-4: invoke the plugin's prefetch() hook for eager resource acquisition.
+        
+        Default PluginInterface.prefetch() is a no-op (SG-19 hook with opt-in
+        semantics). Plugins override when downstream callers benefit from
+        eager model-download / cache-warming. Errors surface as 500 with the
+        exception detail; idempotent calls are the plugin's responsibility.
+        """
+        if not hasattr(plugin_instance, "prefetch"):
+            return {"status": "not_supported"}
+        try:
+            plugin_instance.prefetch()
+            return {"status": "prefetched"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/reconfigure")
+    async def reconfigure(request: Request) -> Dict[str, str]:
+        """CR-4: invoke the plugin's reconfigure(old_config, new_config) hook.
+        
+        Request body: `{"old_config": {...}, "new_config": {...}}`. Default
+        PluginInterface.reconfigure() delegates to reconfigure_with_triggers
+        which walks RELOAD_TRIGGER metadata on the plugin's config_class.
+        Plugins predating CR-4 (no config_class) land in the silent-no-op
+        branch — substrate falls back to /initialize when reconfigure is a
+        no-op.
+        """
+        if not hasattr(plugin_instance, "reconfigure"):
+            return {"status": "not_supported"}
+        try:
+            data = await request.json()
+            old_config = data.get("old_config")
+            new_config = data.get("new_config")
+            plugin_instance.reconfigure(old_config, new_config)
+            return {"status": "reconfigured"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/config_schema")
     def get_config_schema() -> Dict[str, Any]:
         """Return JSON Schema for plugin configuration."""
@@ -148,10 +188,26 @@ def create_app(
         
         Runs in a thread pool so the event loop stays free to serve
         concurrent requests (e.g., /progress polling during long operations).
+        
+        CR-4: resets the plugin's `_cancel_requested` flag before invoking
+        execute() so cancellation doesn't leak from a previous job. After
+        execute() returns or raises, leaves the flag in its post-call state
+        (cancel() may have been called during cleanup; substrate decides what
+        to do with that on next /cancel signal).
+        
+        CR-4: PluginCancelledError → HTTP 409 (operator-requested cancellation;
+        distinct from 500's "real failure" so the proxy can surface a typed
+        "cancelled" state to callers and JobQueue can render the job state
+        accordingly per CR-6).
         """
         data = await request.json()
         args = data.get("args", [])
         kwargs = data.get("kwargs", {})
+        
+        # CR-4: reset cancellation flag before invoking execute() so stale
+        # state from a previous job doesn't immediately raise.
+        if hasattr(plugin_instance, "_cancel_requested"):
+            plugin_instance._cancel_requested = False
         
         try:
             loop = asyncio.get_event_loop()
@@ -161,6 +217,12 @@ def create_app(
             # Serialize result (handles dataclasses)
             json_str = json.dumps(result, cls=EnhancedJSONEncoder)
             return json.loads(json_str)
+        except PluginCancelledError as e:
+            # CR-4: cooperative cancellation surfaces as 409 Conflict so the
+            # proxy can distinguish "operator cancelled" from "real plugin
+            # failure" (500). The detail body carries the plugin name for
+            # debugging context.
+            raise HTTPException(status_code=409, detail=str(e))
         except Exception as e:
             import traceback
             traceback.print_exc()

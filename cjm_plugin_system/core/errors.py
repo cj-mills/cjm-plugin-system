@@ -4,8 +4,9 @@
 
 # %% auto #0
 __all__ = ['PluginError', 'PluginInputError', 'PluginTransientError', 'PluginResourceError', 'PluginFatalError',
-           'PluginDisabledError', 'PluginNotLoadedError', 'PluginTimeoutError', 'PluginConfigError',
-           'ResourceShortfall', 'TracebackPolicy', 'JobError', 'classify_exception', 'map_bare_exception_to_job_error']
+           'PluginDisabledError', 'PluginNotLoadedError', 'PluginTimeoutError', 'PluginCancelledError',
+           'PluginConfigError', 'ResourceShortfall', 'TracebackPolicy', 'JobError', 'classify_exception',
+           'map_bare_exception_to_job_error']
 
 # %% ../../nbs/core/errors.ipynb #exports
 import warnings
@@ -119,7 +120,7 @@ class PluginNotLoadedError(PluginFatalError):
     """Caller submitted to a plugin that was never loaded.
     
     Fatal category because this is a programmer / orchestration bug, not a
-    user-fixable condition. NOT a ValueError \u2014 the right reader intent is
+    user-fixable condition. NOT a ValueError — the right reader intent is
     `except PluginNotLoadedError:` (or the broader `except PluginError:`), not
     a blanket `except ValueError:`.
     """
@@ -132,7 +133,7 @@ class PluginNotLoadedError(PluginFatalError):
 class PluginTimeoutError(PluginTransientError):
     """A per-job timeout fired before the plugin finished.
     
-    Transient category \u2014 retry may succeed if the slow operation completes faster
+    Transient category — retry may succeed if the slow operation completes faster
     next time. Carries `retry_after_seconds` from `PluginTransientError`.
     Raised by SG-14's per-job timeout primitive when that lands.
     """
@@ -150,6 +151,29 @@ class PluginTimeoutError(PluginTransientError):
         )
         self.plugin_name = plugin_name
         self.timeout_seconds = timeout_seconds
+
+
+class PluginCancelledError(PluginTransientError):
+    """Cooperative cancellation signal raised from `PluginInterface.check_cancel()`.
+    
+    Anchors under `PluginTransientError` because cancellation is in-principle
+    re-runnable — a future attempt with the same inputs won't auto-fail if the
+    cancel flag isn't set. But `default_retriable` is False: cancellation was
+    a deliberate operator action, so the substrate should NOT auto-retry.
+    Job-monitor / JobQueue render cancelled jobs with their own state
+    (separate from "failed"); the JobError category remains `transient` so
+    consumers reading the typed taxonomy can group recoverable signals.
+    
+    Plugin authors raise this implicitly via `self.check_cancel()` inside
+    `execute()`; substrate sets the underlying `_cancel_requested` flag via
+    `cancel()`. See CR-4's cancellation primitives for the cooperative-cancel
+    protocol.
+    """
+    default_retriable: ClassVar[bool] = False
+    
+    def __init__(self, plugin_name: str):
+        super().__init__(f"Plugin {plugin_name!r} cancelled by operator")
+        self.plugin_name = plugin_name
 
 # %% ../../nbs/core/errors.ipynb #config-error
 class PluginConfigError(PluginInputError):

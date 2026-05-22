@@ -5,7 +5,8 @@
 # %% auto #0
 __all__ = ['RemotePluginProxy', 'execute_async', 'execute_stream_sync', 'execute_stream', 'get_stats', 'is_alive', 'cancel',
            'cancel_async', 'get_progress', 'get_progress_async', 'on_disable', 'on_enable', 'get_system_status',
-           'get_system_status_async', 'list_processes', 'list_processes_async']
+           'get_system_status_async', 'list_processes', 'list_processes_async', 'prefetch', 'prefetch_async',
+           'reconfigure', 'reconfigure_async']
 
 # %% ../../nbs/core/proxy.ipynb #exports
 import json
@@ -20,6 +21,7 @@ from typing import Any, AsyncGenerator, Dict, Generator, List, Optional, Tuple
 import httpx
 
 from .config import get_config
+from .errors import PluginCancelledError
 from .interface import FileBackedDTO, PluginInterface
 from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
 
@@ -178,12 +180,24 @@ class RemotePluginProxy(PluginInterface):
         *args,
         **kwargs
     ) -> Any: # Plugin result
-        """Execute the plugin synchronously."""
+        """Execute the plugin synchronously.
+        
+        CR-4: HTTP 409 from the worker is mapped to a typed
+        `PluginCancelledError` raised in the host process, so substrate /
+        JobQueue / consumer callers can distinguish cooperative cancellation
+        from a real plugin failure (500 → RuntimeError as before).
+        """
         payload = self._prepare_payload(args, kwargs)
         # timeout=None for long-running AI tasks
         with httpx.Client(timeout=None) as client:
             resp = client.post(f"{self.base_url}/execute", json=payload)
         
+        if resp.status_code == 409:
+            # CR-4: cooperative cancellation surfaced by worker. Re-raise the
+            # typed exception so substrate's category-aware retry logic
+            # (default_retriable=False) and the JobQueue's cancellation
+            # rendering can both see it.
+            raise PluginCancelledError(self.name)
         if resp.status_code != 200:
             raise RuntimeError(f"Execute failed: {resp.text}")
         return resp.json()
@@ -250,11 +264,18 @@ async def execute_async(
     *args,
     **kwargs
 ) -> Any: # Plugin result
-    """Execute the plugin asynchronously."""
+    """Execute the plugin asynchronously.
+    
+    CR-4: HTTP 409 from the worker is mapped to a typed `PluginCancelledError`.
+    Same 409/200/other semantics as the sync `execute()` variant.
+    """
     payload = self._prepare_payload(args, kwargs)
     async with httpx.AsyncClient(timeout=None) as client:
         resp = await client.post(f"{self.base_url}/execute", json=payload)
     
+    if resp.status_code == 409:
+        # CR-4: see sync variant
+        raise PluginCancelledError(self.name)
     if resp.status_code != 200:
         raise RuntimeError(f"Execute failed: {resp.text}")
     return resp.json()
@@ -507,6 +528,85 @@ RemotePluginProxy.get_system_status = get_system_status
 RemotePluginProxy.get_system_status_async = get_system_status_async
 RemotePluginProxy.list_processes = list_processes
 RemotePluginProxy.list_processes_async = list_processes_async
+
+# %% ../../nbs/core/proxy.ipynb #f5e578a2
+def prefetch(self) -> bool:  # True if worker accepted the prefetch hook
+    """CR-4: forward the substrate's prefetch signal to the worker process.
+    
+    Plugin can opt in via PluginInterface.prefetch() to eagerly download
+    models / warm caches without invoking execute(). Default implementation
+    is a no-op so silent-pass-through is normal. Errors raised by the
+    plugin (worker 500) propagate as RuntimeError so callers can distinguish
+    "plugin can't acquire" from "worker unreachable" (False).
+    """
+    try:
+        with httpx.Client(timeout=None) as client:
+            resp = client.post(f"{self.base_url}/prefetch")
+        if resp.status_code == 500:
+            raise RuntimeError(f"Plugin prefetch failed: {resp.text}")
+        return resp.status_code == 200
+    except httpx.ConnectError:
+        return False  # Worker may have died
+
+
+async def prefetch_async(self) -> bool:  # True if worker accepted the prefetch hook
+    """Async variant of `prefetch`. Same semantics."""
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            resp = await client.post(f"{self.base_url}/prefetch")
+        if resp.status_code == 500:
+            raise RuntimeError(f"Plugin prefetch failed: {resp.text}")
+        return resp.status_code == 200
+    except httpx.ConnectError:
+        return False
+
+
+def reconfigure(
+    self,
+    old_config: Optional[Dict[str, Any]],  # Previous config snapshot
+    new_config: Optional[Dict[str, Any]],  # Config being applied
+) -> bool:  # True if worker accepted the reconfigure call
+    """CR-4: forward a reconfigure(old, new) call to the worker process.
+    
+    The plugin's default reconfigure() body delegates to
+    reconfigure_with_triggers, which walks RELOAD_TRIGGER metadata on the
+    plugin's config_class to fire `_release_<trigger>` methods for fields
+    whose values changed. Plugins not opting into the declarative pattern
+    land in a silent no-op; the substrate's PluginManager.update_plugin_config
+    then falls back to initialize(new_config) for the actual state change.
+    """
+    payload = {"old_config": old_config, "new_config": new_config}
+    try:
+        with httpx.Client(timeout=None) as client:
+            resp = client.post(f"{self.base_url}/reconfigure", json=payload)
+        if resp.status_code == 500:
+            raise RuntimeError(f"Plugin reconfigure failed: {resp.text}")
+        return resp.status_code == 200
+    except httpx.ConnectError:
+        return False
+
+
+async def reconfigure_async(
+    self,
+    old_config: Optional[Dict[str, Any]],  # Previous config snapshot
+    new_config: Optional[Dict[str, Any]],  # Config being applied
+) -> bool:  # True if worker accepted the reconfigure call
+    """Async variant of `reconfigure`. Same semantics."""
+    payload = {"old_config": old_config, "new_config": new_config}
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            resp = await client.post(f"{self.base_url}/reconfigure", json=payload)
+        if resp.status_code == 500:
+            raise RuntimeError(f"Plugin reconfigure failed: {resp.text}")
+        return resp.status_code == 200
+    except httpx.ConnectError:
+        return False
+
+
+RemotePluginProxy.prefetch = prefetch
+RemotePluginProxy.prefetch_async = prefetch_async
+RemotePluginProxy.reconfigure = reconfigure
+RemotePluginProxy.reconfigure_async = reconfigure_async
 
 # %% ../../nbs/core/proxy.ipynb #context-manager
 def __enter__(self):
