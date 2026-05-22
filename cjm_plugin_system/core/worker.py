@@ -15,6 +15,7 @@ import os
 import sys
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, Generator
 
 import psutil
@@ -22,7 +23,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from .errors import PluginCancelledError
+from .errors import PluginCancelledError, map_bare_exception_to_job_error
 from .platform import terminate_self
 
 import logging
@@ -34,7 +35,11 @@ logging.basicConfig(
 
 # %% ../../nbs/core/worker.ipynb #encoder
 class EnhancedJSONEncoder(json.JSONEncoder):
-    """JSON encoder that handles dataclasses and other common types."""
+    """JSON encoder that handles dataclasses and other common types.
+    
+    SG-52: datetime support added so JobError.occurred_at serializes cleanly
+    when emitted via the typed `_job_error` terminal chunk in /execute_stream.
+    """
     
     def default(
         self,
@@ -43,6 +48,8 @@ class EnhancedJSONEncoder(json.JSONEncoder):
         """Convert non-serializable objects to serializable form."""
         if dataclasses.is_dataclass(o) and not isinstance(o, type):
             return dataclasses.asdict(o)
+        if isinstance(o, datetime):
+            return o.isoformat()
         return super().default(o)
 
 # %% ../../nbs/core/worker.ipynb #watchdog
@@ -230,12 +237,31 @@ def create_app(
 
     @app.post("/execute_stream")
     async def execute_stream(request: Request) -> StreamingResponse:
-        """Execute plugin with streaming response (NDJSON)."""
+        """Execute plugin with streaming response (NDJSON).
+        
+        SG-51: resets `_cancel_requested` at the start of iter_response (parity
+        with /execute) so a leftover cancel flag from a previous job doesn't
+        cause the first check_cancel() to raise on the new stream.
+        
+        SG-52: typed error chunks via `{"_job_error": <JobError dict>}` terminal
+        chunk replace the undocumented `{"error": str(e)}` shape. The wire-format
+        contract: ANY exception raised during streaming is converted via
+        `map_bare_exception_to_job_error` (CR-5 default classification) and
+        emitted as the final NDJSON line with the `_job_error` sentinel key.
+        Plugin output chunks never carry that key, so consumers (proxy +
+        downstream) can detect terminal errors with a single dict membership
+        check. The proxy's execute_stream then raises a typed exception
+        client-side, mirroring /execute's HTTP 409 → PluginCancelledError flow.
+        """
         data = await request.json()
         args = data.get("args", [])
         kwargs = data.get("kwargs", {})
 
         def iter_response() -> Generator[str, None, None]:
+            # SG-51: reset cancel flag so stale state from a previous job doesn't
+            # immediately raise inside the plugin's execute_stream iterator.
+            if hasattr(plugin_instance, "_cancel_requested"):
+                plugin_instance._cancel_requested = False
             try:
                 if hasattr(plugin_instance, 'execute_stream'):
                     iterator = plugin_instance.execute_stream(*args, **kwargs)
@@ -247,7 +273,14 @@ def create_app(
                     # Line-delimited JSON (NDJSON)
                     yield json.dumps(chunk, cls=EnhancedJSONEncoder) + "\n"
             except Exception as e:
-                yield json.dumps({"error": str(e)}) + "\n"
+                # SG-52: emit typed JobError as the terminal chunk. Proxy +
+                # downstream consumers detect the `_job_error` sentinel key
+                # and raise the corresponding typed exception client-side
+                # (PluginCancelledError, PluginTransientError, etc.).
+                job_error = map_bare_exception_to_job_error(
+                    e, plugin_name=getattr(plugin_instance, "name", "unknown"),
+                )
+                yield json.dumps({"_job_error": job_error}, cls=EnhancedJSONEncoder) + "\n"
 
         return StreamingResponse(iter_response(), media_type="application/x-ndjson")
 

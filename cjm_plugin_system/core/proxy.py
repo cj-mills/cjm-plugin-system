@@ -21,7 +21,14 @@ from typing import Any, AsyncGenerator, Dict, Generator, List, Optional, Tuple
 import httpx
 
 from .config import get_config
-from .errors import PluginCancelledError
+from cjm_plugin_system.core.errors import (
+    PluginCancelledError,
+    PluginFatalError,
+    PluginInputError,
+    PluginResourceError,
+    PluginTransientError,
+    ResourceShortfall,
+)
 from .interface import FileBackedDTO, PluginInterface
 from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
 
@@ -280,6 +287,49 @@ async def execute_async(
         raise RuntimeError(f"Execute failed: {resp.text}")
     return resp.json()
 
+
+def _raise_from_job_error_chunk(
+    job_error: Dict[str, Any],  # _job_error payload from /execute_stream terminal chunk
+    plugin_name: str,  # Caller's plugin name (for PluginCancelledError reconstruction)
+) -> None:
+    """SG-52: convert a `_job_error` JobError-shaped dict into the right typed exception.
+    
+    Mapping rules:
+    - `original_exc_repr` starts with `"PluginCancelledError"` → raise PluginCancelledError
+      (preserves the non-retriable semantic that category alone doesn't capture).
+    - category == "user_input" → PluginInputError (with fields_invalid).
+    - category == "transient" → PluginTransientError (with retry_after_seconds).
+    - category == "resource" → PluginResourceError (with reconstructed ResourceShortfall).
+    - category == "fatal" → PluginFatalError.
+    - Unknown category → RuntimeError carrying the chunk for forensic inspection.
+    
+    This is the streaming-side counterpart to /execute's 409 → PluginCancelledError
+    detection. Same intent: the typed exception survives the HTTP wire boundary
+    so substrate / JobQueue / consumer code can branch on category without
+    parsing string messages.
+    """
+    category = job_error.get("category", "fatal")
+    message = job_error.get("message", "Plugin error in stream")
+    repr_str = job_error.get("original_exc_repr", "") or ""
+    
+    # Cancellation special-case (transient category, non-retriable semantic)
+    if repr_str.startswith("PluginCancelledError"):
+        raise PluginCancelledError(plugin_name)
+    
+    if category == "user_input":
+        raise PluginInputError(message, fields_invalid=job_error.get("fields_invalid"))
+    if category == "transient":
+        raise PluginTransientError(message, retry_after_seconds=job_error.get("retry_after_seconds"))
+    if category == "resource":
+        shortfall_dict = job_error.get("resource_shortfall")
+        shortfall = ResourceShortfall(**shortfall_dict) if shortfall_dict else None
+        raise PluginResourceError(message, resource_shortfall=shortfall)
+    if category == "fatal":
+        raise PluginFatalError(message)
+    # Unknown category — surface as RuntimeError with the structured payload
+    raise RuntimeError(f"Plugin stream error (unknown category {category!r}): {job_error}")
+
+
 def execute_stream_sync(self, *args, **kwargs) -> Generator[Any, None, None]:
     """Synchronous wrapper for streaming (blocking)."""
     # This is tricky without "httpx.stream" in sync mode.
@@ -291,13 +341,25 @@ async def execute_stream(
     *args,
     **kwargs
 ) -> AsyncGenerator[Any, None]: # Yields parsed JSON chunks
-    """Execute with streaming response (async generator)."""
+    """Execute with streaming response (async generator).
+    
+    SG-52: detects the terminal `{"_job_error": <JobError dict>}` chunk and
+    raises the corresponding typed exception client-side instead of yielding
+    it to downstream consumers. Mirrors /execute's HTTP 409 → typed-exception
+    behavior at the streaming wire boundary. Normal plugin output chunks
+    pass through unchanged (they never carry the `_job_error` key).
+    """
     payload = self._prepare_payload(args, kwargs)
     async with httpx.AsyncClient(timeout=None) as client:
         async with client.stream("POST", f"{self.base_url}/execute_stream", json=payload) as resp:
             async for line in resp.aiter_lines():
-                if line:
-                    yield json.loads(line)
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                # SG-52: typed error sentinel → raise rather than yield
+                if isinstance(chunk, dict) and "_job_error" in chunk:
+                    _raise_from_job_error_chunk(chunk["_job_error"], self.name)
+                yield chunk
 
 RemotePluginProxy.execute_async = execute_async
 RemotePluginProxy.execute_stream_sync = execute_stream_sync
