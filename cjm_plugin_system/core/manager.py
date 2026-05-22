@@ -82,21 +82,78 @@ class PluginManager:
             self.logger.warning(f"System monitor plugin not found: {plugin_name}")
 
     def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
-        """Fetch real-time stats from the system monitor plugin (sync)."""
-        if self.system_monitor:
+        """Fetch real-time stats from the system monitor plugin (sync).
+        
+        CR-3: prefer typed `get_system_status()` over magic-string dispatcher.
+        Duck-types because the substrate references `system_monitor` as a
+        generic `PluginInterface` — CR-1's host-no-imports rule means substrate
+        does not import `cjm-infra-plugin-system` to type-narrow the reference.
+        Proxies after CR-3 expose `get_system_status` as a bound method that
+        POSTs to `/get_system_status` and returns `Optional[Dict[str, Any]]`.
+        """
+        if not self.system_monitor:
+            return {}
+        # CR-3: prefer typed call
+        get_status = getattr(self.system_monitor, "get_system_status", None)
+        if callable(get_status):
             try:
-                return self.system_monitor.execute("get_system_status")
+                result = get_status()
+                if isinstance(result, dict):
+                    return result
+                if hasattr(result, "to_dict"):  # In-process plugin returning SystemStats directly
+                    return result.to_dict()
+                if result is None:
+                    return {}  # Worker unreachable (proxy already logged ConnectError)
+                self.logger.warning(
+                    f"get_system_status returned unexpected type: {type(result).__name__}"
+                )
+                return {}
             except Exception as e:
-                self.logger.warning(f"Failed to fetch system stats: {e}")
+                self.logger.warning(f"Typed get_system_status failed: {e}")
+                return {}
+        # REMOVE-AFTER-OVERHAUL: pre-CR-3 dispatcher fallback. Only fires when
+        # the configured system_monitor lacks get_system_status attribute
+        # (e.g., an in-process non-MonitorPlugin object — configuration error).
+        # SG-47 cascade ensures all real monitors expose the typed surface;
+        # SG-48 sweep drops this branch entirely.
+        try:
+            return self.system_monitor.execute("get_system_status")
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch system stats (dispatcher fallback): {e}")
         return {}
 
     async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system telemetry
-        """Fetch real-time stats from the system monitor plugin (async)."""
-        if self.system_monitor:
+        """Fetch real-time stats from the system monitor plugin (async).
+        
+        Same CR-3 duck-type semantics as the sync variant. Async variant exists
+        because the substrate's `execute_plugin_async` path (CR-2 + CR-10) needs
+        a non-blocking stats fetch when scheduling under an asyncio event loop.
+        """
+        if not self.system_monitor:
+            return {}
+        # CR-3: prefer typed call
+        get_status_async = getattr(self.system_monitor, "get_system_status_async", None)
+        if callable(get_status_async):
             try:
-                return await self.system_monitor.execute_async("get_system_status")
+                result = await get_status_async()
+                if isinstance(result, dict):
+                    return result
+                if hasattr(result, "to_dict"):
+                    return result.to_dict()
+                if result is None:
+                    return {}  # Worker unreachable (proxy already logged ConnectError)
+                self.logger.warning(
+                    f"get_system_status_async returned unexpected type: {type(result).__name__}"
+                )
+                return {}
             except Exception as e:
-                self.logger.warning(f"Failed to fetch system stats: {e}")
+                self.logger.warning(f"Typed get_system_status_async failed: {e}")
+                return {}
+        # REMOVE-AFTER-OVERHAUL: pre-CR-3 dispatcher fallback (see sync variant)
+        try:
+            return await self.system_monitor.execute_async("get_system_status")
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch system stats (dispatcher fallback): {e}")
         return {}
 
     def _check_interface_fqn(

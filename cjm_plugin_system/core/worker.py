@@ -241,6 +241,62 @@ def create_app(
                 return {"status": "error", "detail": str(e)}
         return {"status": "not_supported"}
 
+    @app.post("/get_system_status")
+    def get_system_status_endpoint() -> Dict[str, Any]:
+        """CR-3: typed MonitorPlugin accessor. Returns SystemStats.to_dict().
+        
+        Status code taxonomy (intentional, per CR-3 review):
+        - 404: plugin is not a MonitorPlugin (configuration error — don't mask).
+              Substrate's `system_monitor` was wired to the wrong plugin.
+        - 501: plugin is a MonitorPlugin but raised NotImplementedError from its
+              get_system_status() default body (legacy monitor predating CR-3 that
+              opted out). Proxy falls back to /execute("get_system_status").
+        - 500: plugin's get_system_status() raised some other exception. Real
+              failure; do not silently fall back.
+        - 200: typed call succeeded; body is SystemStats.to_dict().
+        """
+        if not hasattr(plugin_instance, 'get_system_status'):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Plugin {getattr(plugin_instance, 'name', class_name)!r} "
+                    f"is not a MonitorPlugin (no get_system_status method)."
+                ),
+            )
+        try:
+            stats = plugin_instance.get_system_status()
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc) or "get_system_status not implemented")
+        # Serialize via EnhancedJSONEncoder so SystemStats dataclass flattens
+        # to its plain dict (and tolerates dict returns from non-typed monitors).
+        if hasattr(stats, 'to_dict'):
+            return stats.to_dict()
+        return json.loads(json.dumps(stats, cls=EnhancedJSONEncoder))
+
+    @app.post("/list_processes")
+    def list_processes_endpoint() -> Any:
+        """CR-3: typed MonitorPlugin accessor. Returns list of ProcessStats.to_dict().
+        
+        Same 404/501/500/200 taxonomy as /get_system_status. MonitorPlugin's
+        default list_processes() returns `[]`, so non-implementing monitors
+        return 200 with an empty list rather than 501.
+        """
+        if not hasattr(plugin_instance, 'list_processes'):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Plugin {getattr(plugin_instance, 'name', class_name)!r} "
+                    f"is not a MonitorPlugin (no list_processes method)."
+                ),
+            )
+        try:
+            procs = plugin_instance.list_processes()
+        except NotImplementedError as exc:
+            raise HTTPException(status_code=501, detail=str(exc) or "list_processes not implemented")
+        # Each ProcessStats has .to_dict(); EnhancedJSONEncoder handles either
+        # dataclass instances or pre-converted dicts uniformly.
+        return json.loads(json.dumps(procs, cls=EnhancedJSONEncoder))
+
     @app.post("/cleanup")
     def cleanup() -> Dict[str, str]:
         """Clean up plugin resources."""
