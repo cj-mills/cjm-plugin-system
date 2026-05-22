@@ -9,6 +9,7 @@ __all__ = ['RemotePluginProxy', 'execute_async', 'execute_stream_sync', 'execute
 
 # %% ../../nbs/core/proxy.ipynb #exports
 import json
+import logging
 import os
 import socket
 import subprocess
@@ -21,6 +22,12 @@ import httpx
 from .config import get_config
 from .interface import FileBackedDTO, PluginInterface
 from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
+
+# CR-3 follow-up: module-level logger so the proxy can log close-to-wire
+# misconfiguration signals (e.g. 404 on /get_system_status meaning the
+# substrate wired a non-MonitorPlugin as system_monitor) at ERROR level —
+# louder than the substrate's catch-all WARNING degradation path.
+_logger = logging.getLogger(__name__)
 
 # %% ../../nbs/core/proxy.ipynb #proxy-class
 class RemotePluginProxy(PluginInterface):
@@ -378,19 +385,19 @@ RemotePluginProxy.on_disable = on_disable
 RemotePluginProxy.on_enable = on_enable
 
 # %% ../../nbs/core/proxy.ipynb #7adc9ae9
-def get_system_status(self) -> Optional[Dict[str, Any]]:  # SystemStats dict, or None on transport failure
+def get_system_status(self) -> Optional[Dict[str, Any]]:  # SystemStats dict, or None on transport / config failure
     """CR-3: typed MonitorPlugin accessor. POSTs to worker's `/get_system_status`.
     
     Status code semantics (worker side raises HTTPException with these codes):
     - 200: SystemStats dict returned
-    - 404: plugin is not a MonitorPlugin — propagates as HTTPStatusError so the
-          substrate caller sees a configuration error rather than silently empty stats
+    - 404: plugin is not a MonitorPlugin — logged at ERROR (configuration error;
+          no amount of retry fixes it) and returns None. Loudly distinguished
+          from the substrate's WARN-level transient-failure degradation.
     - 501: legacy monitor predating CR-3; REMOVE-AFTER-OVERHAUL fallback to
           `/execute("get_system_status")` returns a dict in the pre-CR-3 wire format
     - 500: real plugin failure; propagates as HTTPStatusError
-    
-    Returns None on `httpx.ConnectError` (worker may have died) so the substrate's
-    `_get_global_stats` exception handler can degrade gracefully.
+    - ConnectError: worker may have died; returns None silently (substrate
+          degrades to empty stats)
     """
     try:
         with httpx.Client(timeout=5) as client:
@@ -402,13 +409,24 @@ def get_system_status(self) -> Optional[Dict[str, Any]]:  # SystemStats dict, or
             # SG-47 cascade migrates monitor plugins to typed methods; SG-48 sweep
             # then drops this branch (worker never returns 501 once cascade lands).
             return self.execute("get_system_status")
+        if resp.status_code == 404:
+            # CR-3 follow-up: loud misconfiguration log. The substrate's
+            # _get_global_stats catches the None return and degrades to {},
+            # so a single ERROR here (not WARN at the substrate layer) gives
+            # operators an actionable signal without double-logging.
+            _logger.error(
+                "Plugin %r registered as system_monitor lacks MonitorPlugin "
+                "interface (HTTP 404 from /get_system_status): %s",
+                self.name, resp.text,
+            )
+            return None
         resp.raise_for_status()
         return None
     except httpx.ConnectError:
         return None
 
 
-async def get_system_status_async(self) -> Optional[Dict[str, Any]]:  # SystemStats dict, or None on transport failure
+async def get_system_status_async(self) -> Optional[Dict[str, Any]]:  # SystemStats dict, or None on transport / config failure
     """Async variant of `get_system_status`. Same 200/404/501/500/ConnectError semantics."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
@@ -418,13 +436,21 @@ async def get_system_status_async(self) -> Optional[Dict[str, Any]]:  # SystemSt
         if resp.status_code == 501:
             # REMOVE-AFTER-OVERHAUL: see sync variant
             return await self.execute_async("get_system_status")
+        if resp.status_code == 404:
+            # CR-3 follow-up: loud misconfiguration log (see sync variant)
+            _logger.error(
+                "Plugin %r registered as system_monitor lacks MonitorPlugin "
+                "interface (HTTP 404 from /get_system_status): %s",
+                self.name, resp.text,
+            )
+            return None
         resp.raise_for_status()
         return None
     except httpx.ConnectError:
         return None
 
 
-def list_processes(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict list, or None on transport failure
+def list_processes(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict list, or None on transport / config failure
     """CR-3: typed MonitorPlugin accessor. POSTs to worker's `/list_processes`.
     
     Same 200/404/501/500/ConnectError semantics as `get_system_status`. Note that
@@ -439,13 +465,21 @@ def list_processes(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict
         if resp.status_code == 501:
             # REMOVE-AFTER-OVERHAUL: dispatcher fallback for pre-CR-3 monitors
             return self.execute("list_processes")
+        if resp.status_code == 404:
+            # CR-3 follow-up: loud misconfiguration log
+            _logger.error(
+                "Plugin %r registered as system_monitor lacks MonitorPlugin "
+                "interface (HTTP 404 from /list_processes): %s",
+                self.name, resp.text,
+            )
+            return None
         resp.raise_for_status()
         return None
     except httpx.ConnectError:
         return None
 
 
-async def list_processes_async(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict list, or None on transport failure
+async def list_processes_async(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict list, or None on transport / config failure
     """Async variant of `list_processes`. Same semantics."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
@@ -455,6 +489,14 @@ async def list_processes_async(self) -> Optional[List[Dict[str, Any]]]:  # Proce
         if resp.status_code == 501:
             # REMOVE-AFTER-OVERHAUL: see sync variant
             return await self.execute_async("list_processes")
+        if resp.status_code == 404:
+            # CR-3 follow-up: loud misconfiguration log
+            _logger.error(
+                "Plugin %r registered as system_monitor lacks MonitorPlugin "
+                "interface (HTTP 404 from /list_processes): %s",
+                self.name, resp.text,
+            )
+            return None
         resp.raise_for_status()
         return None
     except httpx.ConnectError:
