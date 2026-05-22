@@ -4,14 +4,15 @@
 
 # %% auto #0
 __all__ = ['PluginManager', 'get_plugin_config', 'get_plugin_config_schema', 'get_all_plugin_configs', 'update_plugin_config',
-           'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream', 'PluginBinding', 'bind', 'get_by_role',
+           'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream', 'load_plugin_async', 'unload_plugin_async',
+           'load_plugins_concurrent', 'unload_plugins_concurrent', 'PluginBinding', 'bind', 'get_by_role',
            'get_by_domain', 'get_canonical', 'get_compatible_for_current_platform']
 
 # %% ../../nbs/core/manager.ipynb #31a5a9f1
 import json
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Set, Type
+from typing import Any, Dict, List, Optional, Set, Type, Union
 
 from .config import get_config
 from cjm_plugin_system.core.config_store import (
@@ -19,7 +20,7 @@ from cjm_plugin_system.core.config_store import (
 )
 from .errors import PluginConfigError, PluginDisabledError
 from .interface import PluginInterface
-from .metadata import PluginInstance, PluginMeta, PluginTaxonomy, ResourceRequirements
+from .metadata import PluginInstance, PluginLoadSpec, PluginMeta, PluginTaxonomy, ResourceRequirements
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
 
@@ -1095,6 +1096,149 @@ async def execute_plugin_stream(
 
 # Add to PluginManager
 PluginManager.execute_plugin_stream = execute_plugin_stream
+
+# %% ../../nbs/core/manager.ipynb #127e0807
+import asyncio
+
+
+async def load_plugin_async(
+    self,
+    plugin_meta: PluginMeta,
+    config: Optional[Dict[str, Any]] = None,
+    strict: bool = True,
+    instance_id: Optional[str] = None,
+    new_instance: bool = False,
+) -> bool:
+    """Async variant of `load_plugin` (CR-10b).
+    
+    Runs the existing sync `load_plugin` via `asyncio.to_thread` so the
+    blocking proxy spawn + `_wait_for_ready` doesn't stall the event loop.
+    Backward compat: identical behavior to the sync method, just non-blocking.
+    """
+    return await asyncio.to_thread(
+        self.load_plugin, plugin_meta, config, strict, instance_id, new_instance,
+    )
+
+
+async def unload_plugin_async(
+    self,
+    name_or_id: str,
+) -> bool:
+    """Async variant of `unload_plugin` (CR-10b)."""
+    return await asyncio.to_thread(self.unload_plugin, name_or_id)
+
+
+def _spec_requested_key(spec: PluginLoadSpec, index: int) -> str:
+    """Derive the dict key the load_plugins_concurrent result uses for `spec`.
+    
+    Resolution: explicit `instance_id` > `meta.name` + `#new[{index}]` suffix
+    for ambiguous new_instance=True specs > `meta.name`. The suffix prevents
+    key collision when multiple specs request a new instance of the same plugin
+    without explicit instance_ids.
+    """
+    if spec.instance_id is not None:
+        return spec.instance_id
+    if spec.new_instance:
+        return f"{spec.meta.name}#new[{index}]"
+    return spec.meta.name
+
+
+async def load_plugins_concurrent(
+    self,
+    specs: List[PluginLoadSpec],  # Per-plugin load specifications
+    max_concurrency: Optional[int] = None,  # Cap simultaneous loads; None = unbounded
+    fail_fast: bool = False,  # Re-raise first exception (default: collect all results)
+) -> Dict[str, Union[str, Exception]]:  # requested_key → instance_id or Exception
+    """CR-10b: fan out plugin loads concurrently via asyncio.gather.
+    
+    Each spec is loaded via `load_plugin_async` (`asyncio.to_thread` under the
+    hood). The total wall-clock drops from sum-of-spawns to max-of-spawns when
+    `max_concurrency=None`. Capped concurrency uses an asyncio.Semaphore.
+    
+    Result keys come from `_spec_requested_key`: explicit `instance_id` if set,
+    `{plugin_name}#new[{index}]` for ambiguous new_instance specs, else
+    `plugin_name`. Successful entries map to the resolved instance_id (string);
+    failures map to the raised exception (caught regardless of fail_fast value
+    for non-fail-fast mode; re-raised in fail_fast=True).
+    """
+    sem = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    
+    async def _load_one(spec: PluginLoadSpec) -> str:
+        if sem:
+            async with sem:
+                ok = await self.load_plugin_async(
+                    spec.meta, spec.config, True, spec.instance_id, spec.new_instance,
+                )
+        else:
+            ok = await self.load_plugin_async(
+                spec.meta, spec.config, True, spec.instance_id, spec.new_instance,
+            )
+        if not ok:
+            raise RuntimeError(
+                f"load_plugin returned False for {spec.meta.name!r} "
+                f"(instance_id={spec.instance_id!r}, new_instance={spec.new_instance})"
+            )
+        # Resolve the actual instance_id from self.instances. For default/explicit
+        # IDs we know it ahead of time; for new_instance=True it was auto-generated.
+        if spec.instance_id is not None:
+            return spec.instance_id
+        if not spec.new_instance:
+            return spec.meta.name
+        # Auto-gen case: find the newest instance for this plugin_name. Since
+        # load_plugin_async ran exclusively under the semaphore (or fully
+        # concurrently if unbounded — but each spawn's generated ID is unique
+        # by construction), we identify "the one just loaded" by created_at.
+        candidates = [i for i in self.instances.values() if i.plugin_name == spec.meta.name]
+        if not candidates:
+            raise RuntimeError(f"Could not resolve auto-gen instance_id for {spec.meta.name!r}")
+        return max(candidates, key=lambda i: i.created_at).instance_id
+    
+    keys = [_spec_requested_key(spec, idx) for idx, spec in enumerate(specs)]
+    tasks = [_load_one(spec) for spec in specs]
+    
+    if fail_fast:
+        # gather without return_exceptions re-raises the first exception
+        results = await asyncio.gather(*tasks)
+    else:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    return dict(zip(keys, results))
+
+
+async def unload_plugins_concurrent(
+    self,
+    name_or_ids: List[str],  # Plugin names or instance_ids to unload
+    max_concurrency: Optional[int] = None,
+    fail_fast: bool = False,
+) -> Dict[str, Union[bool, Exception]]:  # name_or_id → True or Exception
+    """CR-10b: fan out plugin unloads concurrently via asyncio.gather.
+    
+    Same concurrency + fail_fast semantics as load_plugins_concurrent. Result
+    keys are the input `name_or_ids` (deduplication is the caller's
+    responsibility; duplicate inputs produce one dict entry per unique key).
+    """
+    sem = asyncio.Semaphore(max_concurrency) if max_concurrency else None
+    
+    async def _unload_one(name_or_id: str) -> bool:
+        if sem:
+            async with sem:
+                return await self.unload_plugin_async(name_or_id)
+        return await self.unload_plugin_async(name_or_id)
+    
+    tasks = [_unload_one(nid) for nid in name_or_ids]
+    
+    if fail_fast:
+        results = await asyncio.gather(*tasks)
+    else:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    return dict(zip(name_or_ids, results))
+
+
+PluginManager.load_plugin_async = load_plugin_async
+PluginManager.unload_plugin_async = unload_plugin_async
+PluginManager.load_plugins_concurrent = load_plugins_concurrent
+PluginManager.unload_plugins_concurrent = unload_plugins_concurrent
 
 # %% ../../nbs/core/manager.ipynb #c8ebac45
 from dataclasses import dataclass, field as _field
