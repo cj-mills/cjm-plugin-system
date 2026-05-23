@@ -13,7 +13,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated, Any, Optional, List
+from typing import Annotated, Any, Dict, Optional, List
 
 import typer
 import yaml
@@ -26,6 +26,12 @@ from cjm_plugin_system.core.platform import (
     run_shell_command, conda_env_exists, get_conda_command, build_conda_command,
     ensure_runtime_available, download_micromamba, get_micromamba_binary_path,
     get_current_platform
+)
+from .core.metadata import PluginTaxonomy, ResourceRequirements
+from cjm_plugin_system.core.manifest_format import (
+    ManifestV2, InstallSection, CodeSection, DriftTracking,
+    CURRENT_FORMAT_VERSION,
+    load_manifest, write_manifest, manifest_to_dict, compute_config_schema_hash,
 )
 
 app = typer.Typer(help="CJM Plugin System CLI", no_args_is_help=True)
@@ -193,7 +199,14 @@ def _generate_manifest(
     package_name: str,  # Package source string (git URL or package name)
     manifest_dir: Path  # Directory to write manifest JSON files
 ) -> Optional[Path]:  # Path to the manifest written, or None on failure
-    """Run introspection script inside the target env to generate manifest."""
+    """Run introspection script inside the target env and write a v2.0 manifest.
+    
+    Builds a `ManifestV2` from the introspection output + install-time markers,
+    computes `drift_tracking.config_schema_hash`, and writes via
+    `write_manifest` (nested layout, indent=2). Both `installed_at` and
+    `regenerated_at` are set to "now"; `regenerate_manifest` preserves the
+    original `installed_at` via post-write fix-up.
+    """
     print(f"[{env_name}] Generating manifest...")
     cfg = get_config()
     
@@ -350,35 +363,85 @@ print(json.dumps(meta, indent=2))
                 print(f"Raw Output:\n{result_str}")
                 return None
 
-            # CR-1 + Phase 5a + audit pre-investment: write install-time
-            # fields into the manifest after the introspection block lands.
-            # These complement the taxonomy + resources blocks the introspection
-            # script already emits:
-            #   - package_source: original install input (operator can re-derive)
-            #   - installer_version: substrate version that wrote this manifest
-            #   - installed_at: ISO-8601 UTC timestamp (timezone-aware)
             # SG-34: drop the dead `type` field from new manifests; CR-1's
             # taxonomy block supersedes it.
-            meta_json["package_source"] = package_name
-            meta_json["installer_version"] = f"cjm-ctl {_substrate_version}"
-            meta_json["installed_at"] = datetime.now(timezone.utc).isoformat()
             meta_json.pop("type", None)
 
             plugin_name = meta_json.get('name', 'unknown')
             out_file = manifest_dir / f"{plugin_name}.json"
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # CR-8: convert flat introspection output into a nested ManifestV2.
+            # The introspection script emits a flat dict with both code-section
+            # fields (name/version/description/module/class/interface/taxonomy/
+            # resources/config_schema) AND install-section fields the plugin
+            # owns (python_path/db_path/env_vars). Substrate adds the
+            # installer-side install fields (installed_at/installer_version/
+            # package_source/conda_env) here.
+
+            # Parse taxonomy + resources sub-dicts into typed objects (or None
+            # when the plugin predates those CRs). Substrate stores strings
+            # only — no host-side imports of interface libraries needed.
+            intro_tax = meta_json.get("taxonomy")
+            tax_obj: Optional[PluginTaxonomy] = None
+            if isinstance(intro_tax, dict):
+                tax_obj = PluginTaxonomy(
+                    domain=str(intro_tax.get("domain", "") or ""),
+                    role=str(intro_tax.get("role", "") or ""),
+                    interface_fqcn=str(intro_tax.get("interface_fqcn", "") or ""),
+                )
+
+            intro_res = meta_json.get("resources")
+            res_obj: Optional[ResourceRequirements] = None
+            if isinstance(intro_res, dict):
+                res_obj = ResourceRequirements(
+                    requires_gpu=bool(intro_res.get("requires_gpu", False)),
+                    platforms=list(intro_res.get("platforms", []) or []),
+                    accelerators=list(intro_res.get("accelerators", []) or []),
+                )
+
+            config_schema = meta_json.get("config_schema")
+
+            manifest = ManifestV2(
+                install=InstallSection(
+                    # Plugin-author-supplied install-section fields
+                    python_path=str(meta_json.get("python_path", "") or ""),
+                    db_path=str(meta_json.get("db_path", "") or ""),
+                    env_vars=dict(meta_json.get("env_vars", {}) or {}),
+                    # Substrate-supplied install-section fields. conda_env now
+                    # written here directly (no more install_all post-write).
+                    conda_env=env_name,
+                    installed_at=now_iso,
+                    installer_version=f"cjm-ctl {_substrate_version}",
+                    package_source=package_name,
+                ),
+                code=CodeSection(
+                    name=str(meta_json.get("name", "") or ""),
+                    version=str(meta_json.get("version", "") or ""),
+                    description=str(meta_json.get("description", "") or ""),
+                    module=str(meta_json.get("module", "") or ""),
+                    class_name=str(meta_json.get("class", "") or ""),
+                    interface=str(meta_json.get("interface", "") or ""),
+                    taxonomy=tax_obj,
+                    resources=res_obj,
+                    config_schema=config_schema,
+                    regenerated_at=now_iso,
+                ),
+                drift_tracking=DriftTracking(
+                    config_schema_hash=compute_config_schema_hash(config_schema),
+                ),
+                overrides={},
+            )
             
             # Log detected metadata
-            if 'taxonomy' in meta_json:
-                tax = meta_json['taxonomy']
-                print(f"[{env_name}] Taxonomy: {tax.get('domain')}/{tax.get('role')}")
-            if 'interface' in meta_json:
-                print(f"[{env_name}] Interface: {meta_json['interface']}")
-            if 'config_schema' in meta_json:
+            if tax_obj is not None:
+                print(f"[{env_name}] Taxonomy: {tax_obj.domain}/{tax_obj.role}")
+            if manifest.code.interface:
+                print(f"[{env_name}] Interface: {manifest.code.interface}")
+            if config_schema is not None:
                 print(f"[{env_name}] Config schema: captured")
             
-            with open(out_file, 'w') as f:
-                f.write(json.dumps(meta_json, indent=2))
-                
+            write_manifest(out_file, manifest)
             print(f"[{env_name}] Wrote manifest to {out_file}")
             # SG-3: return the path so callers can update the manifest by exact
             # file rather than scanning `manifest_dir` with a substring match.
@@ -413,9 +476,12 @@ def regenerate_manifest(
 ) -> None:
     """Re-run introspection for an installed plugin and rewrite its manifest.
     
-    Uses `_extract_env_from_python_path` (defined later in this module) as a
-    fallback when the manifest's explicit `conda_env` field is missing — the
-    forward reference resolves at command invocation, not at module load.
+    Reads the existing manifest via `load_manifest` (handles both v2.0 nested
+    + legacy v1.0 flat layouts), recovers `env_name` + `package_source` from
+    the install section, runs `_generate_manifest` to refresh the code section,
+    then post-writes to preserve the original `installed_at` so the regenerate
+    only updates `regenerated_at` semantically. Always emits v2.0 layout —
+    regenerating a v1.0 manifest transparently upgrades it.
     """
     cfg = get_config()
     manifest_path = cfg.manifests_dir / f"{plugin_name}.json"
@@ -424,15 +490,14 @@ def regenerate_manifest(
         raise typer.Exit(code=1)
     
     try:
-        with open(manifest_path) as f:
-            existing = json.load(f)
-    except json.JSONDecodeError as e:
+        existing = load_manifest(manifest_path)
+    except (json.JSONDecodeError, ValueError) as e:
         typer.echo(f"Cannot parse existing manifest {manifest_path}: {e}", err=True)
         raise typer.Exit(code=1)
     
     # Recover env_name: explicit field preferred, python_path fallback for legacy.
-    env_name = existing.get("conda_env") or _extract_env_from_python_path(
-        existing.get("python_path", "")
+    env_name = existing.install.conda_env or _extract_env_from_python_path(
+        existing.install.python_path
     )
     if not env_name:
         typer.echo(
@@ -443,13 +508,13 @@ def regenerate_manifest(
         )
         raise typer.Exit(code=1)
     
-    # Recover package_source: --package > manifest.package_source > plugins.yaml lookup.
+    # Recover package_source: --package > manifest.install.package_source > plugins.yaml lookup.
     package_source = package
     source_origin = "--package override"
     if package_source is None:
-        package_source = existing.get("package_source")
+        package_source = existing.install.package_source or None
         if package_source:
-            source_origin = "manifest.package_source"
+            source_origin = "manifest.install.package_source"
     if package_source is None and plugins_path and os.path.exists(plugins_path):
         with open(plugins_path) as f:
             yconfig = yaml.safe_load(f)
@@ -467,22 +532,28 @@ def regenerate_manifest(
         )
         raise typer.Exit(code=1)
     
+    # Snapshot the original installed_at so we can preserve it after _generate_manifest
+    # rewrites the file (which would otherwise set installed_at = regenerated_at = now).
+    original_installed_at = existing.install.installed_at
+    
     typer.echo(f"Regenerating {plugin_name} from {package_source} ({source_origin})...")
     out_path = _generate_manifest(env_name, package_source, cfg.manifests_dir)
     if out_path is None:
         typer.echo(f"Regeneration failed for {plugin_name}", err=True)
         raise typer.Exit(code=1)
     
-    # Re-add conda_env to the freshly-written manifest (matches the install_all
-    # post-write step that landed in SG-3).
-    try:
-        with open(out_path) as f:
-            new_manifest = json.load(f)
-        new_manifest["conda_env"] = env_name
-        with open(out_path, "w") as f:
-            json.dump(new_manifest, f, indent=2)
-    except (json.JSONDecodeError, IOError) as e:
-        typer.echo(f"Warning: failed to re-add conda_env to {out_path}: {e}")
+    # Post-write fix-up: restore installed_at from the pre-existing manifest.
+    # _generate_manifest sets both installed_at + regenerated_at to "now"; for
+    # regenerations the install timestamp should be the original install moment.
+    # If the original manifest had no installed_at (very old legacy), let
+    # _generate_manifest's "now" stand — better than empty.
+    if original_installed_at:
+        try:
+            refreshed = load_manifest(out_path)
+            refreshed.install.installed_at = original_installed_at
+            write_manifest(out_path, refreshed)
+        except (json.JSONDecodeError, ValueError, IOError) as e:
+            typer.echo(f"Warning: failed to restore installed_at on {out_path}: {e}")
     
     typer.echo(f"✓ Regenerated manifest at {out_path}")
 
@@ -602,25 +673,12 @@ def install_all(
             if 'package' in plugin:
                 run_cmd(f"{base_pip_cmd} {plugin['package']}")
 
-            # 4. Generate Manifest
+            # 4. Generate Manifest.
+            # CR-8: _generate_manifest now writes install.conda_env directly
+            # (it has env_name as a parameter), so the legacy post-write
+            # conda_env step is no longer needed.
             pkg_source = plugin['package']
-            manifest_path = _generate_manifest(env_name, pkg_source, manifest_dir)
-            
-            # 5. Add conda_env to the manifest we just wrote.
-            # SG-3: use the path returned by _generate_manifest directly
-            # instead of scanning the manifest dir with an `env_name in
-            # python_path` substring match (which corrupts manifests when env
-            # names share a prefix, e.g., "whisper" matching ".../whisper-vllm/...").
-            if manifest_path is not None:
-                try:
-                    with open(manifest_path) as f:
-                        manifest = json.load(f)
-                    manifest['conda_env'] = env_name
-                    with open(manifest_path, 'w') as f:
-                        json.dump(manifest, f, indent=2)
-                    print(f"[{env_name}] Added conda_env to manifest")
-                except (json.JSONDecodeError, IOError) as e:
-                    print(f"[{env_name}] Warning: failed to add conda_env to {manifest_path}: {e}")
+            _generate_manifest(env_name, pkg_source, manifest_dir)
 
         print("\n All operations complete.")
     
@@ -944,10 +1002,40 @@ def _get_conda_envs() -> set[str]: # Set of existing conda environment names
     return set()
 
 
+def _v2_to_legacy_flat_view(
+    raw: Dict[str, Any]  # Manifest JSON dict as read from disk
+) -> Dict[str, Any]:  # Flat-shaped dict (install + code merged at top level)
+    """REMOVE-AFTER-OVERHAUL: produce a legacy flat-shaped view of a manifest.
+    
+    Consumer code in `list_plugins` + `remove_plugin` still reads manifests as
+    flat dicts (`manifest.get('python_path')`, etc.). When the on-disk manifest
+    is v2.0 nested, we flatten install + code sections to the top level so
+    those consumers don't need migration in the same PR. The shim retires when
+    consumers migrate to `load_manifest` for typed access.
+    
+    v1.0 manifests pass through unchanged.
+    """
+    if not isinstance(raw, dict) or raw.get("format_version") != CURRENT_FORMAT_VERSION:
+        return raw
+    install = raw.get("install", {}) or {}
+    code = raw.get("code", {}) or {}
+    flat: Dict[str, Any] = {}
+    flat.update(install)
+    flat.update(code)
+    flat["format_version"] = raw.get("format_version", CURRENT_FORMAT_VERSION)
+    return flat
+
+
 def _get_installed_manifests(
     manifest_dir:Optional[Path]=None # Directory to scan (uses config default if None)
 ) -> list[dict]: # List of manifest dictionaries
-    """Load all manifest JSON files from the manifest directory."""
+    """Load all manifest JSON files from the manifest directory.
+    
+    Returns flat-shaped dicts regardless of on-disk format (v2.0 manifests are
+    flattened via `_v2_to_legacy_flat_view`). Consumers that want typed access
+    should use `load_manifest` from `cjm_plugin_system.core.manifest_format`
+    instead.
+    """
     if manifest_dir is None:
         manifest_dir = get_config().manifests_dir
     
@@ -959,9 +1047,10 @@ def _get_installed_manifests(
     for manifest_file in manifest_dir.glob("*.json"):
         try:
             with open(manifest_file) as f:
-                manifest = json.load(f)
-                manifest['_manifest_path'] = str(manifest_file)
-                manifests.append(manifest)
+                raw = json.load(f)
+            manifest = _v2_to_legacy_flat_view(raw)
+            manifest['_manifest_path'] = str(manifest_file)
+            manifests.append(manifest)
         except (json.JSONDecodeError, IOError):
             pass
     
@@ -1055,12 +1144,14 @@ def remove_plugin(
     manifest_dir = cfg.manifests_dir
     manifest_path = manifest_dir / f"{plugin_name}.json"
     
-    # Find the manifest
+    # Find the manifest. CR-8: read via the legacy-flat-view shim so v2.0
+    # nested manifests work with the existing dict-access code below.
     manifest = None
     if manifest_path.exists():
         try:
             with open(manifest_path) as f:
-                manifest = json.load(f)
+                raw = json.load(f)
+            manifest = _v2_to_legacy_flat_view(raw)
         except (json.JSONDecodeError, IOError):
             pass
     
@@ -1135,27 +1226,182 @@ def remove_plugin(
     typer.echo(f"\nPlugin '{plugin_name}' removed successfully.")
 
 # %% ../nbs/cli.ipynb #df2c4524
-def _validate_manifest_dict(
-    data: Any  # Loaded manifest JSON
-) -> List[str]:  # List of human-readable error messages (empty == valid)
-    """Structural validation of a manifest dict against the substrate's flat schema.
+def _validate_taxonomy_block(
+    tax: Any,  # taxonomy sub-dict (may be None or non-dict; we type-check here)
+    top_level_interface: str,  # `interface` field for cross-check
+    path_prefix: str,  # Error message prefix (e.g., "manifest" or "manifest: code")
+) -> List[str]:
+    """Type-check the taxonomy block + cross-check interface_fqcn vs top-level interface.
     
-    Returns a list of error messages — empty means the manifest passes. Checks
-    the fields PluginManager.discover_manifests + RemotePluginProxy expect:
-    name, version, description, module, class, interface (dotted), python_path.
-    Optional fields are type-checked when present.
-    
-    `description` is required per OQ-3 (reconciled with SG-35: author +
-    package_name are gone from PluginMeta, description stays as the
-    substrate-owned human-readable plugin label).
-    
-    CR-1 + Phase 5a: `taxonomy` and `resources` blocks are recognized as
-    optional (legacy manifests predating those CRs read taxonomy=None
-    gracefully). Type-checked when present.
+    Shared between v1.0 (flat) and v2.0 (nested) validators. `path_prefix` is
+    used to disambiguate error messages between layouts.
     """
     errors: List[str] = []
-    if not isinstance(data, dict):
-        return [f"manifest must be a JSON object, got {type(data).__name__}"]
+    if tax is None:
+        return errors
+    if not isinstance(tax, dict):
+        errors.append(f"{path_prefix}: 'taxonomy' must be an object when present")
+        return errors
+    for tax_key in ("domain", "role", "interface_fqcn"):
+        tax_val = tax.get(tax_key)
+        if tax_val is None or tax_val == "":
+            errors.append(f"{path_prefix}: 'taxonomy.{tax_key}' is required when taxonomy block present")
+        elif not isinstance(tax_val, str):
+            errors.append(f"{path_prefix}: 'taxonomy.{tax_key}' must be a string")
+    # Cross-check: taxonomy.interface_fqcn must agree with the sibling `interface`
+    # field if both are present. Drift here means manifest corruption —
+    # regenerate-manifest is the operator fix.
+    if (
+        isinstance(tax.get("interface_fqcn"), str)
+        and isinstance(top_level_interface, str)
+        and top_level_interface
+        and tax["interface_fqcn"] != top_level_interface
+    ):
+        errors.append(
+            f"{path_prefix}: 'taxonomy.interface_fqcn' ({tax['interface_fqcn']!r}) "
+            f"disagrees with sibling 'interface' ({top_level_interface!r})"
+        )
+    return errors
+
+
+def _validate_resources_block(
+    res: Any,  # resources sub-dict (may be None or non-dict; we type-check here)
+    path_prefix: str,  # Error message prefix
+) -> List[str]:
+    """Phase 5a: type-check the resources block. Shared between v1.0 and v2.0."""
+    errors: List[str] = []
+    if res is None:
+        return errors
+    if not isinstance(res, dict):
+        errors.append(f"{path_prefix}: 'resources' must be an object when present")
+        return errors
+    if "requires_gpu" in res and not isinstance(res["requires_gpu"], bool):
+        errors.append(f"{path_prefix}: 'resources.requires_gpu' must be a boolean")
+    for list_key in ("platforms", "accelerators"):
+        if list_key in res:
+            lst = res[list_key]
+            if not isinstance(lst, list):
+                errors.append(f"{path_prefix}: 'resources.{list_key}' must be a list")
+            elif not all(isinstance(item, str) for item in lst):
+                errors.append(f"{path_prefix}: 'resources.{list_key}' must contain only strings")
+    return errors
+
+
+def _validate_manifest_v2_dict(
+    data: Dict[str, Any]  # v2.0 nested manifest dict (caller already verified format_version)
+) -> List[str]:  # Empty list = valid
+    """CR-8: validate the nested v2.0 manifest layout.
+    
+    Required sections: `install` + `code`. Optional sections: `drift_tracking`
+    (substrate emits it on every fresh write but legacy-via-load_manifest
+    upgrades leave it empty until the first regenerate); `overrides` (free-form
+    operator overlay).
+    
+    Required `code.*` fields mirror v1.0's required top-level fields. Required
+    `install.python_path` mirrors v1.0's required top-level `python_path`.
+    """
+    errors: List[str] = []
+    
+    # Sections must be dicts when present
+    install = data.get("install")
+    code = data.get("code")
+    drift = data.get("drift_tracking")
+    overrides = data.get("overrides")
+    
+    if install is None:
+        errors.append("manifest: required section 'install' is missing")
+        install = {}
+    elif not isinstance(install, dict):
+        errors.append(f"manifest: 'install' must be an object, got {type(install).__name__}")
+        install = {}
+    
+    if code is None:
+        errors.append("manifest: required section 'code' is missing")
+        code = {}
+    elif not isinstance(code, dict):
+        errors.append(f"manifest: 'code' must be an object, got {type(code).__name__}")
+        code = {}
+    
+    if drift is not None and not isinstance(drift, dict):
+        errors.append(f"manifest: 'drift_tracking' must be an object when present, got {type(drift).__name__}")
+        drift = {}
+    
+    if overrides is not None and not isinstance(overrides, dict):
+        errors.append(f"manifest: 'overrides' must be an object when present, got {type(overrides).__name__}")
+    
+    # Required code.* fields (mirroring v1.0 contract)
+    for key in ("name", "version", "description", "module", "class", "interface"):
+        val = code.get(key) if isinstance(code, dict) else None
+        if val is None or val == "":
+            errors.append(f"manifest: required field 'code.{key}' is missing or empty")
+        elif not isinstance(val, str):
+            errors.append(f"manifest: 'code.{key}' must be a string, got {type(val).__name__}")
+    
+    # Required install.python_path (the proxy needs it to spawn the worker)
+    py_path = install.get("python_path") if isinstance(install, dict) else None
+    if py_path is None or py_path == "":
+        errors.append("manifest: required field 'install.python_path' is missing or empty")
+    elif not isinstance(py_path, str):
+        errors.append(f"manifest: 'install.python_path' must be a string, got {type(py_path).__name__}")
+    
+    # Interface FQN must be a dotted path (SG-7 format check)
+    iface = code.get("interface", "") if isinstance(code, dict) else ""
+    if isinstance(iface, str) and iface and "." not in iface:
+        errors.append(
+            f"manifest: 'code.interface' {iface!r} is not a dotted FQN "
+            f"(expected 'module.subpackage.ClassName')"
+        )
+    
+    # Optional install.* fields — type-check only
+    for key in ("conda_env", "db_path", "installed_at", "installer_version", "package_source"):
+        if isinstance(install, dict) and key in install and not isinstance(install[key], str):
+            errors.append(f"manifest: 'install.{key}' must be a string when present")
+    if isinstance(install, dict) and "env_vars" in install and not isinstance(install["env_vars"], dict):
+        errors.append("manifest: 'install.env_vars' must be an object when present")
+    
+    # Optional code.* fields
+    if isinstance(code, dict) and "regenerated_at" in code and code["regenerated_at"] is not None:
+        if not isinstance(code["regenerated_at"], str):
+            errors.append("manifest: 'code.regenerated_at' must be a string when present")
+    
+    # Optional code.config_schema
+    if isinstance(code, dict) and "config_schema" in code and code["config_schema"] is not None:
+        cs = code["config_schema"]
+        if not isinstance(cs, dict):
+            errors.append("manifest: 'code.config_schema' must be an object when present")
+        elif "properties" in cs and not isinstance(cs["properties"], dict):
+            errors.append("manifest: 'code.config_schema.properties' must be an object when present")
+    
+    # Optional code.taxonomy block — shared helper for cross-check + type-check
+    if isinstance(code, dict):
+        errors.extend(_validate_taxonomy_block(
+            code.get("taxonomy"),
+            top_level_interface=code.get("interface", "") if isinstance(code.get("interface"), str) else "",
+            path_prefix="manifest: code",
+        ))
+        errors.extend(_validate_resources_block(
+            code.get("resources"),
+            path_prefix="manifest: code",
+        ))
+    
+    # drift_tracking.config_schema_hash type-check (optional even when present)
+    if isinstance(drift, dict) and "config_schema_hash" in drift and drift["config_schema_hash"] is not None:
+        if not isinstance(drift["config_schema_hash"], str):
+            errors.append("manifest: 'drift_tracking.config_schema_hash' must be a string when present")
+    
+    return errors
+
+
+def _validate_manifest_v1_dict(
+    data: Dict[str, Any]  # Legacy flat manifest dict (no format_version)
+) -> List[str]:  # Empty list = valid
+    """REMOVE-AFTER-OVERHAUL: validate the legacy v1.0 flat manifest layout.
+    
+    Retires when `cascade_manifests.py` rewrites every production manifest to
+    v2.0. Keeps the SG-6 validator working against pre-CR-8 manifests during
+    the transition window.
+    """
+    errors: List[str] = []
     
     # Required string fields. `description` is required per OQ-3 — it's the
     # one human-readable label the substrate genuinely owns + has consumers
@@ -1167,8 +1413,7 @@ def _validate_manifest_dict(
         elif not isinstance(val, str):
             errors.append(f"manifest: field {key!r} must be a string, got {type(val).__name__}")
     
-    # Interface FQN must be a dotted path (SG-7 format check; substrate cannot
-    # import the class without the interface library installed locally)
+    # Interface FQN must be a dotted path (SG-7 format check)
     iface = data.get("interface", "")
     if isinstance(iface, str) and iface and "." not in iface:
         errors.append(
@@ -1176,10 +1421,7 @@ def _validate_manifest_dict(
             f"(expected 'module.subpackage.ClassName')"
         )
     
-    # Optional fields — type-check only. `author` removed per SG-35 (it
-    # was dropped from PluginMeta); validator no longer recognizes it.
-    # CR-1 + audit pre-investment: package_source, installer_version,
-    # installed_at, category_override all type-checked when present.
+    # Optional fields — type-check only
     for key in (
         "category", "category_override", "conda_env", "db_path",
         "package_source", "installer_version", "installed_at",
@@ -1197,49 +1439,40 @@ def _validate_manifest_dict(
         elif "properties" in cs and not isinstance(cs["properties"], dict):
             errors.append("manifest: 'config_schema.properties' must be an object when present")
     
-    # CR-1: taxonomy block. Optional during the SG-47 migration window; when
-    # present, all three string sub-fields are required.
-    if "taxonomy" in data and data["taxonomy"] is not None:
-        tax = data["taxonomy"]
-        if not isinstance(tax, dict):
-            errors.append("manifest: field 'taxonomy' must be an object when present")
-        else:
-            for tax_key in ("domain", "role", "interface_fqcn"):
-                tax_val = tax.get(tax_key)
-                if tax_val is None or tax_val == "":
-                    errors.append(f"manifest: 'taxonomy.{tax_key}' is required when taxonomy block present")
-                elif not isinstance(tax_val, str):
-                    errors.append(f"manifest: 'taxonomy.{tax_key}' must be a string")
-            # Cross-check: taxonomy.interface_fqcn must agree with the top-level
-            # `interface` field if both are present. Drift here means manifest
-            # corruption — regenerate-manifest is the operator fix.
-            if (
-                isinstance(tax.get("interface_fqcn"), str)
-                and isinstance(data.get("interface"), str)
-                and tax["interface_fqcn"] != data["interface"]
-            ):
-                errors.append(
-                    f"manifest: 'taxonomy.interface_fqcn' ({tax['interface_fqcn']!r}) "
-                    f"disagrees with top-level 'interface' ({data['interface']!r})"
-                )
-    
-    # Phase 5a: resources block. Optional; sub-fields type-checked when present.
-    if "resources" in data and data["resources"] is not None:
-        res = data["resources"]
-        if not isinstance(res, dict):
-            errors.append("manifest: field 'resources' must be an object when present")
-        else:
-            if "requires_gpu" in res and not isinstance(res["requires_gpu"], bool):
-                errors.append("manifest: 'resources.requires_gpu' must be a boolean")
-            for list_key in ("platforms", "accelerators"):
-                if list_key in res:
-                    lst = res[list_key]
-                    if not isinstance(lst, list):
-                        errors.append(f"manifest: 'resources.{list_key}' must be a list")
-                    elif not all(isinstance(item, str) for item in lst):
-                        errors.append(f"manifest: 'resources.{list_key}' must contain only strings")
+    # Shared helpers for taxonomy + resources (flat-layout path prefix)
+    errors.extend(_validate_taxonomy_block(
+        data.get("taxonomy"),
+        top_level_interface=data.get("interface", "") if isinstance(data.get("interface"), str) else "",
+        path_prefix="manifest",
+    ))
+    errors.extend(_validate_resources_block(data.get("resources"), path_prefix="manifest"))
     
     return errors
+
+
+def _validate_manifest_dict(
+    data: Any  # Loaded manifest JSON
+) -> List[str]:  # List of human-readable error messages (empty == valid)
+    """SG-6 + CR-8: structural validation, dispatching on `format_version`.
+    
+    `format_version == "2.0"` validates the nested v2.0 layout.
+    Absent `format_version` validates the legacy flat v1.0 layout
+    (REMOVE-AFTER-OVERHAUL — retires after cascade_manifests.py).
+    Any other value rejects with a single error so unknown future formats
+    fail loud rather than silently degrading.
+    """
+    if not isinstance(data, dict):
+        return [f"manifest must be a JSON object, got {type(data).__name__}"]
+    
+    fmt = data.get("format_version")
+    if fmt == "2.0":
+        return _validate_manifest_v2_dict(data)
+    if fmt is None:
+        return _validate_manifest_v1_dict(data)
+    return [
+        f"manifest: unrecognized format_version {fmt!r}; "
+        f"expected '2.0' or legacy (no format_version field)"
+    ]
 
 
 def _validate_plugins_yaml_dict(

@@ -25,6 +25,9 @@ from cjm_plugin_system.core.config_store import (
 )
 from .errors import PluginConfigError, PluginDisabledError
 from .interface import PluginInterface
+from cjm_plugin_system.core.manifest_format import (
+    ManifestV2, load_manifest, manifest_to_dict, compute_config_schema_hash,
+)
 from .metadata import PluginInstance, PluginLoadSpec, PluginMeta, PluginTaxonomy, ResourceRequirements
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
@@ -208,6 +211,8 @@ def _parse_taxonomy(
     """CR-1: parse the manifest's taxonomy block into a PluginTaxonomy.
     
     Returns None when the manifest predates CR-1 (no taxonomy block).
+    Used for callers that have a flat dict (post-CR-8, discover_manifests
+    uses load_manifest's typed PluginTaxonomy directly and bypasses this).
     """
     tax_dict = manifest.get("taxonomy")
     if not tax_dict or not isinstance(tax_dict, dict):
@@ -234,13 +239,16 @@ def _parse_resources(
 
 def _derive_category(
     self,
-    manifest: Dict[str, Any],  # Loaded manifest dict
+    manifest: Dict[str, Any],  # Loaded manifest dict (flat-shaped)
     taxonomy: Optional[PluginTaxonomy]  # Parsed taxonomy (or None for legacy manifests)
 ) -> str:
     """CR-1: derive the human-readable category label.
     
     Resolution: category_override > Title-Case of taxonomy.domain (with
     underscores → spaces) > legacy `category` field > empty.
+    `category_override` lives at top level on v1.0 flat manifests only
+    (v2.0 layout has no slot — CR-1 closed decision deferred a custom
+    label channel until a concrete consumer asks for one).
     """
     override = manifest.get("category_override")
     if isinstance(override, str) and override:
@@ -251,7 +259,16 @@ def _derive_category(
     return legacy if isinstance(legacy, str) else ""
 
 def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
-    """Discover plugins via JSON manifests in search paths."""
+    """Discover plugins via JSON manifests in search paths.
+    
+    CR-8: reads each manifest via `load_manifest`, which transparently parses
+    both v2.0 nested + legacy v1.0 flat layouts into a typed `ManifestV2`.
+    `meta.manifest` is set to a flat-shaped dict view so existing consumers
+    (proxy, scheduling, execute path) continue working unchanged; the typed
+    `ManifestV2` is also attached as `meta.manifest_v2` so drift detection
+    + future typed callers can read `drift_tracking.config_schema_hash`
+    without re-parsing.
+    """
     self.discovered = []
     seen_plugins = set()
 
@@ -261,30 +278,46 @@ def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin me
         
         for manifest_file in base_path.glob("*.json"):
             try:
-                with open(manifest_file) as f:
-                    manifest = json.load(f)
+                # CR-8: parse via load_manifest. Returns typed ManifestV2
+                # regardless of on-disk format (nested v2.0 or legacy flat).
+                v2 = load_manifest(manifest_file)
                 
-                name = manifest.get('name')
+                name = v2.code.name
                 if not name or name in seen_plugins:
                     continue  # Skip duplicates (local shadows global)
                 
-                taxonomy = self._parse_taxonomy(manifest)
-                resources = self._parse_resources(manifest)
+                # Build a flat-shaped dict view for legacy consumers that
+                # access manifest as a plain dict (proxy.py reads
+                # `manifest['python_path']`, scheduling.py reads
+                # `manifest.get('resources', {})`, etc.).
+                nested = manifest_to_dict(v2)
+                manifest = {**nested.get("install", {}), **nested.get("code", {})}
+                
+                # CR-8: use the typed taxonomy/resources directly — no
+                # re-parse from the dict needed (load_manifest already did it).
+                taxonomy = v2.code.taxonomy
+                resources = v2.code.resources
                 derived_category = self._derive_category(manifest, taxonomy)
                 
                 # SG-35: `author` + `package_name` removed; `description`
                 # kept and validated by SG-6.
                 meta = PluginMeta(
                     name=name,
-                    version=manifest.get('version', '0.0.0'),
-                    description=manifest.get('description', ''),
+                    version=v2.code.version or "0.0.0",
+                    description=v2.code.description,
                     category=derived_category,
-                    interface=manifest.get('interface', ''),
+                    interface=v2.code.interface,
                     taxonomy=taxonomy,
                     resources=resources,
-                    config_schema=manifest.get('config_schema')
+                    config_schema=v2.code.config_schema,
                 )
                 meta.manifest = manifest
+                # CR-8: stash typed ManifestV2 so drift detection can read
+                # `drift_tracking.config_schema_hash` at load time without
+                # re-parsing. Dynamic attribute (matches `meta.manifest`'s
+                # existing assignment pattern; PluginMeta dataclass doesn't
+                # declare either).
+                meta.manifest_v2 = v2
                 
                 # SG-7: format-check the interface FQN; warn but still
                 # discover the manifest so older plugins remain usable.
@@ -351,7 +384,6 @@ PluginManager.get_loaded_categories = get_loaded_categories
 PluginManager.get_plugin_meta = get_plugin_meta
 PluginManager.get_discovered_meta = get_discovered_meta
 
-
 # %% ../../nbs/core/manager.ipynb #pm-validation-code
 def _extract_defaults_from_schema(
     self,
@@ -410,9 +442,33 @@ def _check_config_schema_drift(
     self,
     proxy:Any, # RemotePluginProxy with a live worker
     plugin_meta:PluginMeta, # Metadata to flag if drift is detected
-    manifest_schema:Optional[Dict[str, Any]] # Schema stored in the manifest
 ) -> None:
-    """SG-9: compare live worker `/config_schema` to the manifest's stored schema."""
+    """SG-9 + CR-8: compare live worker `/config_schema` to the stored hash.
+    
+    Reads the stored hash from `plugin_meta.manifest_v2.drift_tracking.config_schema_hash`
+    (populated by `discover_manifests`). Computes the live hash with
+    `compute_config_schema_hash` and compares — drift = hashes differ.
+    
+    Honors `cfg.substrate.drift_detection` opt-out from `cjm.yaml`: hosts
+    that don't want the per-load `/config_schema` HTTP call can disable
+    detection there. Default is on.
+    
+    Test fixtures that stub `meta.manifest = {}` without going through
+    `discover_manifests` won't have a `manifest_v2` attribute; the
+    `getattr(..., None)` fallback yields `stored_hash=None`, which doesn't
+    match any live hash — those tests don't expose a real proxy so the
+    drift warning fires harmlessly.
+    """
+    # CR-8: honor cjm.yaml `substrate.drift_detection: false` opt-out.
+    try:
+        cfg = get_config()
+        if not cfg.substrate.drift_detection:
+            return
+    except AttributeError:
+        # Backward compat: hosts running on a pre-CR-8 CJMConfig without
+        # the substrate sub-config. Falls through to default-on behavior.
+        pass
+    
     try:
         live_schema = proxy.get_config_schema()
     except Exception as e:
@@ -421,7 +477,15 @@ def _check_config_schema_drift(
         )
         return
     
-    if (manifest_schema or {}) != (live_schema or {}):
+    # CR-8: hash-based comparison. The manifest carries the witness hash
+    # computed at install/regenerate time; substrate hashes the live schema
+    # the same way and compares.
+    manifest_v2 = getattr(plugin_meta, 'manifest_v2', None)
+    stored_hash = (manifest_v2.drift_tracking.config_schema_hash
+                   if manifest_v2 is not None else None)
+    live_hash = compute_config_schema_hash(live_schema)
+    
+    if stored_hash != live_hash:
         plugin_meta.config_schema_drift = True
         plugin_meta.live_config_schema = live_schema
         self.logger.warning(
@@ -497,7 +561,6 @@ PluginManager._validate_config_against_schema = _validate_config_against_schema
 PluginManager._check_config_schema_drift = _check_config_schema_drift
 PluginManager._persist_config = _persist_config
 PluginManager._maybe_fire_disable_hook = _maybe_fire_disable_hook
-
 
 # %% ../../nbs/core/manager.ipynb #pm-cr10-helpers-code
 def _validate_instance_id(self, instance_id: str) -> None:
@@ -623,8 +686,11 @@ def load_plugin(
 
         config_schema = plugin_meta.manifest.get("config_schema")
         
-        # SG-9: detect drift between manifest-declared schema and live worker.
-        self._check_config_schema_drift(proxy, plugin_meta, config_schema)
+        # SG-9 + CR-8: detect drift between manifest-stored schema hash and
+        # live worker. Drift check reads the stored hash from
+        # `plugin_meta.manifest_v2.drift_tracking.config_schema_hash` and
+        # honors `cfg.substrate.drift_detection` opt-out internally.
+        self._check_config_schema_drift(proxy, plugin_meta)
         
         # CR-2: effective config = caller > persisted (default-only) > manifest defaults.
         if not config and persisted is not None and persisted.config:
@@ -791,7 +857,6 @@ PluginManager.unload_plugin = unload_plugin
 PluginManager.unload_all = unload_all
 PluginManager.get_plugin = get_plugin
 PluginManager.list_plugins = list_plugins
-
 
 # %% ../../nbs/core/manager.ipynb #pm-execute-code
 def _evict_for_resources(self, needed_meta:PluginMeta) -> bool:
