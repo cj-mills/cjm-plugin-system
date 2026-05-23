@@ -4,17 +4,17 @@
 
 # %% auto #0
 __all__ = ['JobStatus', 'JobEventType', 'CancelPhase', 'JobQueueDependencies', 'Job', 'JobEvent', 'QueueStats', 'SequenceStep',
-           'StepResult', 'JobSequence', 'JobQueue', 'submit', 'cancel', 'reorder', 'get_job', 'wait_for_job',
-           'get_pending', 'get_running', 'get_history', 'get_stats', 'get_job_logs', 'events', 'events_for_sequence',
-           'all_events', 'submit_sequence', 'submit_uniform_sequence', 'cancel_sequence', 'get_sequence', 'start',
-           'stop', 'get_state']
+           'StepResult', 'JobSequence', 'ResourceSnapshot', 'JobQueue', 'submit', 'cancel', 'reorder', 'get_job',
+           'wait_for_job', 'get_pending', 'get_running', 'get_history', 'get_stats', 'get_job_logs', 'events',
+           'events_for_sequence', 'all_events', 'submit_sequence', 'submit_uniform_sequence', 'cancel_sequence',
+           'get_sequence', 'get_resource_snapshot', 'start', 'stop', 'get_state']
 
 # %% ../../nbs/core/queue.ipynb #exports
 import asyncio
 import heapq
 import uuid
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -247,6 +247,31 @@ class JobSequence:
     submitted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: Optional[datetime] = None  # Set when sequence reaches terminal status
 
+# %% ../../nbs/core/queue.ipynb #c28b79ab
+@dataclass
+class ResourceSnapshot:
+    """Point-in-time resource usage for one job (CR-6 Stage 3).
+
+    Worker stats (cpu_percent, memory_rss_mb) come from the plugin proxy's
+    `get_stats()`. GPU fields come from the configured system-monitor plugin
+    (when set on JobQueue) via CR-3's typed `list_processes()` (per-PID
+    matching) and `get_system_status()` (global GPU stats). All GPU fields
+    are Optional — None if no sysmon configured or the worker isn't running
+    on a GPU.
+
+    Distinct from CR-7's `EmpiricalResourceRecord` (aggregated profile
+    across runs); this is "what's happening right now" for one job.
+    """
+    timestamp: datetime  # When the sample was taken
+    worker_pid: int = 0  # OS PID of the plugin worker subprocess
+    cpu_percent: float = 0.0  # Worker process CPU%
+    memory_rss_mb: float = 0.0  # Worker process resident memory (MB)
+    gpu_index: Optional[int] = None  # GPU index the worker is on (None if not GPU-bound)
+    gpu_memory_mb: Optional[float] = None  # Worker's GPU memory usage (MB)
+    gpu_type: Optional[str] = None  # GPU vendor (NVIDIA / AMD / Intel / None)
+    gpu_total_mb: Optional[float] = None  # Total GPU memory available globally (MB)
+    gpu_load_percent: Optional[float] = None  # GPU compute utilization (global)
+
 # %% ../../nbs/core/queue.ipynb #queue-class
 class JobQueue:
     """Resource-aware job queue with push-based observability (CR-6)."""
@@ -260,16 +285,27 @@ class JobQueue:
 
     def __init__(
         self,
-        deps: JobQueueDependencies,  # Substrate dependencies (PluginManager satisfies structurally)
-        max_history: int = 100,      # Max completed jobs to retain
-        cancel_timeout: float = 3.0, # Seconds to wait for cooperative cancel
-        progress_poll_interval: float = 1.0  # Seconds between progress polls
+        deps: JobQueueDependencies,        # Substrate dependencies (PluginManager satisfies structurally)
+        max_history: int = 100,            # Max completed jobs to retain
+        cancel_timeout: float = 3.0,       # Seconds to wait for cooperative cancel
+        progress_poll_interval: float = 1.0,  # Seconds between progress polls
+        sysmon_plugin_name: Optional[str] = None,  # CR-3 MonitorPlugin instance for GPU stats (None = no GPU info)
+        resource_snapshot_cadence_polls: int = 4,  # Sample resources every Nth progress poll
     ):
-        """Initialize the job queue."""
+        """Initialize the job queue.
+
+        CR-6 Stage 3 adds `sysmon_plugin_name` and `resource_snapshot_cadence_polls`.
+        Sysmon integration is optional — when set, the named plugin must satisfy
+        CR-3's typed `MonitorPlugin` shape (`get_system_status` + `list_processes`).
+        When unset, ResourceSnapshot still carries worker stats but all GPU
+        fields stay None.
+        """
         self._deps = deps
         self.max_history = max_history
         self.cancel_timeout = cancel_timeout
         self.progress_poll_interval = progress_poll_interval
+        self._sysmon_name = sysmon_plugin_name
+        self.resource_snapshot_cadence_polls = max(1, resource_snapshot_cadence_polls)
         self.logger = logging.getLogger(f"{__name__}.{type(self).__name__}")
 
         # State
@@ -527,22 +563,107 @@ def get_stats(self) -> QueueStats:  # Aggregate counts
         total_cancelled=sum(1 for j in self._history if j.status == JobStatus.cancelled),
     )
 
+# CR-6 Stage 3: log-slicing helpers. Worker log format from `worker.py`
+# `basicConfig`: `%(asctime)s [%(levelname)s] %(message)s`. Default asctime
+# emits local-time with millisecond precision: `YYYY-MM-DD HH:MM:SS,mmm`.
+import re as _re_logslice
+_LOG_TS_PATTERN = _re_logslice.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})\s')
+
+
+def _parse_log_timestamp(line: str) -> Optional[datetime]:
+    """Parse the leading timestamp from a worker log line.
+
+    Returns naive datetime (no tzinfo) in local time — caller is responsible
+    for tz alignment with the job's UTC timestamps. Returns None for
+    continuation lines (no parseable leading timestamp), blank lines, etc.
+    """
+    m = _LOG_TS_PATTERN.match(line)
+    if not m:
+        return None
+    try:
+        dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
+        return dt.replace(microsecond=int(m.group(2)) * 1000)
+    except ValueError:
+        return None
+
+
+def _slice_log_by_job_window(
+    raw: str,  # Full log content
+    started_at: datetime,  # Job's UTC start time
+    completed_at: Optional[datetime],  # Job's UTC end time (None if still running)
+    max_lines: int,  # Max lines to return
+) -> str:  # Sliced log content
+    """Slice log content by a job's execution window.
+
+    Worker logs are local-time naive; job timestamps are UTC. We convert
+    the job's UTC times to local-time-naive for comparison. Continuation
+    lines (no parseable timestamp) are associated with the most recent
+    timestamped line — included if that timestamp was in the window.
+
+    Best-effort: if `started_at` is None (job never ran) or no lines have
+    parseable timestamps, returns the raw tail unchanged.
+    """
+    if started_at is None:
+        return '\n'.join(raw.split('\n')[-max_lines:])
+
+    start_naive = started_at.astimezone().replace(tzinfo=None)
+    end_naive = (
+        completed_at.astimezone().replace(tzinfo=None)
+        if completed_at is not None else None
+    )
+
+    in_window = False
+    selected: List[str] = []
+    saw_timestamp = False
+    for line in raw.split('\n'):
+        ts = _parse_log_timestamp(line)
+        if ts is not None:
+            saw_timestamp = True
+            if ts < start_naive:
+                in_window = False
+            elif end_naive is not None and ts > end_naive:
+                in_window = False
+            else:
+                in_window = True
+        if in_window:
+            selected.append(line)
+
+    # If no timestamps were parseable in the raw log, fall back to the raw tail
+    # rather than returning empty (heuristic preservation of useful content).
+    if not saw_timestamp:
+        return '\n'.join(raw.split('\n')[-max_lines:])
+
+    return '\n'.join(selected[-max_lines:])
+
+
 def get_job_logs(
     self,
     job_id: str,  # Job to get logs for
     lines: int = 100  # Max lines to return
-) -> str:  # Log content
-    """Get logs for a job from the plugin's log file.
+) -> str:  # Log content scoped to this job's execution window
+    """Get logs for a job, scoped to its (started_at, completed_at) window.
 
-    Stage 1: delegates the whole-plugin-log read to `JobQueueDependencies.
-    get_plugin_logs`. Stage 3 will scope by `(started_at, completed_at)`
-    so the return is bounded to this job's execution window.
+    CR-6 Stage 3: replaces the legacy whole-plugin-log behavior. The
+    substrate over-fetches the plugin log (lines * 5) and slices by the
+    job's execution window — the job-monitor library's `--- Starting` marker
+    heuristic in `_filter_current_session` becomes obsolete in cascade.
+
+    Falls back gracefully when timestamps are unparseable or the job's
+    window isn't known: returns the raw tail.
     """
     job = self._jobs.get(job_id)
     if not job:
         return ""
 
-    return self._deps.get_plugin_logs(job.plugin_instance_id, lines=lines)
+    # Over-fetch: continuation lines + lines outside the window get filtered,
+    # so we need enough raw content to populate `lines` results post-slice.
+    raw = self._deps.get_plugin_logs(job.plugin_instance_id, lines=lines * 5)
+
+    if job.started_at is None:
+        # Job hasn't run yet — no useful slice. Return raw tail.
+        return '\n'.join(raw.split('\n')[-lines:])
+
+    return _slice_log_by_job_window(raw, job.started_at, job.completed_at, lines)
 
 JobQueue.get_job = get_job
 JobQueue.wait_for_job = wait_for_job
@@ -917,6 +1038,100 @@ JobQueue.cancel_sequence = cancel_sequence
 JobQueue.get_sequence = get_sequence
 JobQueue._advance_sequence = _advance_sequence
 
+# %% ../../nbs/core/queue.ipynb #ee34e330
+def _sample_resource_snapshot(
+    self,
+    job: Job  # Job to sample resources for
+) -> Optional[ResourceSnapshot]:
+    """Sample worker + sysmon stats for a job (CR-6 Stage 3 internal helper).
+
+    Returns None if the worker proxy doesn't support `get_stats` or the call
+    fails — substrate can't fabricate a snapshot. Sysmon enrichment is
+    best-effort: if the named plugin isn't loaded / errors / lacks the CR-3
+    typed methods, GPU fields stay None and the worker-only snapshot is
+    returned.
+    """
+    proxy = self._deps.get_plugin(job.plugin_instance_id)
+    if not proxy or not hasattr(proxy, 'get_stats'):
+        return None
+
+    try:
+        stats = proxy.get_stats()
+    except Exception:
+        return None
+
+    snapshot = ResourceSnapshot(
+        timestamp=datetime.now(timezone.utc),
+        worker_pid=stats.get('pid', 0),
+        cpu_percent=stats.get('cpu_percent', 0.0),
+        memory_rss_mb=stats.get('memory_rss_mb', 0.0),
+    )
+
+    # Best-effort sysmon enrichment via CR-3 typed methods.
+    if self._sysmon_name:
+        sysmon = self._deps.get_plugin(self._sysmon_name)
+        if sysmon is not None:
+            # Per-PID GPU usage via list_processes()
+            try:
+                processes = sysmon.list_processes() if hasattr(sysmon, 'list_processes') else None
+                if processes:
+                    for proc in processes:
+                        # proxy returns dicts; handle both dict + dataclass forms
+                        proc_pid = proc.get('pid') if isinstance(proc, dict) else getattr(proc, 'pid', None)
+                        if proc_pid == snapshot.worker_pid:
+                            snapshot.gpu_index = (
+                                proc.get('gpu_index') if isinstance(proc, dict)
+                                else getattr(proc, 'gpu_index', None)
+                            )
+                            snapshot.gpu_memory_mb = (
+                                proc.get('gpu_memory_mb') if isinstance(proc, dict)
+                                else getattr(proc, 'gpu_memory_mb', None)
+                            )
+                            break
+            except Exception:
+                pass  # Sysmon failure shouldn't break the snapshot
+
+            # Global GPU stats via get_system_status()
+            try:
+                sys_stats = sysmon.get_system_status() if hasattr(sysmon, 'get_system_status') else None
+                if sys_stats is not None:
+                    snapshot.gpu_type = (
+                        sys_stats.get('gpu_type') if isinstance(sys_stats, dict)
+                        else getattr(sys_stats, 'gpu_type', None)
+                    )
+                    snapshot.gpu_total_mb = (
+                        sys_stats.get('gpu_total_memory_mb') if isinstance(sys_stats, dict)
+                        else getattr(sys_stats, 'gpu_total_memory_mb', None)
+                    )
+                    snapshot.gpu_load_percent = (
+                        sys_stats.get('gpu_load_percent') if isinstance(sys_stats, dict)
+                        else getattr(sys_stats, 'gpu_load_percent', None)
+                    )
+            except Exception:
+                pass
+
+    return snapshot
+
+
+def get_resource_snapshot(
+    self,
+    job_id: str  # Job to sample resources for
+) -> Optional[ResourceSnapshot]:
+    """Get a point-in-time resource snapshot for a job (CR-6 Stage 3).
+
+    Returns None if the job is unknown or the worker proxy doesn't expose
+    `get_stats`. Composes worker stats with sysmon GPU stats when the queue
+    is configured with a `sysmon_plugin_name`.
+    """
+    job = self._jobs.get(job_id)
+    if not job:
+        return None
+    return self._sample_resource_snapshot(job)
+
+
+JobQueue._sample_resource_snapshot = _sample_resource_snapshot
+JobQueue.get_resource_snapshot = get_resource_snapshot
+
 # %% ../../nbs/core/queue.ipynb #lifecycle
 async def start(self) -> None:
     """Start the queue processor."""
@@ -1141,14 +1356,17 @@ async def _poll_progress(
     job: Job,
     plugin: Any
 ) -> None:
-    """Poll progress from the plugin during execution.
+    """Poll progress + sample resources from the plugin during execution.
 
     Emits PROGRESS_CHANGED events when progress or status_message changes
-    from the previous poll. Avoids spamming the event bus when polls return
-    the same values (common between meaningful updates).
+    from the previous poll (avoids spamming the bus between meaningful
+    updates). CR-6 Stage 3: also emits RESOURCE_SNAPSHOT events every
+    `resource_snapshot_cadence_polls` iterations; snapshot is also stored
+    on `job.last_resource_snapshot` for synchronous inspection.
     """
     last_progress = job.progress
     last_message = job.status_message
+    poll_count = 0
     while True:
         try:
             if hasattr(plugin, 'get_progress_async'):
@@ -1156,27 +1374,51 @@ async def _poll_progress(
             elif hasattr(plugin, 'get_progress'):
                 progress_info = plugin.get_progress()
             else:
-                break  # No progress support
+                progress_info = None
 
-            new_progress = progress_info.get('progress', 0.0)
-            new_message = progress_info.get('message', '')
-            job.progress = new_progress
-            job.status_message = new_message
+            if progress_info is not None:
+                new_progress = progress_info.get('progress', 0.0)
+                new_message = progress_info.get('message', '')
+                job.progress = new_progress
+                job.status_message = new_message
 
-            if new_progress != last_progress or new_message != last_message:
-                self._publish_event(JobEvent(
-                    type=JobEventType.PROGRESS_CHANGED,
-                    job_id=job.id,
-                    plugin_instance_id=job.plugin_instance_id,
-                    sequence_id=job.sequence_id,
-                    sequence_index=job.sequence_index,
-                    payload={"progress": new_progress, "status_message": new_message},
-                ))
-                last_progress = new_progress
-                last_message = new_message
+                if new_progress != last_progress or new_message != last_message:
+                    self._publish_event(JobEvent(
+                        type=JobEventType.PROGRESS_CHANGED,
+                        job_id=job.id,
+                        plugin_instance_id=job.plugin_instance_id,
+                        sequence_id=job.sequence_id,
+                        sequence_index=job.sequence_index,
+                        payload={"progress": new_progress, "status_message": new_message},
+                    ))
+                    last_progress = new_progress
+                    last_message = new_message
+
+            # CR-6 Stage 3: sample resources at cadence + emit RESOURCE_SNAPSHOT.
+            poll_count += 1
+            if poll_count % self.resource_snapshot_cadence_polls == 0:
+                snapshot = self._sample_resource_snapshot(job)
+                if snapshot is not None:
+                    job.last_resource_snapshot = snapshot
+                    self._publish_event(JobEvent(
+                        type=JobEventType.RESOURCE_SNAPSHOT,
+                        job_id=job.id,
+                        plugin_instance_id=job.plugin_instance_id,
+                        sequence_id=job.sequence_id,
+                        sequence_index=job.sequence_index,
+                        payload={"snapshot": asdict(snapshot)},
+                    ))
+
+            if progress_info is None and self.resource_snapshot_cadence_polls <= 1:
+                # Pathological: no progress support AND every-poll snapshot
+                # cadence — we'd spin forever without yielding. Defensive
+                # break matches pre-Stage-3 behavior when no progress hook
+                # exists.
+                if not hasattr(plugin, 'get_stats'):
+                    break
 
         except Exception:
-            pass  # Ignore progress polling errors
+            pass  # Ignore polling errors
 
         await asyncio.sleep(self.progress_poll_interval)
 
@@ -1255,18 +1497,20 @@ JobQueue.get_state = get_state
 # %% ../../nbs/core/queue.ipynb #e31875a2
 # SG-15: curate __all__ to expose only the class + value symbols.
 # The patched JobQueue methods (submit, cancel, wait_for_job, events,
-# submit_sequence, cancel_sequence, etc.) remain accessible as
-# JobQueue.method() — they're removed from the module's `from ... import *`
-# surface because invoking them standalone fails (they expect `self`).
-# nbdev's auto-`__all__` lists them as free names; this override runs after
-# that assignment and wins by being last.
+# submit_sequence, cancel_sequence, get_resource_snapshot, etc.) remain
+# accessible as JobQueue.method() — they're removed from the module's
+# `from ... import *` surface because invoking them standalone fails
+# (they expect `self`). nbdev's auto-`__all__` lists them as free names;
+# this override runs after that assignment and wins by being last.
 #
 # CR-6 additions: JobEventType + CancelPhase + JobEvent + QueueStats +
 # JobQueueDependencies (Stage 1) + SequenceStep + StepResult + JobSequence
-# (Stage 2) are first-class types that consumers import directly.
+# (Stage 2) + ResourceSnapshot (Stage 3) are first-class types that
+# consumers import directly.
 __all__ = [
     'JobStatus', 'JobEventType', 'CancelPhase',
     'Job', 'JobEvent', 'QueueStats',
     'SequenceStep', 'StepResult', 'JobSequence',
+    'ResourceSnapshot',
     'JobQueueDependencies', 'JobQueue',
 ]
