@@ -5,8 +5,8 @@
 # %% auto #0
 __all__ = ['PluginError', 'PluginInputError', 'PluginTransientError', 'PluginResourceError', 'PluginFatalError',
            'PluginDisabledError', 'PluginNotLoadedError', 'PluginTimeoutError', 'PluginCancelledError',
-           'PluginConfigError', 'ResourceShortfall', 'TracebackPolicy', 'JobError', 'classify_exception',
-           'map_bare_exception_to_job_error']
+           'WorkerOOMError', 'PluginConfigError', 'ResourceShortfall', 'TracebackPolicy', 'JobError',
+           'classify_exception', 'map_bare_exception_to_job_error']
 
 # %% ../../nbs/core/errors.ipynb #exports
 import warnings
@@ -174,6 +174,45 @@ class PluginCancelledError(PluginTransientError):
     def __init__(self, plugin_name: str):
         super().__init__(f"Plugin {plugin_name!r} cancelled by operator")
         self.plugin_name = plugin_name
+
+
+class WorkerOOMError(PluginResourceError):
+    """The worker subprocess died with a kill-signal during an active execute call.
+    
+    CR-7 Track A — substrate-side OOM detection: when an HTTP call to the worker
+    faults and the subprocess has died with `returncode == -signal.SIGKILL` (or
+    the platform equivalent), the substrate raises this. The kernel OOM-killer
+    is the most common cause of SIGKILL during normal execute paths, so the
+    substrate treats SIGKILL-during-call as "assume OOM" and surfaces a typed
+    resource error for the reactive retry path.
+    
+    `resource_shortfall` is `None` for Track A — the substrate only saw "worker
+    died from kill-signal" and has no per-resource needed/available numbers.
+    Track B (per SG-47's sub-task: plugin-side wrapping of `torch.cuda.OutOfMemoryError`
+    et al.) raises `PluginResourceError` directly with a populated
+    `ResourceShortfall` because the plugin had the context. Both land at the
+    same `except PluginResourceError` site in CR-7's reactive retry loop.
+    
+    `process_returncode` carries the observed exit code for debugging /
+    classification (e.g. operators can distinguish kernel-OOM SIGKILL from
+    other signals if they read it). Defaults to `None` for callers that don't
+    have it on hand.
+    """
+    
+    def __init__(
+        self,
+        plugin_name: str,
+        *,
+        process_returncode: Optional[int] = None,
+        message: Optional[str] = None,
+    ):
+        rc_part = f" (returncode={process_returncode})" if process_returncode is not None else ""
+        super().__init__(
+            message or f"Worker for plugin {plugin_name!r} died from kill-signal{rc_part}; assuming OOM",
+            resource_shortfall=None,  # Track A: substrate has no needed/available
+        )
+        self.plugin_name = plugin_name
+        self.process_returncode = process_returncode
 
 # %% ../../nbs/core/errors.ipynb #config-error
 class PluginConfigError(PluginInputError):

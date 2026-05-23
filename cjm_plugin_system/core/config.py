@@ -41,14 +41,21 @@ class RuntimeConfig:
 # %% ../../nbs/core/config.ipynb #f406009f
 @dataclass
 class SubstrateConfig:
-    """Substrate behavior toggles (CR-8).
+    """Substrate behavior toggles.
     
-    Loaded from the `substrate:` section of `cjm.yaml`. Hosts that don't want
-    the per-load drift-detection cost can disable it here; the PluginManager's
-    load path branches around the `_check_config_schema_drift` call when
-    `drift_detection == False`.
+    Loaded from the `substrate:` section of `cjm.yaml`. Each flag gates a
+    substrate-wide behavior that hosts can disable when they don't want the
+    per-load or per-execute cost.
+    
+    - `drift_detection` (CR-8): per-load `/config_schema` HTTP call + hash
+      comparison against the manifest's stored hash. PluginManager's load
+      path branches around `_check_config_schema_drift` when False.
+    - `empirical_tracking` (CR-7): per-execute resource sample recording into
+      `EmpiricalResourceStore`. PluginManager skips `record_sample` calls when
+      False; the store's lazy-init also short-circuits.
     """
     drift_detection:bool=True # Run /config_schema hash compare on every load_plugin
+    empirical_tracking:bool=True # Record ResourceSample after every execute_plugin*
 
 # %% ../../nbs/core/config.ipynb #cjm-config
 @dataclass
@@ -127,10 +134,12 @@ def _load_from_yaml(
         binaries={k: base_dir / v for k, v in runtime_data.get("binaries", {}).items()}
     )
 
-    # CR-8: parse substrate behavior toggles. Unknown keys ignored (forward-compat).
+    # CR-8 + CR-7: parse substrate behavior toggles. Unknown keys ignored
+    # (forward-compat for future flags landing without breaking older yamls).
     substrate_data = data.get("substrate", {}) or {}
     substrate = SubstrateConfig(
         drift_detection=bool(substrate_data.get("drift_detection", True)),
+        empirical_tracking=bool(substrate_data.get("empirical_tracking", True)),
     )
 
     # Parse top-level config

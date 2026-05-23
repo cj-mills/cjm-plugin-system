@@ -118,6 +118,19 @@ class PluginInstance:
     # per the CR-5 follow-up. The factory uses datetime.now(timezone.utc) at
     # instance-creation time.
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # CR-7: empirical resource tracking key. Populated by load_plugin via
+    # `compute_config_hash(config)` so per-execute sample recording can index
+    # the EmpiricalResourceStore by (instance_id, config_hash). Two distinct
+    # configs for the same instance get two distinct empirical records.
+    # Defaults to empty string for back-compat with hand-constructed PluginInstances
+    # in tests that don't go through load_plugin.
+    config_hash: str = ""
+    # CR-7 / SG-33: per-instance concurrency cap for async execute. None means
+    # unbounded (preserves pre-SG-33 behavior). When set, PluginManager creates
+    # a lazy asyncio.Semaphore(max_concurrent_requests) keyed by instance_id and
+    # gates execute_plugin_async behind it. Sync execute_plugin is NOT gated —
+    # the cap is async-path only since sync callers can't await a semaphore.
+    max_concurrent_requests: Optional[int] = None
 
 # %% ../../nbs/core/metadata.ipynb #b65ea953
 @dataclass

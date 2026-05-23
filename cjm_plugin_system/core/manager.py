@@ -14,7 +14,9 @@ __all__ = ['PluginManager', 'register_system_monitor', 'discover_manifests', 'ge
            'get_compatible_for_current_platform']
 
 # %% ../../nbs/core/manager.ipynb #31a5a9f1
+import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Set, Type, Union
@@ -23,7 +25,14 @@ from .config import get_config
 from cjm_plugin_system.core.config_store import (
     LocalPluginConfigStore, PluginConfigRecord, PluginConfigStore,
 )
-from .errors import PluginConfigError, PluginDisabledError
+from cjm_plugin_system.core.empirical_store import (
+    EmpiricalResourceRecord, EmpiricalResourceStore, LocalEmpiricalResourceStore,
+    ResourceSample, compute_config_hash,
+)
+from cjm_plugin_system.core.errors import (
+    PluginConfigError, PluginDisabledError, PluginResourceError,
+    ResourceShortfall, WorkerOOMError,
+)
 from .interface import PluginInterface
 from cjm_plugin_system.core.manifest_format import (
     ManifestV2, load_manifest, manifest_to_dict, compute_config_schema_hash,
@@ -47,7 +56,9 @@ class PluginManager:
         plugin_interface:Type[PluginInterface]=PluginInterface, # Base interface for type checking
         search_paths:Optional[List[Path]]=None, # Custom manifest search paths
         scheduler:Optional[ResourceScheduler]=None, # Resource allocation policy
-        config_store:Optional[PluginConfigStore]=None # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
+        config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
+        empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
+        max_retries:int=1 # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
     ):
         """Initialize the plugin manager."""
         self.plugin_interface = plugin_interface
@@ -81,7 +92,34 @@ class PluginManager:
         # the on_disable hook until the job finishes (audit semantics).
         self._running_executions: Set[str] = set()
         self._pending_disable_hooks: Set[str] = set()
-
+        
+        # CR-7: empirical resource tracking. The store is lazy-init'd only when
+        # cfg.substrate.empirical_tracking is True (default). Hosts that want
+        # the substrate to skip recording entirely set empirical_tracking=False
+        # in cjm.yaml; explicit empirical_store=... bypasses the flag check and
+        # uses the supplied store (useful for tests + workflow-scoped stores).
+        if empirical_store is not None:
+            self.empirical_store: Optional[EmpiricalResourceStore] = empirical_store
+        else:
+            try:
+                _cfg = get_config()
+                if getattr(_cfg.substrate, 'empirical_tracking', True):
+                    self.empirical_store = LocalEmpiricalResourceStore()
+                else:
+                    self.empirical_store = None
+            except Exception:
+                # Backward-compat: pre-CR-7 CJMConfig without substrate sub-config.
+                # Default-on behavior; lazy-create the store.
+                self.empirical_store = LocalEmpiricalResourceStore()
+        
+        # CR-7: bounded reactive retries on PluginResourceError (Track A + B).
+        self.max_retries: int = max_retries
+        
+        # SG-33 (part-of-CR-7): per-instance asyncio.Semaphore for the async
+        # execute path's concurrency cap. Lazy-created on first execute_plugin_async
+        # for instances whose `max_concurrent_requests` was set at load time.
+        # Sync execute_plugin is NOT gated — sync callers can't await a semaphore.
+        self._concurrent_limiters: Dict[str, asyncio.Semaphore] = {}
 
 # %% ../../nbs/core/manager.ipynb #cr3-telemetry-code
 def register_system_monitor(
@@ -629,7 +667,8 @@ def load_plugin(
     config:Optional[Dict[str, Any]]=None, # Initial configuration
     strict:bool=True, # SG-5: reject unknown keys against manifest config_schema (default)
     instance_id:Optional[str]=None, # CR-10: explicit instance_id; None defaults to plugin_name
-    new_instance:bool=False # CR-10: auto-generate `{name}-{hex}` instance_id (with instance_id=None)
+    new_instance:bool=False, # CR-10: auto-generate `{name}-{hex}` instance_id (with instance_id=None)
+    max_concurrent_requests:Optional[int]=None # SG-33 (CR-7): per-instance async concurrency cap; None = unbounded
 ) -> bool: # True if successfully loaded
     """Load a plugin by spawning a Worker subprocess.
     
@@ -650,6 +689,12 @@ def load_plugin(
     - instance_id=None, new_instance=True: auto-generates `{name}-{6-hex}`.
     Idempotent: re-load against an existing instance_id returns True without
     re-spawning.
+    
+    CR-7: computes `config_hash` from the effective config (post-defaults +
+    post-validation) and stores it on the PluginInstance so execute_plugin*
+    can key empirical samples by (instance_id, config_hash). SG-33 stores
+    `max_concurrent_requests` on the instance — the actual asyncio.Semaphore
+    is lazy-created in execute_plugin_async via `_get_concurrent_limiter`.
     """
     if not hasattr(plugin_meta, 'manifest'):
         self.logger.error(f"Plugin {plugin_meta.name} has no manifest data")
@@ -723,13 +768,21 @@ def load_plugin(
             effective_enabled = persisted.enabled
             plugin_meta.enabled = effective_enabled
         
+        # CR-7: hash the effective config so empirical recording can key by
+        # (instance_id, config_hash). Two configs for the same instance get
+        # two distinct records (e.g. whisper at model=base vs model=large).
+        effective_config = dict(config or {})
+        instance_config_hash = compute_config_hash(effective_config)
+        
         # CR-10: always record the per-instance state
         self.instances[resolved_id] = PluginInstance(
             instance_id=resolved_id,
             plugin_name=plugin_meta.name,
-            config=dict(config or {}),
+            config=effective_config,
             proxy=proxy,
             enabled=effective_enabled,
+            config_hash=instance_config_hash,
+            max_concurrent_requests=max_concurrent_requests,
         )
         
         # Default-instance only: maintain backward-compat single-instance
@@ -793,6 +846,13 @@ def unload_plugin(
         del self.instances[instance_id]
         self._pending_disable_hooks.discard(instance_id)
         self._running_executions.discard(instance_id)
+        # SG-33 (CR-7): drop the lazy concurrency limiter — it would otherwise
+        # leak (and be stale if the same instance_id gets reloaded with a
+        # different max_concurrent_requests setting). Defensive against test
+        # fixtures that bypass __init__ and don't have _concurrent_limiters.
+        _limiters = getattr(self, '_concurrent_limiters', None)
+        if _limiters is not None:
+            _limiters.pop(instance_id, None)
         # Backward-compat: also clear plugin_name keys for the canonical instance
         self._pending_disable_hooks.discard(plugin_name)
         self._running_executions.discard(plugin_name)
@@ -859,20 +919,167 @@ PluginManager.get_plugin = get_plugin
 PluginManager.list_plugins = list_plugins
 
 # %% ../../nbs/core/manager.ipynb #pm-execute-code
+def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:bool) -> None:
+    """CR-7: best-effort empirical sample recording.
+    
+    Captures worker stats at end-of-execute (proxy of peak), builds a
+    ResourceSample, and records it via the EmpiricalResourceStore. Failures
+    log + swallow — sample recording must never break the execute path
+    (matches CR-2's `_persist_config` best-effort discipline).
+    
+    Stats fetch can fail naturally (e.g. worker died with WorkerOOMError —
+    the proxy is unreachable). The sample still records with zero stats +
+    success=False so we have a record of the failed attempt for the
+    success_rate aggregate.
+    """
+    # Defensive against test fixtures that bypass __init__: if empirical_store
+    # wasn't initialized, the substrate just skips recording. Same pattern
+    # CR-8 uses for `manifest_v2` in `_check_config_schema_drift`.
+    store = getattr(self, 'empirical_store', None)
+    if store is None:
+        return
+    if not inst.config_hash:
+        # No config_hash means the instance wasn't loaded through load_plugin
+        # (test fixtures with manual self.instances[...] = PluginInstance(...)
+        # populate). Skip recording rather than keying records by empty string.
+        return
+    try:
+        worker_stats: Dict[str, Any] = {}
+        if inst.proxy is not None:
+            try:
+                fetched = inst.proxy.get_stats()
+                if isinstance(fetched, dict):
+                    worker_stats = fetched
+            except Exception:
+                # Worker may be dead (WorkerOOMError path). Sample with zero stats.
+                pass
+        
+        duration = max(0.0, time.time() - start_time)
+        sample = ResourceSample(
+            cpu_percent=float(worker_stats.get("cpu_percent", 0.0) or 0.0),
+            memory_mb_peak=float(worker_stats.get("memory_mb", 0.0) or 0.0),
+            gpu_memory_mb_peak=float(worker_stats.get("gpu_memory_mb", 0.0) or 0.0),
+            duration_seconds=duration,
+            success=success,
+            observed_at=datetime.now(timezone.utc),
+        )
+        store.record_sample(
+            inst.instance_id, inst.plugin_name, inst.config_hash, sample,
+        )
+    except Exception as e:
+        self.logger.warning(
+            f"CR-7: empirical sample recording failed for {inst.instance_id}: {e}"
+        )
+
+
+def _get_concurrent_limiter(self, instance_id:str) -> Optional[asyncio.Semaphore]:
+    """SG-33 (CR-7): lazy-create the per-instance asyncio.Semaphore.
+    
+    Returns None when the instance has no `max_concurrent_requests` set (the
+    default — unbounded). Otherwise creates the semaphore on first call and
+    caches it in `self._concurrent_limiters`. Semaphores are bound to the
+    event loop they were created in; lazy creation inside `execute_plugin_async`
+    ensures we're inside the right loop at construction time (Python 3.10+
+    semaphore-loop-binding rules).
+    
+    Defensive: returns None if the manager was constructed via __new__ without
+    `_concurrent_limiters` being populated (test-fixture pattern).
+    """
+    limiters = getattr(self, '_concurrent_limiters', None)
+    if limiters is None:
+        return None
+    inst = self.instances.get(instance_id)
+    if inst is None or inst.max_concurrent_requests is None:
+        return None
+    limiter = limiters.get(instance_id)
+    if limiter is None:
+        limiter = asyncio.Semaphore(inst.max_concurrent_requests)
+        limiters[instance_id] = limiter
+    return limiter
+
+
+def _reactive_evict_for(
+    self,
+    needed_meta:PluginMeta,
+    shortfall:Optional[Any]=None,  # Optional ResourceShortfall from Track B; informational only
+) -> bool:
+    """CR-7: try to free resources after a PluginResourceError during execute.
+    
+    Wraps `_evict_for_resources` with reactive-flow logging. `_evict_for_resources`
+    itself extends to multi-axis + cost-aware candidate selection (drops the
+    GPU-only filter, prefers evicting empirically-expensive idle plugins).
+    
+    `shortfall` is recorded for log context but doesn't currently steer
+    candidate selection beyond what _evict_for_resources already does via
+    its `needed_meta.resources` check. A future enhancement could pass it
+    through for axis-specific candidate filtering.
+    """
+    if shortfall is not None:
+        self.logger.info(
+            f"CR-7 reactive eviction for {needed_meta.name} after PluginResourceError "
+            f"(shortfall={shortfall})"
+        )
+    else:
+        self.logger.info(
+            f"CR-7 reactive eviction for {needed_meta.name} after PluginResourceError"
+        )
+    return self._evict_for_resources(needed_meta)
+
+
 def _evict_for_resources(self, needed_meta:PluginMeta) -> bool:
-    """Attempt to free resources by unloading/releasing idle plugins (LRU)."""
+    """Attempt to free resources by unloading/releasing idle plugins (LRU).
+    
+    CR-7: extended from GPU-only LRU to multi-axis cost-aware eviction.
+    - Candidate set: any loaded plugin that isn't the one we're allocating
+      for (drops the pre-CR-7 `requires_gpu` filter).
+    - Sort key: primary = idle (older last_executed first, classic LRU);
+      secondary = empirical cost when available (highest peak gets evicted
+      first among equally-idle candidates). Cost axis follows the needed
+      plugin's `resources.requires_gpu` flag — GPU peak when we're freeing
+      for a GPU plugin, system memory peak otherwise.
+    
+    Without empirical data (no store / unmeasured plugin), the secondary
+    key is 0.0 and pure LRU applies. Cost-aware selection is opt-in via
+    `empirical_tracking: true`.
+    """
     self.logger.info(f"Attempting eviction to make room for {needed_meta.name}...")
     
     candidates = [
         meta for name, meta in self.plugins.items()
-        if meta.instance 
-        and name != needed_meta.name
-        and meta.manifest.get('resources', {}).get('requires_gpu', False)
+        if meta.instance is not None and name != needed_meta.name
     ]
-    candidates.sort(key=lambda x: x.last_executed)
+    
+    needs_gpu = bool(
+        needed_meta.resources is not None and needed_meta.resources.requires_gpu
+    )
+    store = getattr(self, 'empirical_store', None)
+    
+    def _eviction_priority(candidate_meta:PluginMeta):
+        """Sort key: (idle, cost). Both keys are NEGATIVE so largest-first
+        sorts to the front via Python's default ascending sort:
+        - idle = -last_executed (older → larger negative → first)
+        - cost = -peak (higher → larger negative → first among same-idle)
+        """
+        idle = -float(candidate_meta.last_executed or 0.0)
+        cost = 0.0
+        if store is not None:
+            inst = self.instances.get(candidate_meta.name)
+            if inst is not None and inst.config_hash:
+                try:
+                    rec = store.get_record(inst.instance_id, inst.config_hash)
+                except Exception:
+                    rec = None
+                if rec is not None:
+                    peak = rec.gpu_memory_mb_peak_max if needs_gpu else rec.memory_mb_peak_max
+                    cost = -float(peak)
+        return (idle, cost)
+    
+    candidates.sort(key=_eviction_priority)
     
     for candidate in candidates:
-        self.logger.info(f"Evicting idle plugin: {candidate.name} (Last used: {candidate.last_executed})")
+        self.logger.info(
+            f"Evicting idle plugin: {candidate.name} (Last used: {candidate.last_executed})"
+        )
         if hasattr(candidate.instance, 'release'):
             candidate.instance.release()
         else:
@@ -896,6 +1103,17 @@ def execute_plugin(
     concurrent multi-instance executes don't collide.
     
     CR-2: raises PluginDisabledError (typed) when the instance is disabled.
+    
+    CR-7: reactive retry on PluginResourceError — evicts other plugins to
+    free resources, then ALWAYS reloads the failing plugin's worker before
+    the retry attempt. Track A (WorkerOOMError — worker died from SIGKILL)
+    needs the reload because there's no live worker to retry on. Track B
+    (plugin-raised PluginResourceError — worker still alive) ALSO reloads
+    because PyTorch's CUDA caching allocator can fragment post-OOM in ways
+    the plugin can't clean up from within its own process; a fresh worker
+    is the only reliable reset. Bounded by `self.max_retries` (default 1).
+    Empirical sample recorded in the finally block — best-effort, doesn't
+    break execute on failure.
     """
     inst = self.instances.get(name_or_id)
     if inst is None:
@@ -903,35 +1121,77 @@ def execute_plugin(
     if not inst.enabled:
         raise PluginDisabledError(inst.instance_id)
     
-    # Per-instance last_executed + canonical PluginMeta sync (scheduler
-    # eviction reads from PluginMeta, so keep it in sync for default
-    # instance at minimum).
-    inst.last_executed = time.time()
+    instance_id = inst.instance_id  # stable across reload (preserved by reload_plugin)
     plugin_meta = self.plugins.get(inst.plugin_name)
-    if plugin_meta is not None:
-        plugin_meta.last_executed = inst.last_executed
-    stats_provider = self._get_global_stats
     
-    # Scheduler allocation uses PluginMeta (plugin-level resource constraints).
-    if plugin_meta is not None and not self.scheduler.allocate(plugin_meta, stats_provider):
-        self.logger.warning(f"Resources busy for {name_or_id}. Triggering eviction protocol.")
-        if self._evict_for_resources(plugin_meta):
-            self.logger.info("Eviction successful. Resources acquired.")
-        else:
-            raise RuntimeError(
-                f"ResourceScheduler blocked execution of {name_or_id} (Eviction failed)"
+    # CR-7 reactive retry loop. Defensive max_retries lookup so test fixtures
+    # bypassing __init__ inherit the default behavior (one retry on resource).
+    max_retries = getattr(self, 'max_retries', 1)
+    last_resource_error: Optional[PluginResourceError] = None
+    for attempt in range(max_retries + 1):
+        if last_resource_error is not None and plugin_meta is not None:
+            self.logger.warning(
+                f"CR-7 reactive retry on {instance_id}: PluginResourceError "
+                f"(attempt {attempt+1}/{max_retries+1}); "
+                f"shortfall={getattr(last_resource_error, 'resource_shortfall', None)}; "
+                f"evicting + reloading + retrying"
             )
-
-    # CR-10: track per-instance to allow concurrent multi-instance executes.
-    self._running_executions.add(inst.instance_id)
-    self.scheduler.on_execution_start(inst.instance_id)
-    try:
-        return inst.proxy.execute(*args, **kwargs)
-    finally:
-        self.scheduler.on_execution_finish(inst.instance_id)
-        self._running_executions.discard(inst.instance_id)
-        # If disable_plugin() deferred on_disable while this job ran, fire now.
-        self._maybe_fire_disable_hook(inst.instance_id)
+            self._reactive_evict_for(
+                plugin_meta,
+                getattr(last_resource_error, 'resource_shortfall', None),
+            )
+            # CR-7: always reload — Track A (worker dead) needs it for any
+            # retry to hit a live worker; Track B (plugin-raised, worker alive)
+            # also needs it because PyTorch's CUDA allocator can fragment
+            # post-OOM. Fresh process is the only reliable allocator reset.
+            # See SG-47 sub-task for Track B plugin-side raise contract.
+            saved_config = dict(inst.config) if inst is not None else None
+            self.logger.info(
+                f"CR-7: reloading worker for {instance_id} after PluginResourceError "
+                f"({type(last_resource_error).__name__})"
+            )
+            self.reload_plugin(instance_id, config=saved_config)
+            inst = self.instances.get(instance_id)
+            if inst is None:
+                self.logger.error(
+                    f"CR-7: reload of {instance_id!r} failed; aborting retry"
+                )
+                raise last_resource_error
+        
+        # Existing pre-execute allocation + eviction flow (LRU + multi-axis under CR-7)
+        inst.last_executed = time.time()
+        if plugin_meta is not None:
+            plugin_meta.last_executed = inst.last_executed
+        stats_provider = self._get_global_stats
+        
+        if plugin_meta is not None and not self.scheduler.allocate(plugin_meta, stats_provider):
+            self.logger.warning(f"Resources busy for {name_or_id}. Triggering eviction protocol.")
+            if self._evict_for_resources(plugin_meta):
+                self.logger.info("Eviction successful. Resources acquired.")
+            else:
+                raise RuntimeError(
+                    f"ResourceScheduler blocked execution of {name_or_id} (Eviction failed)"
+                )
+        
+        start_time = time.time()
+        self._running_executions.add(inst.instance_id)
+        self.scheduler.on_execution_start(inst.instance_id)
+        success = False
+        try:
+            result = inst.proxy.execute(*args, **kwargs)
+            success = True
+            return result
+        except PluginResourceError as e:
+            # Stash for the next iteration's retry-path; raise on the last attempt.
+            if attempt < max_retries:
+                last_resource_error = e
+            else:
+                raise
+        finally:
+            self.scheduler.on_execution_finish(inst.instance_id)
+            self._running_executions.discard(inst.instance_id)
+            self._maybe_fire_disable_hook(inst.instance_id)
+            self._record_sample_safe(inst, start_time, success)
 
 async def execute_plugin_async(
     self,
@@ -943,6 +1203,12 @@ async def execute_plugin_async(
     
     CR-10 + CR-2: same semantics as execute_plugin, async-flavored. Scheduler
     allocation goes through allocate_async for non-blocking polling.
+    
+    CR-7 + SG-33: reactive retry on PluginResourceError — always reloads
+    before retry (Track A + Track B converge on the same reload path; see
+    sync variant docstring for the rationale). Per-instance asyncio.Semaphore
+    enforces the `max_concurrent_requests` cap (None = unbounded). Empirical
+    sample recorded in the finally block.
     """
     inst = self.instances.get(name_or_id)
     if inst is None:
@@ -950,34 +1216,89 @@ async def execute_plugin_async(
     if not inst.enabled:
         raise PluginDisabledError(inst.instance_id)
     
-    inst.last_executed = time.time()
+    instance_id = inst.instance_id
     plugin_meta = self.plugins.get(inst.plugin_name)
-    if plugin_meta is not None:
-        plugin_meta.last_executed = inst.last_executed
     
-    if plugin_meta is not None and not await self.scheduler.allocate_async(plugin_meta, self._get_global_stats_async):
-        self.logger.warning(f"Resources busy for {name_or_id}. Triggering eviction protocol.")
-        if self._evict_for_resources(plugin_meta):
-            self.logger.info("Eviction successful. Resources acquired.")
-        else:
-            raise RuntimeError(
-                f"ResourceScheduler blocked execution of {name_or_id} (Eviction failed)"
+    # SG-33 lazy semaphore (None when no cap configured for this instance).
+    limiter = self._get_concurrent_limiter(instance_id)
+    
+    max_retries = getattr(self, 'max_retries', 1)
+    last_resource_error: Optional[PluginResourceError] = None
+    for attempt in range(max_retries + 1):
+        if last_resource_error is not None and plugin_meta is not None:
+            self.logger.warning(
+                f"CR-7 reactive retry on {instance_id}: PluginResourceError "
+                f"(attempt {attempt+1}/{max_retries+1}); "
+                f"shortfall={getattr(last_resource_error, 'resource_shortfall', None)}; "
+                f"evicting + reloading + retrying"
             )
+            self._reactive_evict_for(
+                plugin_meta,
+                getattr(last_resource_error, 'resource_shortfall', None),
+            )
+            # CR-7: always reload — Track A worker-dead + Track B
+            # allocator-fragmentation both demand a fresh process.
+            saved_config = dict(inst.config) if inst is not None else None
+            self.logger.info(
+                f"CR-7: reloading worker for {instance_id} after PluginResourceError "
+                f"({type(last_resource_error).__name__})"
+            )
+            self.reload_plugin(instance_id, config=saved_config)
+            inst = self.instances.get(instance_id)
+            if inst is None:
+                self.logger.error(
+                    f"CR-7: reload of {instance_id!r} failed; aborting retry"
+                )
+                raise last_resource_error
+            # Reload may have swapped the limiter (different max_concurrent_requests
+            # — though load_plugin's reload-via-unload-then-load path passes None
+            # here today; the lookup is correct in either case).
+            limiter = self._get_concurrent_limiter(instance_id)
+        
+        inst.last_executed = time.time()
+        if plugin_meta is not None:
+            plugin_meta.last_executed = inst.last_executed
+        
+        if plugin_meta is not None and not await self.scheduler.allocate_async(plugin_meta, self._get_global_stats_async):
+            self.logger.warning(f"Resources busy for {name_or_id}. Triggering eviction protocol.")
+            if self._evict_for_resources(plugin_meta):
+                self.logger.info("Eviction successful. Resources acquired.")
+            else:
+                raise RuntimeError(
+                    f"ResourceScheduler blocked execution of {name_or_id} (Eviction failed)"
+                )
+        
+        start_time = time.time()
+        self._running_executions.add(inst.instance_id)
+        self.scheduler.on_execution_start(inst.instance_id)
+        success = False
+        try:
+            if limiter is not None:
+                # SG-33: gate concurrent executes behind the per-instance semaphore.
+                async with limiter:
+                    result = await inst.proxy.execute_async(*args, **kwargs)
+            else:
+                result = await inst.proxy.execute_async(*args, **kwargs)
+            success = True
+            return result
+        except PluginResourceError as e:
+            if attempt < max_retries:
+                last_resource_error = e
+            else:
+                raise
+        finally:
+            self.scheduler.on_execution_finish(inst.instance_id)
+            self._running_executions.discard(inst.instance_id)
+            self._maybe_fire_disable_hook(inst.instance_id)
+            self._record_sample_safe(inst, start_time, success)
 
-    self._running_executions.add(inst.instance_id)
-    self.scheduler.on_execution_start(inst.instance_id)
-    try:
-        return await inst.proxy.execute_async(*args, **kwargs)
-    finally:
-        self.scheduler.on_execution_finish(inst.instance_id)
-        self._running_executions.discard(inst.instance_id)
-        self._maybe_fire_disable_hook(inst.instance_id)
 
-
+PluginManager._record_sample_safe = _record_sample_safe
+PluginManager._get_concurrent_limiter = _get_concurrent_limiter
+PluginManager._reactive_evict_for = _reactive_evict_for
 PluginManager._evict_for_resources = _evict_for_resources
 PluginManager.execute_plugin = execute_plugin
 PluginManager.execute_plugin_async = execute_plugin_async
-
 
 # %% ../../nbs/core/manager.ipynb #pm-enable-disable-code
 def enable_plugin(
