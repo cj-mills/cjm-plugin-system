@@ -380,3 +380,15 @@ def collect_plugin_actions(
             if isinstance(tag, str):
                 actions.add(tag)
     return actions
+
+# %% ../../nbs/core/interface.ipynb #9342f856-f07e-4e18-b016-4f089a50c4c4
+class _CR4MinimalPlugin(PluginInterface):
+    """Concrete plugin satisfying abstracts; relies on CR-4 default cleanup()."""
+    @property
+    def name(self) -> str: return "cr4-minimal"
+    @property
+    def version(self) -> str: return "0.0.0"
+    def initialize(self, config=None): self._cfg = dict(config or {})
+    def execute(self, *args, **kwargs): return None
+    def get_config_schema(self) -> Dict[str, Any]: return {}
+    def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))

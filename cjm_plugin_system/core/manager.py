@@ -1908,6 +1908,28 @@ PluginManager.get_by_domain = get_by_domain
 PluginManager.get_canonical = get_canonical
 PluginManager.get_compatible_for_current_platform = get_compatible_for_current_platform
 
+# %% ../../nbs/core/manager.ipynb #1a4951b5-8dfc-4d74-a880-ec4548ca1387
+class _CR10StubProxy:
+    """Stand-in proxy tracking execute calls + hook fires for verification."""
+    def __init__(self, name="stub"):
+        self._name = name
+        self.execute_calls = []
+        self.on_disable_calls = 0
+        self.on_enable_calls = 0
+    @property
+    def name(self): return self._name
+    @property
+    def version(self): return "0.0.1"
+    def initialize(self, config): self._config = dict(config or {})
+    def execute(self, *args, **kwargs):
+        self.execute_calls.append((args, kwargs))
+        return {"who": self._name, "args": args, "kwargs": kwargs}
+    def get_config_schema(self): return {}
+    def get_current_config(self): return {}
+    def cleanup(self): pass
+    def on_disable(self): self.on_disable_calls += 1
+    def on_enable(self): self.on_enable_calls += 1
+
 # %% ../../nbs/core/manager.ipynb #5c1b890e
 # SG-15: curate __all__ to expose only the class symbols.
 # The patched PluginManager methods (get_plugin_config, reload_plugin, etc.)
