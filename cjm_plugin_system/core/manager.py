@@ -1130,6 +1130,16 @@ def execute_plugin(
     last_resource_error: Optional[PluginResourceError] = None
     for attempt in range(max_retries + 1):
         if last_resource_error is not None and plugin_meta is not None:
+            # CR-6 Stage 4: notify substrate-side retry observer (best-effort).
+            # JobQueue installs `self._on_retry` in `start()`; helper is invoked
+            # with (instance_id, attempt_index, exception) so the queue can fire
+            # RETRY_STARTED bound to the in-flight job + update Job.retry_count.
+            _on_retry = getattr(self, '_on_retry', None)
+            if _on_retry is not None:
+                try:
+                    _on_retry(instance_id, attempt, last_resource_error)
+                except Exception:
+                    pass  # Observer failure must not break the retry path
             self.logger.warning(
                 f"CR-7 reactive retry on {instance_id}: PluginResourceError "
                 f"(attempt {attempt+1}/{max_retries+1}); "
@@ -1226,6 +1236,16 @@ async def execute_plugin_async(
     last_resource_error: Optional[PluginResourceError] = None
     for attempt in range(max_retries + 1):
         if last_resource_error is not None and plugin_meta is not None:
+            # CR-6 Stage 4: notify substrate-side retry observer (best-effort).
+            # JobQueue installs `self._on_retry` in `start()`; helper is invoked
+            # with (instance_id, attempt_index, exception) so the queue can fire
+            # RETRY_STARTED bound to the in-flight job + update Job.retry_count.
+            _on_retry = getattr(self, '_on_retry', None)
+            if _on_retry is not None:
+                try:
+                    _on_retry(instance_id, attempt, last_resource_error)
+                except Exception:
+                    pass  # Observer failure must not break the retry path
             self.logger.warning(
                 f"CR-7 reactive retry on {instance_id}: PluginResourceError "
                 f"(attempt {attempt+1}/{max_retries+1}); "

@@ -1134,30 +1134,118 @@ JobQueue.get_resource_snapshot = get_resource_snapshot
 
 # %% ../../nbs/core/queue.ipynb #lifecycle
 async def start(self) -> None:
-    """Start the queue processor."""
+    """Start the queue processor.
+
+    CR-6 Stage 4: installs the substrate-side retry observer on `_deps`
+    (typically a PluginManager). When CR-7's reactive-retry path fires for
+    a running job, the observer updates `Job.retry_count` and publishes a
+    RETRY_STARTED event tagged with the in-flight job. Previous observer
+    value (if any) is saved + restored in stop() for cooperative coexistence.
+    """
     if self._running_flag:
         return
-    
+
+    # CR-6 Stage 4: install retry observer. Uses setattr defensively so
+    # non-PluginManager deps implementations don't fail — they just accept
+    # an unused attribute. PluginManager's execute paths look up
+    # `getattr(self, '_on_retry', None)` so the hook only fires when both
+    # sides are wired.
+    self._prev_deps_on_retry = getattr(self._deps, '_on_retry', None)
+    try:
+        self._deps._on_retry = self._on_manager_retry
+    except (AttributeError, TypeError):
+        # Some deps implementations may not allow setattr (frozen dataclass,
+        # __slots__, etc.); RETRY_STARTED won't fire for those but the rest
+        # of the queue works.
+        self._prev_deps_on_retry = None
+
     self._running_flag = True
     self._processor_task = asyncio.create_task(self._process_loop())
     self.logger.info("Job queue started")
 
 async def stop(self) -> None:
-    """Stop the queue processor gracefully."""
+    """Stop the queue processor gracefully.
+
+    CR-6 Stage 4: restores the previous `_on_retry` observer on deps to
+    leave the manager in the state we found it (cooperative with other
+    queue instances, tests, etc.).
+    """
     self._running_flag = False
     self._job_available.set()  # Wake up the processor
-    
+
     if self._processor_task:
         try:
             await asyncio.wait_for(self._processor_task, timeout=5.0)
         except asyncio.TimeoutError:
             self._processor_task.cancel()
         self._processor_task = None
-    
+
+    # Restore previous retry observer (if any). Best-effort — same setattr
+    # caveats as start().
+    try:
+        if self._prev_deps_on_retry is None:
+            # Was unset before we touched it; clean up our attribute.
+            if hasattr(self._deps, '_on_retry'):
+                try:
+                    del self._deps._on_retry
+                except (AttributeError, TypeError):
+                    self._deps._on_retry = None
+        else:
+            self._deps._on_retry = self._prev_deps_on_retry
+    except (AttributeError, TypeError):
+        pass
+
     self.logger.info("Job queue stopped")
+
+def _on_manager_retry(
+    self,
+    instance_id: str,  # Plugin instance whose execute is retrying
+    attempt: int,      # 1-based retry number (PluginManager's loop var; first retry is 1)
+    exception: BaseException,  # The PluginResourceError that triggered the retry
+) -> None:
+    """Substrate-side retry observer (CR-6 Stage 4).
+
+    Invoked synchronously by PluginManager's CR-7 retry loop just before
+    each retry attempt. Updates `Job.retry_count` on the matching in-flight
+    job + emits RETRY_STARTED. Best-effort: synchronous callback; emission
+    failure shouldn't propagate back into the retry loop.
+
+    `attempt` semantics: PluginManager's loop iterates
+    `for attempt in range(max_retries + 1)`. The first iteration
+    (`attempt=0`) is the original try and never invokes this callback —
+    it only fires when `last_resource_error is not None`, which means
+    the prior iteration raised. So the value PASSED here is already the
+    1-based retry number: `attempt=1` is the first retry, `attempt=2` is
+    the second retry, etc.
+
+    Match logic: find the running job whose plugin_instance_id matches.
+    Multi-instance / concurrent execution complicates this — the single
+    `self._running` field tracks one job at a time, matching the queue's
+    current single-worker-execution model. Future concurrent-execution
+    support would extend the match strategy.
+    """
+    running = self._running
+    if running is None or running.plugin_instance_id != instance_id:
+        # No matching in-flight job (e.g. queue stopped or different instance).
+        return
+
+    running.retry_count = attempt
+    self._publish_event(JobEvent(
+        type=JobEventType.RETRY_STARTED,
+        job_id=running.id,
+        plugin_instance_id=running.plugin_instance_id,
+        sequence_id=running.sequence_id,
+        sequence_index=running.sequence_index,
+        payload={
+            "attempt": attempt,  # 1-based retry number (1=first retry, etc.)
+            "exception_repr": repr(exception),
+            "exception_category": getattr(exception, 'category', 'resource'),
+        },
+    ))
 
 JobQueue.start = start
 JobQueue.stop = stop
+JobQueue._on_manager_retry = _on_manager_retry
 
 # %% ../../nbs/core/queue.ipynb #internal
 def _move_to_history(self, job: Job) -> None:
@@ -1195,6 +1283,57 @@ def _emit_state_transition(
         sequence_id=job.sequence_id,
         sequence_index=job.sequence_index,
         payload={"from": prev_status.value, "to": job.status.value},
+    ))
+
+def _emit_cancel_phase(
+    self,
+    job: Job,
+    new_phase: CancelPhase,
+) -> None:
+    """Emit a CANCEL_PHASE_CHANGED event (CR-6 Stage 4).
+
+    Updates `job.cancel_phase` to the new value and publishes an event with
+    the prior phase + new phase in the payload. Centralized so every phase
+    transition site in `_execute_with_cancellation` produces identically-shaped
+    events.
+    """
+    prev_phase = job.cancel_phase
+    job.cancel_phase = new_phase
+    self._publish_event(JobEvent(
+        type=JobEventType.CANCEL_PHASE_CHANGED,
+        job_id=job.id,
+        plugin_instance_id=job.plugin_instance_id,
+        sequence_id=job.sequence_id,
+        sequence_index=job.sequence_index,
+        payload={
+            "from": prev_phase.value if prev_phase is not None else None,
+            "to": new_phase.value,
+        },
+    ))
+
+def _emit_block_reason(
+    self,
+    job: Job,
+    new_reason: Optional[str],
+) -> None:
+    """Emit a BLOCK_REASON_CHANGED event (CR-6 Stage 4 — reserved).
+
+    Updates `job.block_reason` and publishes an event with the prior + new
+    reason. Stage 4 ships this helper for future scheduler-integration use;
+    the queue's current scheduling logic doesn't surface block reasons, so
+    the helper is reserved for the eventual scheduler-coordination wiring.
+    """
+    prev_reason = job.block_reason
+    if prev_reason == new_reason:
+        return  # No-op: avoid event spam on repeated no-change calls
+    job.block_reason = new_reason
+    self._publish_event(JobEvent(
+        type=JobEventType.BLOCK_REASON_CHANGED,
+        job_id=job.id,
+        plugin_instance_id=job.plugin_instance_id,
+        sequence_id=job.sequence_id,
+        sequence_index=job.sequence_index,
+        payload={"from": prev_reason, "to": new_reason},
     ))
 
 async def _process_loop(self) -> None:
@@ -1315,9 +1454,13 @@ async def _execute_with_cancellation(
 ) -> Any:
     """Execute job with cancellation monitoring.
 
-    Stage 1 keeps the existing cooperative-then-force semantics; Stage 4
-    wires CANCEL_PHASE_CHANGED events at the cooperative / force / reloading
-    transitions.
+    CR-6 Stage 4 wires CANCEL_PHASE_CHANGED events for the substrate's
+    cooperative → force → reloading → completed state machine.
+
+    Cooperative-success path (plugin acknowledges cancel within timeout):
+        COOPERATIVE → COMPLETED
+    Force-kill path (cooperative timeout):
+        COOPERATIVE → FORCE → RELOADING → COMPLETED
     """
     # Start execution
     exec_task = asyncio.create_task(
@@ -1327,7 +1470,8 @@ async def _execute_with_cancellation(
     # Monitor for cancellation
     while not exec_task.done():
         if job.id in self._cancel_requested:
-            # Try cooperative cancellation first
+            # PHASE: COOPERATIVE — cancel signal being sent, awaiting acknowledgement
+            self._emit_cancel_phase(job, CancelPhase.COOPERATIVE)
             self.logger.info(f"Attempting cooperative cancel for {job.id[:8]}")
 
             if hasattr(plugin, 'cancel_async'):
@@ -1337,14 +1481,22 @@ async def _execute_with_cancellation(
 
             # Wait briefly for cooperative cancellation
             try:
-                return await asyncio.wait_for(exec_task, timeout=self.cancel_timeout)
+                result = await asyncio.wait_for(exec_task, timeout=self.cancel_timeout)
+                # Plugin acknowledged + completed within timeout.
+                self._emit_cancel_phase(job, CancelPhase.COMPLETED)
+                return result
             except asyncio.TimeoutError:
-                # Force termination
+                # PHASE: FORCE — cooperative timeout; force-terminating worker
+                self._emit_cancel_phase(job, CancelPhase.FORCE)
                 self.logger.warning(f"Force terminating plugin for job {job.id[:8]}")
                 exec_task.cancel()
 
-                # Reload the plugin to get a fresh worker
+                # PHASE: RELOADING — worker reload in progress post-force-kill
+                self._emit_cancel_phase(job, CancelPhase.RELOADING)
                 self._deps.reload_plugin(job.plugin_instance_id)
+
+                # PHASE: COMPLETED — cancellation fully resolved
+                self._emit_cancel_phase(job, CancelPhase.COMPLETED)
                 raise asyncio.CancelledError()
 
         await asyncio.sleep(0.1)
@@ -1425,6 +1577,8 @@ async def _poll_progress(
 JobQueue._move_to_history = _move_to_history
 JobQueue._signal_job_completed = _signal_job_completed
 JobQueue._emit_state_transition = _emit_state_transition
+JobQueue._emit_cancel_phase = _emit_cancel_phase
+JobQueue._emit_block_reason = _emit_block_reason
 JobQueue._process_loop = _process_loop
 JobQueue._execute_job = _execute_job
 JobQueue._execute_with_cancellation = _execute_with_cancellation
