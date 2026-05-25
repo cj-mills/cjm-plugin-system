@@ -1470,7 +1470,13 @@ def update_plugin_config(
         validated_config = self._validate_config_against_schema(
             config, config_schema, inst.plugin_name, strict=strict,
         )
-        inst.proxy.initialize(validated_config)
+        # CR-4 completion (2026-05-25): route through the reconfigure delta path
+        # (old -> new) so the worker fires RELOAD_TRIGGER releases for changed
+        # fields, then re-applies config. Fall back to initialize() only if the
+        # worker predates /reconfigure (proxy.reconfigure returns False).
+        old_config = dict(inst.config) if inst.config else {}
+        if not inst.proxy.reconfigure(old_config, validated_config):
+            inst.proxy.initialize(validated_config)
         inst.config = dict(validated_config)
         self.logger.info(f"Updated configuration for instance: {inst.instance_id}")
         # CR-2 + CR-10: persist only for the default instance (persistence is

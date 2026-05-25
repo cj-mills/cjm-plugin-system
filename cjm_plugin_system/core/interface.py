@@ -148,12 +148,10 @@ class PluginInterface(ABC):
     ) -> None:
         """Apply a configuration change without re-running full initialize().
         
-        CR-4: default delegates to `reconfigure_with_triggers`, which walks the
-        plugin's `config_class` dataclass for RELOAD_TRIGGER metadata and fires
-        the corresponding `_release_<trigger>` methods for fields whose values
-        changed. Plugins that don't use the declarative pattern can either
-        override `reconfigure` directly OR rely on the substrate falling back
-        to `initialize(new_config)` (which existing plugins already handle).
+        CR-4 completion (2026-05-25): reconfigure is the substrate's canonical
+        delta path - `PluginManager.update_plugin_config` routes here, NOT through
+        a bare `initialize(new_config)`. It fires `_release_<trigger>` releases for
+        changed RELOAD_TRIGGER fields, then re-applies config (see body below).
         
         Distinction from initialize(): initialize sets up persistent state once
         after construction; reconfigure applies delta updates and is the
@@ -161,6 +159,16 @@ class PluginInterface(ABC):
         update_plugin_config path.
         """
         self.reconfigure_with_triggers(old_config or {}, new_config or {})
+        # CR-4 completion: re-apply config + run config-derived setup. Plugins
+        # that factor config into `_apply_config(config)` get the clean
+        # init-once / reconfigure-delta split; others fall back to a full
+        # `initialize(new_config)` (idempotent; retained manual diff-and-reload
+        # blocks are harmless - `_release_*` guards make the second release a no-op).
+        apply_config = getattr(self, "_apply_config", None)
+        if callable(apply_config):
+            apply_config(new_config or {})
+        else:
+            self.initialize(new_config or {})
 
     def fields_that_changed(
         self,
