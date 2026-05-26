@@ -12,7 +12,7 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (13)
+    ├── core/ (14)
     │   ├── config.ipynb           # Project-level configuration for paths, runtime settings, and environment management
     │   ├── config_store.ipynb     # Persistent storage for per-plugin configuration (with enabled flag)
     │   ├── empirical_store.ipynb  # Persistent store for empirically-observed resource usage per (instance_id, config_hash) pair. CR-7's data foundation — `record_sample` is called from `PluginManager.execute_plugin*` finally blocks; aggregates feed eviction-candidate selection + future UI hints + cost-aware retry decisions.
@@ -25,6 +25,7 @@ pip install cjm_plugin_system
     │   ├── proxy.ipynb            # Bridge between Host application and isolated Worker processes
     │   ├── queue.ipynb            # Resource-aware job queue for sequential plugin execution with cancellation support
     │   ├── scheduling.ipynb       # Resource scheduling policies for plugin execution
+    │   ├── secret_store.ipynb     # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
     │   └── worker.ipynb           # FastAPI server that runs inside isolated plugin environments
     ├── utils/ (2)
     │   ├── hashing.ipynb     # Shared cryptographic hashing primitives for content integrity verification
@@ -32,7 +33,7 @@ pip install cjm_plugin_system
     ├── bootstrap.ipynb  # One-call factory that assembles a PluginManager + JobQueue + plugin bindings — closes the demo-app boilerplate duplication audited across 5 substrate consumers.
     └── cli.ipynb        # CLI tool for declarative plugin management
 
-Total: 17 notebooks across 2 directories
+Total: 18 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -52,44 +53,46 @@ graph LR
     core_proxy[core.proxy<br/>Remote Plugin Proxy]
     core_queue[core.queue<br/>Job Queue]
     core_scheduling[core.scheduling<br/>Scheduling]
+    core_secret_store[core.secret_store<br/>Plugin Secret Store]
     core_worker[core.worker<br/>Universal Worker]
     utils_hashing[utils.hashing<br/>Content Hashing Utilities]
     utils_validation[utils.validation<br/>Configuration Validation]
 
+    bootstrap --> core_manager
     bootstrap --> core_queue
     bootstrap --> core_scheduling
-    bootstrap --> core_manager
-    cli --> core_metadata
-    cli --> core_manifest_format
-    cli --> core_platform
     cli --> core_config
+    cli --> core_platform
+    cli --> core_manifest_format
+    cli --> core_metadata
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_manifest_format
-    core_manager --> core_metadata
-    core_manager --> core_empirical_store
-    core_manager --> core_config_store
     core_manager --> core_errors
-    core_manager --> core_scheduling
-    core_manager --> core_proxy
+    core_manager --> core_empirical_store
+    core_manager --> core_manifest_format
+    core_manager --> core_config_store
     core_manager --> core_config
+    core_manager --> core_metadata
+    core_manager --> core_scheduling
+    core_manager --> core_secret_store
     core_manager --> core_interface
+    core_manager --> core_proxy
     core_manager --> utils_validation
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
     core_proxy --> core_errors
-    core_proxy --> core_platform
     core_proxy --> core_config
+    core_proxy --> core_platform
     core_proxy --> core_interface
     core_queue --> core_errors
     core_scheduling --> core_metadata
-    core_worker --> core_errors
     core_worker --> core_platform
+    core_worker --> core_errors
     utils_validation --> core_errors
 ```
 
-*31 cross-module dependencies detected*
+*32 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -1504,6 +1507,8 @@ def hash_dict_canonical(
 from cjm_plugin_system.core.interface import (
     RELOAD_TRIGGER,
     FileBackedDTO,
+    ConfigOption,
+    FieldOptions,
     PluginInterface,
     plugin_action,
     collect_plugin_actions
@@ -1550,6 +1555,32 @@ class FileBackedDTO(Protocol):
     
     def to_temp_file(self) -> str: # Absolute path to the temporary file
         "Save the data to a temporary file and return the absolute path."
+```
+
+``` python
+@dataclass
+class ConfigOption:
+    "CR-11: one live option for a dynamic config field, with optional metadata."
+    
+    value: Any  # option value (e.g. "gemini-2.5-flash")
+    label: str  # display label (e.g. "Gemini 2.5 Flash")
+    metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)  # token limits, descriptions, ...
+```
+
+``` python
+@dataclass
+class FieldOptions:
+    """
+    CR-11: the live option domain for one dynamic config field.
+    
+    Kept SEPARATE from the static config_schema (which CR-8 hashes for drift
+    detection). The plugin-config UI merges these live options on top of the
+    static schema; folding them into the schema would make every API plugin
+    perpetually 'drift'.
+    """
+    
+    options: List[ConfigOption]  # current valid options
+    constraints: Dict[str, Any] = dataclasses.field(default_factory=dict)  # derived field-constraint overrides
 ```
 
 ``` python
@@ -1627,8 +1658,40 @@ which is a no-op unless the plugin opts in via RELOAD_TRIGGER metadata."
             """Return the current configuration state as a dictionary."""
             ...
     
-        def cleanup(self) -> None
+        def get_config_options(self) -> Dict[str, "FieldOptions"]
         "Return the current configuration state as a dictionary."
+    
+    def get_config_options(self) -> Dict[str, "FieldOptions"]:
+            """CR-11: live option domains for dynamic config fields, keyed by field name.
+    
+            Optional. Default: {} (fully static plugins). For fields whose valid
+            domain is determined at runtime (e.g. an API model list), return a
+            `FieldOptions` carrying current `ConfigOption` values + per-option
+            metadata (token limits, etc.) + optional derived constraints. Runs in
+            the worker subprocess (has the plugin's deps + credentials).
+    
+            Kept SEPARATE from get_config_schema(): the schema is static + hashed for
+            CR-8 drift detection; these options are the live, un-hashed companion the
+            plugin-config UI merges on top. A fetch failure should raise a typed CR-5
+            error; the substrate's PluginManager.get_config_options accessor degrades
+            to {} so the UI can fall back to the static schema.
+            """
+            return {}
+    
+        def cleanup(self) -> None
+        "CR-11: live option domains for dynamic config fields, keyed by field name.
+
+Optional. Default: {} (fully static plugins). For fields whose valid
+domain is determined at runtime (e.g. an API model list), return a
+`FieldOptions` carrying current `ConfigOption` values + per-option
+metadata (token limits, etc.) + optional derived constraints. Runs in
+the worker subprocess (has the plugin's deps + credentials).
+
+Kept SEPARATE from get_config_schema(): the schema is static + hashed for
+CR-8 drift detection; these options are the live, un-hashed companion the
+plugin-config UI merges on top. A fetch failure should raise a typed CR-5
+error; the substrate's PluginManager.get_config_options accessor degrades
+to {} so the UI can fall back to the static schema."
     
     def cleanup(self) -> None:
             """Clean up resources when plugin is unloaded.
@@ -1683,12 +1746,10 @@ the substrate may pre-warm at load time AND on operator request."
         ) -> None
         "Apply a configuration change without re-running full initialize().
 
-CR-4: default delegates to `reconfigure_with_triggers`, which walks the
-plugin's `config_class` dataclass for RELOAD_TRIGGER metadata and fires
-the corresponding `_release_<trigger>` methods for fields whose values
-changed. Plugins that don't use the declarative pattern can either
-override `reconfigure` directly OR rely on the substrate falling back
-to `initialize(new_config)` (which existing plugins already handle).
+CR-4 completion (2026-05-25): reconfigure is the substrate's canonical
+delta path - `PluginManager.update_plugin_config` routes here, NOT through
+a bare `initialize(new_config)`. It fires `_release_<trigger>` releases for
+changed RELOAD_TRIGGER fields, then re-applies config (see body below).
 
 Distinction from initialize(): initialize sets up persistent state once
 after construction; reconfigure applies delta updates and is the
@@ -1861,6 +1922,29 @@ one strategy over the other). Default: no-op; plugins opt in by overriding."
             message: str = "" # Descriptive status message
         ) -> None
         "Report execution progress. Call during execute() to update status."
+```
+
+``` python
+class _CR4MinimalPlugin(PluginInterface):
+    "Concrete plugin satisfying abstracts; relies on CR-4 default cleanup()."
+    
+    def name(self) -> str: return "cr4-minimal"
+        @property
+        def version(self) -> str: return "0.0.0"
+    
+    def version(self) -> str: return "0.0.0"
+        def initialize(self, config=None): self._cfg = dict(config or {})
+    
+    def initialize(self, config=None): self._cfg = dict(config or {})
+        def execute(self, *args, **kwargs): return None
+    
+    def execute(self, *args, **kwargs): return None
+        def get_config_schema(self) -> Dict[str, Any]: return {}
+    
+    def get_config_schema(self) -> Dict[str, Any]: return {}
+        def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
+    
+    def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
 ```
 
 #### Variables
@@ -2499,6 +2583,25 @@ def get_plugin_config_schema(
 ```
 
 ``` python
+def get_config_options(
+    self,
+    name_or_id: str # Plugin name (default instance) or instance_id (multi-instance)
+) -> Dict[str, Any]: # CR-11: live config option domains, or {} if unavailable
+    """
+    Get a plugin instance's runtime config option providers (CR-11).
+    
+    Forwards to the worker's get_config_options() - live enum domains +
+    per-option metadata for dynamic config fields (e.g. an API model list).
+    Kept separate from get_plugin_config_schema (static, hashed for CR-8 drift);
+    these options are the live companion the plugin-config UI merges on top.
+    
+    Degrades to {} if the instance is missing or the worker call fails - the UI
+    then falls back to the static schema. Typed-error surfacing for the UI
+    consumer is deferred to the plugin-config UI library (Path C Step 4).
+    """
+```
+
+``` python
 def get_all_plugin_configs(self) -> Dict[str, Dict[str, Any]]: # Plugin name -> config mapping
     """Get current configuration for all loaded plugins."""
     return {
@@ -2728,6 +2831,7 @@ class PluginManager:
         scheduler:Optional[ResourceScheduler]=None, # Resource allocation policy
         config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
         empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
+        secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
         max_retries:int=1 # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
     )
     "Manages plugin discovery, loading, and lifecycle via process isolation."
@@ -2739,6 +2843,7 @@ class PluginManager:
             scheduler:Optional[ResourceScheduler]=None, # Resource allocation policy
             config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
             empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
+            secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
             max_retries:int=1 # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
         )
         "Initialize the plugin manager."
@@ -2881,6 +2986,54 @@ class PluginBinding:
         default_config: Optional[Dict[str, Any]] = None  # Default config used by binding.load()
     ) -> PluginBinding:  # Bound view ready for instance-style use
         "Resource telemetry for the bound plugin's worker process."
+```
+
+``` python
+class _CR10StubProxy:
+    def __init__(self, name="stub"):
+        self._name = name
+        self.execute_calls = []
+        self.on_disable_calls = 0
+        self.on_enable_calls = 0
+    @property
+    def name(self): return self._name
+    "Stand-in proxy tracking execute calls + hook fires for verification."
+    
+    def __init__(self, name="stub"):
+            self._name = name
+            self.execute_calls = []
+            self.on_disable_calls = 0
+            self.on_enable_calls = 0
+        @property
+        def name(self): return self._name
+    
+    def name(self): return self._name
+        @property
+        def version(self): return "0.0.1"
+    
+    def version(self): return "0.0.1"
+        def initialize(self, config): self._config = dict(config or {})
+    
+    def initialize(self, config): self._config = dict(config or {})
+        def execute(self, *args, **kwargs)
+    
+    def execute(self, *args, **kwargs):
+            self.execute_calls.append((args, kwargs))
+            return {"who": self._name, "args": args, "kwargs": kwargs}
+    
+    def get_config_schema(self): return {}
+        def get_current_config(self): return {}
+    
+    def get_current_config(self): return {}
+        def cleanup(self): pass
+    
+    def cleanup(self): pass
+        def on_disable(self): self.on_disable_calls += 1
+    
+    def on_disable(self): self.on_disable_calls += 1
+        def on_enable(self): self.on_enable_calls += 1
+    
+    def on_enable(self): self.on_enable_calls += 1
 ```
 
 ### Manifest Format (v2.0) (`manifest_format.ipynb`)
@@ -3937,6 +4090,20 @@ from a real plugin failure (500 → RuntimeError as before)."
             """Get the plugin's current configuration."""
             with httpx.Client() as client
         "Get the plugin's current configuration."
+    
+    def config_options(self) -> Dict[str, Any]: # CR-11: live config option domains
+            """Get the plugin's runtime config option providers (CR-11).
+            
+            Returns the worker's get_config_options() output (FieldOptions per
+            dynamic field, JSON-serialized to dicts). Empty dict when the plugin
+            exposes no dynamic options.
+            """
+            with httpx.Client() as client
+        "Get the plugin's runtime config option providers (CR-11).
+
+Returns the worker's get_config_options() output (FieldOptions per
+dynamic field, JSON-serialized to dicts). Empty dict when the plugin
+exposes no dynamic options."
     
     def cleanup(self) -> None:
             """Clean up plugin resources and terminate worker process."""
@@ -5025,6 +5192,122 @@ class QueueScheduler:
     
     def get_active_plugins(self) -> Set[str]:  # Set of currently executing plugin names
         "Get the set of plugins with active executions."
+```
+
+### Plugin Secret Store (`secret_store.ipynb`)
+
+> CR-12: project-local secret storage for API-based plugins
+> (file-backed, 0600)
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.secret_store import (
+    SecretStore,
+    LocalSecretStore
+)
+```
+
+#### Functions
+
+``` python
+def _default_secrets_dir() -> Path:
+    """Default secrets directory: `~/.cjm/secrets` (bootstrap fallback)."""
+    return Path.home() / ".cjm" / "secrets"
+
+
+class LocalSecretStore
+    "Default secrets directory: `~/.cjm/secrets` (bootstrap fallback)."
+```
+
+#### Classes
+
+``` python
+@runtime_checkable
+class SecretStore(Protocol):
+    "Protocol for resolving per-plugin secrets (API keys, tokens)."
+    
+    def get_secret(self, plugin_name: str, key: str, *, scope: Optional[str] = None) -> Optional[str]:
+            """Return the secret value for (plugin, key) under `scope`, or None."""
+            ...
+    
+        def set_secret(self, plugin_name: str, key: str, value: str, *, scope: Optional[str] = None) -> None
+        "Return the secret value for (plugin, key) under `scope`, or None."
+    
+    def set_secret(self, plugin_name: str, key: str, value: str, *, scope: Optional[str] = None) -> None:
+            """Persist a secret value for (plugin, key) under `scope`."""
+            ...
+    
+        def delete_secret(self, plugin_name: str, key: str, *, scope: Optional[str] = None) -> bool
+        "Persist a secret value for (plugin, key) under `scope`."
+    
+    def delete_secret(self, plugin_name: str, key: str, *, scope: Optional[str] = None) -> bool:
+            """Remove (plugin, key) under `scope`. Returns True if a secret was deleted."""
+            ...
+    
+        def list_keys(self, plugin_name: str, *, scope: Optional[str] = None) -> List[str]
+        "Remove (plugin, key) under `scope`. Returns True if a secret was deleted."
+    
+    def list_keys(self, plugin_name: str, *, scope: Optional[str] = None) -> List[str]
+        "Return the NAMES of secrets stored for a plugin under `scope` — never values."
+```
+
+``` python
+class LocalSecretStore:
+    def __init__(
+        self,
+        secrets_dir: Optional[Path] = None  # Directory for secrets.json; None -> ~/.cjm/secrets
+    )
+    "File-backed default `SecretStore` (0600 JSON under `secrets_dir`)."
+    
+    def __init__(
+            self,
+            secrets_dir: Optional[Path] = None  # Directory for secrets.json; None -> ~/.cjm/secrets
+        )
+        "Initialize the store. `secrets_dir=None` uses `~/.cjm/secrets`."
+    
+    def get_secret(
+            self,
+            plugin_name: str,  # Plugin the secret belongs to
+            key: str,          # Secret key (typically the env-var name, e.g. GEMINI_API_KEY)
+            *,
+            scope: Optional[str] = None  # Reserved multi-user seam; ignored by the local store
+        ) -> Optional[str]:  # The secret value, or None if absent
+        "Resolve a secret value."
+    
+    def set_secret(
+            self,
+            plugin_name: str,  # Plugin the secret belongs to
+            key: str,          # Secret key
+            value: str,        # Secret value (stored plaintext at 0600)
+            *,
+            scope: Optional[str] = None  # Reserved multi-user seam
+        ) -> None
+        "Persist a secret value."
+    
+    def delete_secret(
+            self,
+            plugin_name: str,  # Plugin the secret belongs to
+            key: str,          # Secret key
+            *,
+            scope: Optional[str] = None  # Reserved multi-user seam
+        ) -> bool:  # True if a secret was removed
+        "Remove a secret, pruning now-empty plugin/scope containers."
+    
+    def list_keys(
+            self,
+            plugin_name: str,  # Plugin to list secrets for
+            *,
+            scope: Optional[str] = None  # Reserved multi-user seam
+        ) -> List[str]:  # Secret key NAMES (never values)
+        "Return the names of secrets stored for a plugin (never the values)."
+```
+
+#### Variables
+
+``` python
+_SECRETS_FILENAME = 'secrets.json'
+_DEFAULT_SCOPE = '__default__'
 ```
 
 ### Configuration Validation (`validation.ipynb`)
