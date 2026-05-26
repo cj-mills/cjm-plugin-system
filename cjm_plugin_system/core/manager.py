@@ -27,6 +27,7 @@ from .config import get_config
 from cjm_plugin_system.core.config_store import (
     LocalPluginConfigStore, PluginConfigRecord, PluginConfigStore,
 )
+from .secret_store import LocalSecretStore, SecretStore
 from cjm_plugin_system.core.empirical_store import (
     EmpiricalResourceRecord, EmpiricalResourceStore, LocalEmpiricalResourceStore,
     ResourceSample, compute_config_hash,
@@ -60,6 +61,7 @@ class PluginManager:
         scheduler:Optional[ResourceScheduler]=None, # Resource allocation policy
         config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
         empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
+        secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
         max_retries:int=1 # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
     ):
         """Initialize the plugin manager."""
@@ -94,6 +96,16 @@ class PluginManager:
         # the on_disable hook until the job finishes (audit semantics).
         self._running_executions: Set[str] = set()
         self._pending_disable_hooks: Set[str] = set()
+        
+        # CR-12: secret storage (API keys etc.). Project-local by default:
+        # <cfg.data_dir>/secrets (falls back to ~/.cjm/secrets). Secret values are
+        # NEVER persisted via config_store, echoed in config_schema, or logged.
+        # Hosts pass an explicit SecretStore for keyring / multi-user backends.
+        try:
+            _secrets_dir = get_config().data_dir / "secrets"
+        except Exception:
+            _secrets_dir = None
+        self.secret_store: SecretStore = secret_store or LocalSecretStore(_secrets_dir)
         
         # CR-7: empirical resource tracking. The store is lazy-init'd only when
         # cfg.substrate.empirical_tracking is True (default). Hosts that want
