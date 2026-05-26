@@ -91,7 +91,15 @@ class PluginManager:
         # config_store=None → lazy LocalPluginConfigStore (~/.cjm/plugin_configs.db)
         # per OQ-4 resolution. Hosts that want a different backend (workflow-
         # scoped, in-memory for tests) pass an explicit PluginConfigStore.
-        self.config_store: PluginConfigStore = config_store or LocalPluginConfigStore()
+        # Resolve the project-local data dir once for all substrate stores
+        # (cfg.data_dir; stores fall back to ~/.cjm when this is None).
+        try:
+            _data_dir = get_config().data_dir
+        except Exception:
+            _data_dir = None
+        self.config_store: PluginConfigStore = config_store or LocalPluginConfigStore(
+            (_data_dir / "plugin_configs.db") if _data_dir is not None else None
+        )
         # Track plugins with in-flight execute calls so disable_plugin can defer
         # the on_disable hook until the job finishes (audit semantics).
         self._running_executions: Set[str] = set()
@@ -101,11 +109,9 @@ class PluginManager:
         # <cfg.data_dir>/secrets (falls back to ~/.cjm/secrets). Secret values are
         # NEVER persisted via config_store, echoed in config_schema, or logged.
         # Hosts pass an explicit SecretStore for keyring / multi-user backends.
-        try:
-            _secrets_dir = get_config().data_dir / "secrets"
-        except Exception:
-            _secrets_dir = None
-        self.secret_store: SecretStore = secret_store or LocalSecretStore(_secrets_dir)
+        self.secret_store: SecretStore = secret_store or LocalSecretStore(
+            (_data_dir / "secrets") if _data_dir is not None else None
+        )
         
         # CR-7: empirical resource tracking. The store is lazy-init'd only when
         # cfg.substrate.empirical_tracking is True (default). Hosts that want
@@ -118,13 +124,17 @@ class PluginManager:
             try:
                 _cfg = get_config()
                 if getattr(_cfg.substrate, 'empirical_tracking', True):
-                    self.empirical_store = LocalEmpiricalResourceStore()
+                    self.empirical_store = LocalEmpiricalResourceStore(
+                        (_data_dir / "empirical_resources.db") if _data_dir is not None else None
+                    )
                 else:
                     self.empirical_store = None
             except Exception:
                 # Backward-compat: pre-CR-7 CJMConfig without substrate sub-config.
                 # Default-on behavior; lazy-create the store.
-                self.empirical_store = LocalEmpiricalResourceStore()
+                self.empirical_store = LocalEmpiricalResourceStore(
+                    (_data_dir / "empirical_resources.db") if _data_dir is not None else None
+                )
         
         # CR-7: bounded reactive retries on PluginResourceError (Track A + B).
         self.max_retries: int = max_retries
