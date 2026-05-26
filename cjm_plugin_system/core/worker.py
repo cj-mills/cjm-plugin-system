@@ -191,6 +191,15 @@ def create_app(
             return json.loads(json.dumps(cfg, cls=EnhancedJSONEncoder))
         return {}
 
+    @app.get("/config_options")
+    def get_config_options() -> Dict[str, Any]:
+        """CR-11: return live config option domains (dynamic schema enrichment)."""
+        if hasattr(plugin_instance, 'get_config_options'):
+            opts = plugin_instance.get_config_options()
+            # FieldOptions/ConfigOption dataclasses -> JSON-serializable dicts
+            return json.loads(json.dumps(opts, cls=EnhancedJSONEncoder))
+        return {}
+
     @app.post("/execute")
     async def execute(request: Request) -> Any:
         """Execute plugin's main functionality.

@@ -222,6 +222,16 @@ class RemotePluginProxy(PluginInterface):
         """Get the plugin's current configuration."""
         with httpx.Client() as client:
             return client.get(f"{self.base_url}/config").json()
+    
+    def config_options(self) -> Dict[str, Any]: # CR-11: live config option domains
+        """Get the plugin's runtime config option providers (CR-11).
+        
+        Returns the worker's get_config_options() output (FieldOptions per
+        dynamic field, JSON-serialized to dicts). Empty dict when the plugin
+        exposes no dynamic options.
+        """
+        with httpx.Client() as client:
+            return client.get(f"{self.base_url}/config_options").json()
 
 
     def cleanup(self) -> None:

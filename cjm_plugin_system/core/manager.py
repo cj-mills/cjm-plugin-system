@@ -9,7 +9,7 @@ __all__ = ['PluginManager', 'register_system_monitor', 'discover_manifests', 'ge
            'get_plugins_by_category', 'get_discovered_categories', 'get_loaded_categories', 'get_plugin_meta',
            'get_discovered_meta', 'get_instance', 'list_instances', 'load_plugin', 'load_all', 'unload_plugin',
            'unload_all', 'get_plugin', 'list_plugins', 'execute_plugin', 'execute_plugin_async', 'enable_plugin',
-           'disable_plugin', 'get_plugin_logs', 'get_plugin_config', 'get_plugin_config_schema',
+           'disable_plugin', 'get_plugin_logs', 'get_plugin_config', 'get_plugin_config_schema', 'get_config_options',
            'get_all_plugin_configs', 'update_plugin_config', 'reload_plugin', 'get_plugin_stats',
            'execute_plugin_stream', 'load_plugin_async', 'unload_plugin_async', 'load_plugins_concurrent',
            'unload_plugins_concurrent', 'PluginBinding', 'bind', 'get_by_role', 'get_by_domain', 'get_canonical',
@@ -1435,6 +1435,31 @@ def get_plugin_config_schema(
         return plugin.get_config_schema()
     return None
 
+
+def get_config_options(
+    self,
+    name_or_id: str # Plugin name (default instance) or instance_id (multi-instance)
+) -> Dict[str, Any]: # CR-11: live config option domains, or {} if unavailable
+    """Get a plugin instance's runtime config option providers (CR-11).
+    
+    Forwards to the worker's get_config_options() - live enum domains +
+    per-option metadata for dynamic config fields (e.g. an API model list).
+    Kept separate from get_plugin_config_schema (static, hashed for CR-8 drift);
+    these options are the live companion the plugin-config UI merges on top.
+    
+    Degrades to {} if the instance is missing or the worker call fails - the UI
+    then falls back to the static schema. Typed-error surfacing for the UI
+    consumer is deferred to the plugin-config UI library (Path C Step 4).
+    """
+    plugin = self.get_plugin(name_or_id)
+    if plugin is None:
+        return {}
+    try:
+        return plugin.config_options()
+    except Exception as e:
+        self.logger.warning(f"get_config_options({name_or_id!r}) failed: {e}")
+        return {}
+
 def get_all_plugin_configs(self) -> Dict[str, Dict[str, Any]]: # Plugin name -> config mapping
     """Get current configuration for all loaded plugins."""
     return {
@@ -1539,6 +1564,7 @@ def get_plugin_stats(
 # Add methods to PluginManager
 PluginManager.get_plugin_config = get_plugin_config
 PluginManager.get_plugin_config_schema = get_plugin_config_schema
+PluginManager.get_config_options = get_config_options
 PluginManager.get_all_plugin_configs = get_all_plugin_configs
 PluginManager.update_plugin_config = update_plugin_config
 PluginManager.reload_plugin = reload_plugin
