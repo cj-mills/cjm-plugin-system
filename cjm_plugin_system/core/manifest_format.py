@@ -12,7 +12,7 @@ __all__ = ['CURRENT_FORMAT_VERSION', 'InstallSection', 'CodeSection', 'DriftTrac
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .metadata import PluginTaxonomy, ResourceRequirements
 from ..utils.hashing import hash_bytes
@@ -62,6 +62,7 @@ class CodeSection:
     resources: Optional[ResourceRequirements] = None  # Phase 5a hard-facts
     config_schema: Optional[Dict[str, Any]] = None    # JSON Schema for plugin config
     regenerated_at: Optional[str] = None              # ISO-8601 UTC of last regen
+    worker_env: Optional[List[Dict[str, Any]]] = None # CR-12 spawn-env contract: asdict(EnvVarSpec) list
 
 # %% ../../nbs/core/manifest_format.ipynb #drift-tracking
 @dataclass
@@ -157,6 +158,7 @@ def _from_v2_dict(
         resources=_parse_resources_dict(code_d.get("resources")),
         config_schema=code_d.get("config_schema"),
         regenerated_at=code_d.get("regenerated_at"),
+        worker_env=code_d.get("worker_env"),
     )
     drift = DriftTracking(
         config_schema_hash=drift_d.get("config_schema_hash"),
@@ -203,6 +205,7 @@ def _from_v1_flat_dict(
         resources=_parse_resources_dict(data.get("resources")),
         config_schema=data.get("config_schema"),
         regenerated_at=None,
+        worker_env=data.get("worker_env"),
     )
     return ManifestV2(
         install=install,
@@ -277,6 +280,8 @@ def _code_section_to_dict(c: CodeSection) -> Dict[str, Any]:
         d["resources"] = _resources_to_dict(c.resources)
     if c.config_schema is not None:
         d["config_schema"] = c.config_schema
+    if c.worker_env is not None:
+        d["worker_env"] = c.worker_env
     if c.regenerated_at is not None:
         d["regenerated_at"] = c.regenerated_at
     return d

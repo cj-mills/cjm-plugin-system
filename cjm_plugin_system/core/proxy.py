@@ -48,10 +48,18 @@ class RemotePluginProxy(PluginInterface):
     
     def __init__(
         self,
-        manifest:Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+        manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
+        extra_env:Optional[Dict[str, str]]=None # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
     ):
         """Initialize proxy and start the worker process."""
         self.manifest = manifest
+        # CR-12: substrate-composed worker-env overlay — resolved secrets (from
+        # the SecretStore) + any visible env overrides. Merged into the worker
+        # subprocess env at spawn, AFTER the manifest's static env_vars but
+        # BEFORE the CJM paths (so an override/secret beats a manifest default,
+        # while substrate-owned CJM paths always win). These are fixed at spawn;
+        # changing any of them requires a worker RESPAWN (reload_plugin).
+        self.extra_env = dict(extra_env or {})
         self.process: Optional[subprocess.Popen] = None
         # SG-4: bind the listening socket in the parent and (on Unix) pass the
         # FD to the worker via subprocess inheritance, closing the
@@ -124,6 +132,9 @@ class RemotePluginProxy(PluginInterface):
         # Merge environment variables from manifest
         env = dict(os.environ)
         env.update(self.manifest.get('env_vars', {}))
+        # CR-12: apply the substrate-composed worker-env overlay (resolved
+        # secrets + visible overrides) on top of the manifest defaults.
+        env.update(self.extra_env)
         
         # Inject CJM paths for plugin runtime
         env["CJM_DATA_DIR"] = str(cfg.plugin_data_dir)

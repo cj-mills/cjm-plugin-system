@@ -6,7 +6,7 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcli.html.md"""
 
 # %% auto #0
 __all__ = ['app', 'main', 'setup_runtime', 'run_cmd', 'regenerate_manifest', 'install_all', 'setup_host', 'estimate_size',
-           'list_plugins', 'remove_plugin', 'validate_file']
+           'list_plugins', 'remove_plugin', 'validate_file', 'set_secret', 'list_secrets']
 
 # %% ../nbs/cli.ipynb #8385ac8c
 import json
@@ -306,6 +306,25 @@ if "config_schema" not in meta:
         # Config schema extraction is optional - continue without it
         pass
 
+# CR-12: introspect the plugin's WORKER_ENV spawn-env contract. Read off the
+# CLASS (no instantiation) so plugins that can't construct without resources
+# still surface their env contract. EnvVarSpec is a flat dataclass; asdict gives
+# JSON-serializable entries the substrate stores in the manifest code section.
+try:
+    import dataclasses as _dc
+    _pm = meta.get("module", "{module_name}.plugin")
+    _pc = meta.get("class", "")
+    if _pm and _pc:
+        _wmod = importlib.import_module(_pm)
+        _wcls = getattr(_wmod, _pc)
+        _worker_env = getattr(_wcls, "WORKER_ENV", None) or []
+        if _worker_env:
+            meta["worker_env"] = [
+                _dc.asdict(s) if _dc.is_dataclass(s) else dict(s) for s in _worker_env
+            ]
+except Exception:
+    pass
+
 print(json.dumps(meta, indent=2))
 '''
     
@@ -403,6 +422,8 @@ print(json.dumps(meta, indent=2))
                 )
 
             config_schema = meta_json.get("config_schema")
+            # CR-12: worker-env contract (list of asdict(EnvVarSpec)); None for plugins without one.
+            intro_worker_env = meta_json.get("worker_env")
 
             manifest = ManifestV2(
                 install=InstallSection(
@@ -428,6 +449,7 @@ print(json.dumps(meta, indent=2))
                     resources=res_obj,
                     config_schema=config_schema,
                     regenerated_at=now_iso,
+                    worker_env=intro_worker_env,
                 ),
                 drift_tracking=DriftTracking(
                     config_schema_hash=compute_config_schema_hash(config_schema),
@@ -1594,3 +1616,57 @@ def validate_file(
         raise typer.Exit(code=1)
     
     typer.echo(f"✓ {path} ({kind}): valid")
+
+# %% ../nbs/cli.ipynb #74a2ec87
+# ----------------------------------------------------------------
+# Secret management (CR-12)
+# ----------------------------------------------------------------
+
+def _open_secret_store():
+    """Open the project-local LocalSecretStore at <data_dir>/secrets (CR-12)."""
+    from cjm_plugin_system.core.secret_store import LocalSecretStore
+    cfg = get_config()
+    data_dir = getattr(cfg, "data_dir", None)
+    secrets_dir = (data_dir / "secrets") if data_dir is not None else None
+    return LocalSecretStore(secrets_dir)
+
+
+@app.command("set-secret")
+def set_secret(
+    plugin_name: str = typer.Argument(..., help="Plugin name (manifest 'name', e.g. cjm-transcription-plugin-gemini)"),
+    key: str = typer.Argument(..., help="Secret key = the env-var name the worker reads (e.g. GEMINI_API_KEY)"),
+    value: Optional[str] = typer.Option(None, "--value", help="Secret value (omit to be prompted with hidden input)"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Reserved multi-user scope (default: single-user)"),
+):
+    """Store a plugin secret in the project-local SecretStore (CR-12).
+
+    The value is written to <data_dir>/secrets/secrets.json (0600) — never to
+    plugins.yaml, manifests, or the config store. Plugins read it from their
+    worker env at spawn. Omit --value to be prompted (hidden input) so the
+    secret stays out of shell history. After setting, reload the plugin (or
+    restart the host) so its worker respawns with the new env — the GUI /
+    PluginManager.set_plugin_secret do this automatically.
+    """
+    store = _open_secret_store()
+    if value is None:
+        value = typer.prompt(f"Value for {plugin_name}/{key}", hide_input=True)
+    store.set_secret(plugin_name, key, value, scope=scope)
+    typer.echo(f"Stored secret {key!r} for plugin {plugin_name!r} at {store.path} (0600).")
+    typer.echo("Reload the plugin (or restart the host) so its worker respawns with the new env.")
+
+
+@app.command("list-secrets")
+def list_secrets(
+    plugin_name: str = typer.Argument(..., help="Plugin name to list secret KEY NAMES for"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Reserved multi-user scope"),
+):
+    """List the secret KEY NAMES stored for a plugin — never the values (CR-12)."""
+    store = _open_secret_store()
+    keys = store.list_keys(plugin_name, scope=scope)
+    if not keys:
+        typer.echo(f"No secrets stored for {plugin_name!r}.")
+        return
+    typer.echo(f"Secrets for {plugin_name!r} ({len(keys)}):")
+    for k in keys:
+        typer.echo(f"  - {k}")
+

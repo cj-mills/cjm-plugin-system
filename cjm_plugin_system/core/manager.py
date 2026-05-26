@@ -7,13 +7,13 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/manager.html.md"""
 # %% auto #0
 __all__ = ['PluginManager', 'register_system_monitor', 'discover_manifests', 'get_discovered_by_category',
            'get_plugins_by_category', 'get_discovered_categories', 'get_loaded_categories', 'get_plugin_meta',
-           'get_discovered_meta', 'get_instance', 'list_instances', 'load_plugin', 'load_all', 'unload_plugin',
-           'unload_all', 'get_plugin', 'list_plugins', 'execute_plugin', 'execute_plugin_async', 'enable_plugin',
-           'disable_plugin', 'get_plugin_logs', 'get_plugin_config', 'get_plugin_config_schema', 'get_config_options',
-           'get_all_plugin_configs', 'update_plugin_config', 'reload_plugin', 'get_plugin_stats',
-           'execute_plugin_stream', 'load_plugin_async', 'unload_plugin_async', 'load_plugins_concurrent',
-           'unload_plugins_concurrent', 'PluginBinding', 'bind', 'get_by_role', 'get_by_domain', 'get_canonical',
-           'get_compatible_for_current_platform']
+           'get_discovered_meta', 'get_instance', 'list_instances', 'get_worker_env_status', 'missing_required_env',
+           'set_plugin_secret', 'load_plugin', 'load_all', 'unload_plugin', 'unload_all', 'get_plugin', 'list_plugins',
+           'execute_plugin', 'execute_plugin_async', 'enable_plugin', 'disable_plugin', 'get_plugin_logs',
+           'get_plugin_config', 'get_plugin_config_schema', 'get_config_options', 'get_all_plugin_configs',
+           'update_plugin_config', 'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream', 'load_plugin_async',
+           'unload_plugin_async', 'load_plugins_concurrent', 'unload_plugins_concurrent', 'PluginBinding', 'bind',
+           'get_by_role', 'get_by_domain', 'get_canonical', 'get_compatible_for_current_platform']
 
 # %% ../../nbs/core/manager.ipynb #31a5a9f1
 import asyncio
@@ -684,6 +684,161 @@ PluginManager.get_instance = get_instance
 PluginManager.list_instances = list_instances
 
 
+# %% ../../nbs/core/manager.ipynb #2ad990f8
+# ------------------------------------------------------------------
+# CR-12: worker-environment overlay composition (secrets + visible vars)
+# ------------------------------------------------------------------
+
+def _worker_env_specs(
+    self,
+    plugin_meta: PluginMeta  # Plugin whose WORKER_ENV contract to read
+) -> List[Dict[str, Any]]:  # List of EnvVarSpec-as-dict entries (possibly empty)
+    """Return a plugin's WORKER_ENV contract as spec dicts (CR-12).
+
+    Prefers the typed manifest_v2 code section; falls back to the flat manifest
+    dict view. Empty list when the plugin declares no worker-env contract.
+    """
+    mv2 = getattr(plugin_meta, "manifest_v2", None)
+    if mv2 is not None and getattr(mv2.code, "worker_env", None):
+        return list(mv2.code.worker_env)
+    flat = getattr(plugin_meta, "manifest", None) or {}
+    return list(flat.get("worker_env") or [])
+
+
+def _resolve_worker_env(
+    self,
+    plugin_meta: PluginMeta,        # Plugin being loaded
+    scope: Optional[str] = None     # SG-55 forward seam: per-principal scope (None = single-user)
+) -> Dict[str, str]:  # {ENV_NAME: value} overlay injected into the worker at spawn
+    """CR-12: compose the resolved worker-env overlay for a load.
+
+    Secrets resolve from the SecretStore keyed by plugin_name — so every
+    instance of a plugin shares one credential (CR-10: two Gemini instances,
+    one GEMINI_API_KEY). A missing secret is OMITTED (the worker spawns without
+    it; the plugin reports the gap at execute) rather than injected empty.
+
+    Visible vars resolve from their declared `default` (the operator-override
+    store is a deferred source; the manifest's static `install.env_vars` already
+    injects fixed visible defaults via the proxy, so this only adds WORKER_ENV
+    defaults not already covered there). All values are fixed at spawn — a
+    change requires `reload_plugin`.
+    """
+    overlay: Dict[str, str] = {}
+    for spec in self._worker_env_specs(plugin_meta):
+        name = spec.get("name")
+        if not name:
+            continue
+        if spec.get("secret"):
+            try:
+                val = self.secret_store.get_secret(plugin_meta.name, name, scope=scope)
+            except Exception as e:
+                self.logger.warning(
+                    f"secret_store.get_secret({plugin_meta.name!r}, {name!r}) failed: {e}"
+                )
+                val = None
+            if val is not None:
+                overlay[name] = val
+        else:
+            default = spec.get("default")
+            if default is not None:
+                overlay[name] = str(default)
+    return overlay
+
+
+def get_worker_env_status(
+    self,
+    name_or_meta: Any,              # Plugin name (loaded/discovered) or a PluginMeta
+    scope: Optional[str] = None     # SG-55 forward seam
+) -> List[Dict[str, Any]]:  # Per-entry status dicts (secret values never returned)
+    """CR-12: per-entry satisfaction status of a plugin's worker-env contract.
+
+    Each entry: {name, secret, required, satisfied, label, description}.
+    `satisfied` means a value is resolvable (secret present in the store, or a
+    visible var has a default/override). Secret VALUES are never returned — only
+    whether one is set. The plugin-config UI uses this to gate config display on
+    required secrets being satisfied.
+    """
+    meta = name_or_meta if not isinstance(name_or_meta, str) else (
+        self.plugins.get(name_or_meta) or self.get_discovered_meta(name_or_meta)
+    )
+    out: List[Dict[str, Any]] = []
+    if meta is None:
+        return out
+    for spec in self._worker_env_specs(meta):
+        name = spec.get("name")
+        if not name:
+            continue
+        if spec.get("secret"):
+            try:
+                satisfied = self.secret_store.get_secret(meta.name, name, scope=scope) is not None
+            except Exception:
+                satisfied = False
+        else:
+            satisfied = spec.get("default") is not None  # + future operator-override store
+        out.append({
+            "name": name,
+            "secret": bool(spec.get("secret")),
+            "required": bool(spec.get("required")),
+            "satisfied": satisfied,
+            "label": spec.get("label", ""),
+            "description": spec.get("description", ""),
+        })
+    return out
+
+
+def missing_required_env(
+    self,
+    name_or_meta: Any,              # Plugin name or PluginMeta
+    scope: Optional[str] = None     # SG-55 forward seam
+) -> List[str]:  # Names of required worker-env entries with no resolvable value
+    """CR-12: names of required worker-env entries that are unsatisfied."""
+    return [
+        s["name"] for s in self.get_worker_env_status(name_or_meta, scope=scope)
+        if s["required"] and not s["satisfied"]
+    ]
+
+
+def set_plugin_secret(
+    self,
+    name_or_id: str,             # Plugin name or instance_id whose secret to set
+    key: str,                    # Secret key (the env-var name, e.g. "GEMINI_API_KEY")
+    value: str,                  # Secret value (stored via the SecretStore, never config/logs)
+    *,
+    scope: Optional[str] = None, # SG-55 forward seam: per-principal scope
+    reload: bool = True          # Respawn loaded worker(s) so the new env is injected
+) -> bool:  # True if the secret was stored
+    """CR-12: store a plugin secret, then respawn its worker(s) to inject it.
+
+    Secrets are keyed by the underlying PLUGIN name (not instance_id), so all
+    instances of a plugin share one credential — set the Gemini key once and
+    every Gemini instance gets it at (re)spawn. Because worker env is fixed at
+    spawn, the new value only reaches a *running* worker via a RESPAWN, so this
+    reloads each loaded instance of the plugin (unless `reload=False`, e.g. when
+    provisioning a secret before the plugin is loaded). This is the
+    actuation seam both the CLI (`cjm-ctl set-secret`) and a future config UI
+    call. Reload failures are logged, not raised.
+    """
+    inst = self.instances.get(name_or_id)
+    plugin_name = inst.plugin_name if inst is not None else name_or_id
+    self.secret_store.set_secret(plugin_name, key, value, scope=scope)
+    if not reload:
+        return True
+    targets = [i.instance_id for i in self.instances.values() if i.plugin_name == plugin_name]
+    for iid in targets:
+        try:
+            self.reload_plugin(iid)
+        except Exception as e:
+            self.logger.warning(f"set_plugin_secret: reload of {iid!r} failed: {e}")
+    return True
+
+
+PluginManager._worker_env_specs = _worker_env_specs
+PluginManager._resolve_worker_env = _resolve_worker_env
+PluginManager.get_worker_env_status = get_worker_env_status
+PluginManager.missing_required_env = missing_required_env
+PluginManager.set_plugin_secret = set_plugin_secret
+
+
 # %% ../../nbs/core/manager.ipynb #pm-lifecycle-code
 def load_plugin(
     self,
@@ -751,7 +906,19 @@ def load_plugin(
         self.logger.info(
             f"Launching worker for {plugin_meta.name} (instance_id={resolved_id})..."
         )
-        proxy = RemotePluginProxy(plugin_meta.manifest)
+        # CR-12: resolve the worker-env overlay (secrets from the SecretStore +
+        # visible defaults) and inject it at spawn. Warn — don't fail — when a
+        # required secret is unset: the plugin loads lazily and reports the gap
+        # at execute, so a config UI / operator can supply the secret post-load.
+        extra_env = self._resolve_worker_env(plugin_meta)
+        _missing_env = self.missing_required_env(plugin_meta)
+        if _missing_env:
+            self.logger.warning(
+                f"{plugin_meta.name}: required worker-env unsatisfied {_missing_env}; "
+                f"plugin loads but can't do useful work until set "
+                f"(e.g. `cjm-ctl set-secret {plugin_meta.name} <KEY>`)."
+            )
+        proxy = RemotePluginProxy(plugin_meta.manifest, extra_env=extra_env)
 
         config_schema = plugin_meta.manifest.get("config_schema")
         
