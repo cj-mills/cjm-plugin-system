@@ -123,7 +123,10 @@ def create_app(
         return {
             "pid": os.getpid(),
             "cpu_percent": proc.cpu_percent(), # Note: aggregating CPU % is complex, main pid is usually enough proxy
-            "memory_rss_mb": total_rss / 1024 / 1024
+            "memory_rss_mb": total_rss / 1024 / 1024,
+            # SG-54: unit-agnostic measured usage the plugin reported via
+            # report_usage() during the last execute (None if it reported none).
+            "usage": getattr(plugin_instance, "_last_api_usage", None),
         }
 
     @app.post("/initialize")
@@ -226,6 +229,9 @@ def create_app(
         # state from a previous job doesn't immediately raise.
         if hasattr(plugin_instance, "_cancel_requested"):
             plugin_instance._cancel_requested = False
+        # SG-54: reset measured usage so a failed / usage-less call can't inherit
+        # a prior run's usage when the substrate reads /stats post-execute.
+        plugin_instance._last_api_usage = None
         
         try:
             loop = asyncio.get_event_loop()

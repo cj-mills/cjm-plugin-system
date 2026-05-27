@@ -438,6 +438,29 @@ class PluginInterface(ABC):
         self._progress = progress
         self._status_message = message
 
+    def report_usage(
+        self,
+        usage: Dict[str, float],  # Measured usage for this execute, keyed by plugin-defined unit name
+    ) -> None:
+        """SG-54: report measured API/service usage for the current execute() call.
+
+        Unit-agnostic by design — the plugin (which holds the API response)
+        supplies whatever unit names it measures: {"input_tokens": .., "output_tokens": ..}
+        for an LLM, {"pages": ..} for OCR, {"characters": ..} for TTS,
+        {"credits"/"requests"/"minutes": ..} for others. The substrate stores +
+        accumulates per unit name WITHOUT interpreting them (summed across runs in
+        the empirical store's api_usage_totals). Pricing is deliberately NOT here
+        (volatile, per-service, often not API-accessible) — a consumer-side rate
+        table turns raw units into cost. "Derive from behaviour": the plugin
+        MEASURES actual usage from the response; the substrate aggregates.
+
+        Stored on `self._last_api_usage`; the worker exposes it via /stats and the
+        substrate folds it into the post-execute ResourceSample. The worker resets
+        it before each execute so a failed/usage-less call can't inherit stale
+        usage. Default: store-only (parallel to report_progress).
+        """
+        self._last_api_usage = dict(usage)
+
 # %% ../../nbs/core/interface.ipynb #540be780
 def plugin_action(
     action_name: str  # Public action name the decorated method handles

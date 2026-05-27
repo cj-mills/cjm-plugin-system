@@ -9,6 +9,7 @@ __all__ = ['compute_config_hash', 'ResourceSample', 'EmpiricalResourceRecord', '
            'LocalEmpiricalResourceStore']
 
 # %% ../../nbs/core/empirical_store.ipynb #exports
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ class ResourceSample:
     duration_seconds: float  # Wall-clock execute duration
     success: bool  # True if execute returned normally; False if raised
     observed_at: datetime  # tz-aware datetime — when the sample was captured
+    api_usage: Optional[Dict[str, float]] = None  # SG-54: unit-agnostic measured usage {unit_name: amount}; None for compute-only plugins
 
 # %% ../../nbs/core/empirical_store.ipynb #resource-record
 @dataclass
@@ -65,6 +67,7 @@ class EmpiricalResourceRecord:
     duration_seconds_mean: float  # Welford running mean of sample.duration_seconds
     success_rate: float  # success_count / sample_count
     last_observed: datetime  # tz-aware; tracks most recent ResourceSample.observed_at
+    api_usage_totals: Dict[str, float] = field(default_factory=dict)  # SG-54: cumulative per-unit usage summed across runs (tokens/credits/pages/...); {} for compute-only plugins
 
 # %% ../../nbs/core/empirical_store.ipynb #store-protocol
 @runtime_checkable
@@ -125,6 +128,7 @@ CREATE TABLE IF NOT EXISTS empirical_resources (
     gpu_memory_mb_peak_mean REAL NOT NULL DEFAULT 0.0,
     duration_seconds_mean REAL NOT NULL DEFAULT 0.0,
     last_observed TEXT NOT NULL,
+    api_usage_totals TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (instance_id, config_hash)
 )
 """
@@ -159,6 +163,10 @@ class LocalEmpiricalResourceStore:
         conn = sqlite3.connect(self.db_path)
         try:
             conn.execute(_SCHEMA)
+            # SG-54: in-place migration for DBs created before api_usage_totals.
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(empirical_resources)").fetchall()}
+            if "api_usage_totals" not in cols:
+                conn.execute("ALTER TABLE empirical_resources ADD COLUMN api_usage_totals TEXT NOT NULL DEFAULT '{}'")
             conn.commit()
             yield conn
         finally:
@@ -181,7 +189,7 @@ class LocalEmpiricalResourceStore:
                 "SELECT sample_count, success_count, cpu_percent_mean, "
                 "memory_mb_peak_max, memory_mb_peak_mean, "
                 "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                "duration_seconds_mean "
+                "duration_seconds_mean, api_usage_totals "
                 "FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
                 (instance_id, config_hash),
             ).fetchone()
@@ -197,11 +205,12 @@ class LocalEmpiricalResourceStore:
                 dur_mean = sample.duration_seconds
                 mem_max = sample.memory_mb_peak
                 gpu_max = sample.gpu_memory_mb_peak
+                usage_totals = {k: float(v) for k, v in (sample.api_usage or {}).items()}
             else:
                 (old_n, old_success_count, old_cpu_mean,
                  old_mem_max, old_mem_mean,
                  old_gpu_max, old_gpu_mean,
-                 old_dur_mean) = row
+                 old_dur_mean, old_usage_totals_json) = row
                 n = old_n + 1
                 success_count = old_success_count + success_delta
                 # Welford running-mean update: mean_n = mean_{n-1} + (x - mean_{n-1}) / n
@@ -212,18 +221,25 @@ class LocalEmpiricalResourceStore:
                 # Max-of-peaks for memory metrics (eviction-candidate selection reads this)
                 mem_max = max(old_mem_max, sample.memory_mb_peak)
                 gpu_max = max(old_gpu_max, sample.gpu_memory_mb_peak)
+                # SG-54: usage is ADDITIVE (cumulative) — merge-sum per unit name.
+                try:
+                    usage_totals = json.loads(old_usage_totals_json) if old_usage_totals_json else {}
+                except (TypeError, ValueError):
+                    usage_totals = {}
+                for _k, _v in (sample.api_usage or {}).items():
+                    usage_totals[_k] = float(usage_totals.get(_k, 0.0)) + float(_v)
             
             conn.execute(
                 "INSERT OR REPLACE INTO empirical_resources ("
                 "instance_id, plugin_name, config_hash, sample_count, success_count, "
                 "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
                 "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                "duration_seconds_mean, last_observed"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "duration_seconds_mean, last_observed, api_usage_totals"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     instance_id, plugin_name, config_hash, n, success_count,
                     cpu_mean, mem_max, mem_mean, gpu_max, gpu_mean,
-                    dur_mean, sample.observed_at.isoformat(),
+                    dur_mean, sample.observed_at.isoformat(), json.dumps(usage_totals, sort_keys=True),
                 ),
             )
             conn.commit()
@@ -241,7 +257,7 @@ class LocalEmpiricalResourceStore:
                 "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
                 "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
                 "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                "duration_seconds_mean, last_observed "
+                "duration_seconds_mean, last_observed, api_usage_totals "
                 "FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
                 (instance_id, config_hash),
             ).fetchone()
@@ -260,7 +276,7 @@ class LocalEmpiricalResourceStore:
                     "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
                     "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
                     "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                    "duration_seconds_mean, last_observed "
+                    "duration_seconds_mean, last_observed, api_usage_totals "
                     "FROM empirical_resources WHERE plugin_name = ?",
                     (plugin_name,),
                 ).fetchall()
@@ -269,7 +285,7 @@ class LocalEmpiricalResourceStore:
                     "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
                     "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
                     "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                    "duration_seconds_mean, last_observed "
+                    "duration_seconds_mean, last_observed, api_usage_totals "
                     "FROM empirical_resources",
                 ).fetchall()
         return [self._row_to_record(r) for r in rows]
@@ -299,7 +315,11 @@ class LocalEmpiricalResourceStore:
         """
         (instance_id, plugin_name, config_hash, sample_count, success_count,
          cpu_mean, mem_max, mem_mean, gpu_max, gpu_mean,
-         dur_mean, last_observed_str) = row
+         dur_mean, last_observed_str, api_usage_totals_json) = row
+        try:
+            api_usage_totals = json.loads(api_usage_totals_json) if api_usage_totals_json else {}
+        except (TypeError, ValueError):
+            api_usage_totals = {}
         success_rate = (success_count / sample_count) if sample_count > 0 else 0.0
         try:
             last_observed = datetime.fromisoformat(last_observed_str)
@@ -318,4 +338,5 @@ class LocalEmpiricalResourceStore:
             duration_seconds_mean=float(dur_mean),
             success_rate=success_rate,
             last_observed=last_observed,
+            api_usage_totals=api_usage_totals,
         )

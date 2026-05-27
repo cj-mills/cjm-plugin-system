@@ -1146,6 +1146,9 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
                 pass
         
         duration = max(0.0, time.time() - start_time)
+        # SG-54: fold plugin-reported measured usage (unit-agnostic) into the sample.
+        _usage = worker_stats.get("usage")
+        api_usage = {k: float(v) for k, v in _usage.items()} if isinstance(_usage, dict) and _usage else None
         sample = ResourceSample(
             cpu_percent=float(worker_stats.get("cpu_percent", 0.0) or 0.0),
             memory_mb_peak=float(worker_stats.get("memory_mb", 0.0) or 0.0),
@@ -1153,6 +1156,7 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
             duration_seconds=duration,
             success=success,
             observed_at=datetime.now(timezone.utc),
+            api_usage=api_usage,
         )
         store.record_sample(
             inst.instance_id, inst.plugin_name, inst.config_hash, sample,
