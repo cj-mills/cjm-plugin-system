@@ -59,36 +59,36 @@ graph LR
     utils_validation["utils.validation<br/>Configuration Validation"]
 
     bootstrap --> core_manager
-    bootstrap --> core_scheduling
     bootstrap --> core_queue
-    cli --> core_metadata
-    cli --> core_config
+    bootstrap --> core_scheduling
     cli --> core_manifest_format
     cli --> core_platform
+    cli --> core_metadata
+    cli --> core_config
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_errors
+    core_manager --> core_secret_store
     core_manager --> core_metadata
     core_manager --> core_empirical_store
-    core_manager --> core_config
-    core_manager --> core_manifest_format
-    core_manager --> utils_validation
-    core_manager --> core_scheduling
-    core_manager --> core_proxy
-    core_manager --> core_secret_store
-    core_manager --> core_config_store
     core_manager --> core_interface
-    core_manifest_format --> utils_hashing
+    core_manager --> core_manifest_format
+    core_manager --> core_errors
+    core_manager --> utils_validation
+    core_manager --> core_config_store
+    core_manager --> core_proxy
+    core_manager --> core_config
+    core_manager --> core_scheduling
     core_manifest_format --> core_metadata
+    core_manifest_format --> utils_hashing
     core_platform --> core_config
     core_proxy --> core_errors
-    core_proxy --> core_config
-    core_proxy --> core_platform
     core_proxy --> core_interface
+    core_proxy --> core_platform
+    core_proxy --> core_config
     core_queue --> core_errors
     core_scheduling --> core_metadata
-    core_worker --> core_platform
     core_worker --> core_errors
+    core_worker --> core_platform
     utils_validation --> core_errors
 ```
 
@@ -2237,22 +2237,11 @@ def get_plugins_by_category(
 
 ``` python
 def get_discovered_categories(self) -> List[str]: # List of unique categories
-    """Get all unique categories among discovered plugins."""
-    return list(set(meta.category for meta in self.discovered if meta.category))
-
-def get_loaded_categories(self) -> List[str]: # List of unique categories
     "Get all unique categories among discovered plugins."
 ```
 
 ``` python
 def get_loaded_categories(self) -> List[str]: # List of unique categories
-    """Get all unique categories among loaded plugins."""
-    return list(set(meta.category for meta in self.plugins.values() if meta.category))
-
-def get_plugin_meta(
-    self,
-    plugin_name:str # Name of the plugin
-) -> Optional[PluginMeta]: # Plugin metadata or None
     "Get all unique categories among loaded plugins."
 ```
 
@@ -3177,16 +3166,7 @@ class PluginBinding:
         def get_stats(self) -> Optional[Dict[str, Any]]
         "JSON Schema describing this plugin's configuration."
     
-    def get_stats(self) -> Optional[Dict[str, Any]]:
-            """Resource telemetry for the bound plugin's worker process."""
-            return self.manager.get_plugin_stats(self.plugin_name)
-    
-    
-    def bind(
-        self,
-        plugin_name: str,  # Name of the plugin to pre-bind
-        default_config: Optional[Dict[str, Any]] = None  # Default config used by binding.load()
-    ) -> PluginBinding:  # Bound view ready for instance-style use
+    def get_stats(self) -> Optional[Dict[str, Any]]
         "Resource telemetry for the bound plugin's worker process."
 ```
 

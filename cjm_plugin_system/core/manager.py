@@ -145,7 +145,7 @@ class PluginManager:
         # Sync execute_plugin is NOT gated — sync callers can't await a semaphore.
         self._concurrent_limiters: Dict[str, asyncio.Semaphore] = {}
 
-# %% ../../nbs/core/manager.ipynb #cr3-telemetry-code
+# %% ../../nbs/core/manager.ipynb #pm-fn-register_system_monitor
 def register_system_monitor(
     self,
     plugin_name:str # Name of the system monitor plugin
@@ -157,6 +157,9 @@ def register_system_monitor(
     else:
         self.logger.warning(f"System monitor plugin not found: {plugin_name}")
 
+PluginManager.register_system_monitor = register_system_monitor
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_get_global_stats
 def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     """Fetch real-time stats from the system monitor plugin (sync).
     
@@ -198,6 +201,9 @@ def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
         self.logger.warning(f"Failed to fetch system stats (dispatcher fallback): {e}")
     return {}
 
+PluginManager._get_global_stats = _get_global_stats
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_get_global_stats_async
 async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system telemetry
     """Fetch real-time stats from the system monitor plugin (async).
     
@@ -232,13 +238,9 @@ async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system tele
         self.logger.warning(f"Failed to fetch system stats (dispatcher fallback): {e}")
     return {}
 
-
-PluginManager.register_system_monitor = register_system_monitor
-PluginManager._get_global_stats = _get_global_stats
 PluginManager._get_global_stats_async = _get_global_stats_async
 
-
-# %% ../../nbs/core/manager.ipynb #pm-discovery-code
+# %% ../../nbs/core/manager.ipynb #pm-fn-_check_interface_fqn
 def _check_interface_fqn(
     self,
     iface_fqn:str, # Interface FQN string from the manifest
@@ -266,6 +268,9 @@ def _check_interface_fqn(
         return False
     return True
 
+PluginManager._check_interface_fqn = _check_interface_fqn
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_parse_taxonomy
 def _parse_taxonomy(
     self,
     manifest: Dict[str, Any]  # Loaded manifest dict
@@ -285,6 +290,9 @@ def _parse_taxonomy(
         interface_fqcn=tax_dict.get("interface_fqcn", manifest.get("interface", "")),
     )
 
+PluginManager._parse_taxonomy = _parse_taxonomy
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_parse_resources
 def _parse_resources(
     self,
     manifest: Dict[str, Any]  # Loaded manifest dict
@@ -299,6 +307,9 @@ def _parse_resources(
         accelerators=list(res_dict.get("accelerators", [])),
     )
 
+PluginManager._parse_resources = _parse_resources
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_derive_category
 def _derive_category(
     self,
     manifest: Dict[str, Any],  # Loaded manifest dict (flat-shaped)
@@ -320,6 +331,9 @@ def _derive_category(
     legacy = manifest.get("category", "")
     return legacy if isinstance(legacy, str) else ""
 
+PluginManager._derive_category = _derive_category
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-discover_manifests
 def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin metadata
     """Discover plugins via JSON manifests in search paths.
     
@@ -394,6 +408,9 @@ def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin me
 
     return self.discovered
 
+PluginManager.discover_manifests = discover_manifests
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_discovered_by_category
 def get_discovered_by_category(
     self,
     category:str # Category to filter by (e.g., "transcription")
@@ -401,6 +418,9 @@ def get_discovered_by_category(
     """Get discovered plugins filtered by category."""
     return [meta for meta in self.discovered if meta.category == category]
 
+PluginManager.get_discovered_by_category = get_discovered_by_category
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_plugins_by_category
 def get_plugins_by_category(
     self,
     category:str # Category to filter by (e.g., "transcription")
@@ -408,14 +428,23 @@ def get_plugins_by_category(
     """Get loaded plugins filtered by category."""
     return [meta for meta in self.plugins.values() if meta.category == category]
 
+PluginManager.get_plugins_by_category = get_plugins_by_category
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_discovered_categories
 def get_discovered_categories(self) -> List[str]: # List of unique categories
     """Get all unique categories among discovered plugins."""
     return list(set(meta.category for meta in self.discovered if meta.category))
 
+PluginManager.get_discovered_categories = get_discovered_categories
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_loaded_categories
 def get_loaded_categories(self) -> List[str]: # List of unique categories
     """Get all unique categories among loaded plugins."""
     return list(set(meta.category for meta in self.plugins.values() if meta.category))
 
+PluginManager.get_loaded_categories = get_loaded_categories
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin_meta
 def get_plugin_meta(
     self,
     plugin_name:str # Name of the plugin
@@ -423,6 +452,9 @@ def get_plugin_meta(
     """Get metadata for a loaded plugin by name."""
     return self.plugins.get(plugin_name)
 
+PluginManager.get_plugin_meta = get_plugin_meta
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_discovered_meta
 def get_discovered_meta(
     self,
     plugin_name:str # Name of the plugin
@@ -433,20 +465,9 @@ def get_discovered_meta(
             return meta
     return None
 
-
-PluginManager._check_interface_fqn = _check_interface_fqn
-PluginManager._parse_taxonomy = _parse_taxonomy
-PluginManager._parse_resources = _parse_resources
-PluginManager._derive_category = _derive_category
-PluginManager.discover_manifests = discover_manifests
-PluginManager.get_discovered_by_category = get_discovered_by_category
-PluginManager.get_plugins_by_category = get_plugins_by_category
-PluginManager.get_discovered_categories = get_discovered_categories
-PluginManager.get_loaded_categories = get_loaded_categories
-PluginManager.get_plugin_meta = get_plugin_meta
 PluginManager.get_discovered_meta = get_discovered_meta
 
-# %% ../../nbs/core/manager.ipynb #pm-validation-code
+# %% ../../nbs/core/manager.ipynb #pm-fn-_extract_defaults_from_schema
 def _extract_defaults_from_schema(
     self,
     config_schema:Optional[Dict[str, Any]] # JSON Schema with properties
@@ -464,6 +485,9 @@ def _extract_defaults_from_schema(
 
     return defaults
 
+PluginManager._extract_defaults_from_schema = _extract_defaults_from_schema
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_validate_config_against_schema
 def _validate_config_against_schema(
     self,
     config:Optional[Dict[str, Any]], # Caller-provided config dict (or None)
@@ -500,6 +524,9 @@ def _validate_config_against_schema(
     
     return dict(config)
 
+PluginManager._validate_config_against_schema = _validate_config_against_schema
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_check_config_schema_drift
 def _check_config_schema_drift(
     self,
     proxy:Any, # RemotePluginProxy with a live worker
@@ -555,6 +582,9 @@ def _check_config_schema_drift(
             f"Run `cjm-ctl regenerate-manifest {plugin_meta.name}` to refresh the manifest."
         )
 
+PluginManager._check_config_schema_drift = _check_config_schema_drift
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_persist_config
 def _persist_config(
     self,
     plugin_name: str  # Plugin to persist
@@ -586,6 +616,9 @@ def _persist_config(
     except Exception as e:
         self.logger.warning(f"Failed to persist config for {plugin_name}: {e}")
 
+PluginManager._persist_config = _persist_config
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_maybe_fire_disable_hook
 def _maybe_fire_disable_hook(
     self,
     name_or_id: str  # instance_id (or legacy plugin_name) whose in-flight job just finished
@@ -613,18 +646,9 @@ def _maybe_fire_disable_hook(
     except Exception as e:
         self.logger.warning(f"on_disable() raised for {name_or_id}: {e}")
 
-# ------------------------------------------------------------------
-# CR-10: multi-instance bookkeeping helpers
-# ------------------------------------------------------------------
-
-
-PluginManager._extract_defaults_from_schema = _extract_defaults_from_schema
-PluginManager._validate_config_against_schema = _validate_config_against_schema
-PluginManager._check_config_schema_drift = _check_config_schema_drift
-PluginManager._persist_config = _persist_config
 PluginManager._maybe_fire_disable_hook = _maybe_fire_disable_hook
 
-# %% ../../nbs/core/manager.ipynb #pm-cr10-helpers-code
+# %% ../../nbs/core/manager.ipynb #pm-fn-_validate_instance_id
 def _validate_instance_id(self, instance_id: str) -> None:
     """Reject malformed explicit instance_ids at load time.
     
@@ -642,6 +666,9 @@ def _validate_instance_id(self, instance_id: str) -> None:
             f"instance_id {instance_id!r} must match pattern [A-Za-z0-9_-]{{1,64}}"
         )
 
+PluginManager._validate_instance_id = _validate_instance_id
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-_generate_instance_id
 def _generate_instance_id(self, plugin_name: str) -> str:
     """Generate a unique instance_id of form `{plugin_name}-{6-char-hex}`.
     
@@ -657,6 +684,9 @@ def _generate_instance_id(self, plugin_name: str) -> str:
         f"Could not generate unique instance_id for {plugin_name!r} after 16 attempts"
     )
 
+PluginManager._generate_instance_id = _generate_instance_id
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_instance
 def get_instance(
     self,
     name_or_id: str  # Plugin name (default-loaded) or explicit instance_id
@@ -668,6 +698,9 @@ def get_instance(
     """
     return self.instances.get(name_or_id)
 
+PluginManager.get_instance = get_instance
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-list_instances
 def list_instances(
     self,
     plugin_name: Optional[str] = None  # If given, filter to this plugin's instances
@@ -677,18 +710,12 @@ def list_instances(
         return list(self.instances.values())
     return [i for i in self.instances.values() if i.plugin_name == plugin_name]
 
-
-PluginManager._validate_instance_id = _validate_instance_id
-PluginManager._generate_instance_id = _generate_instance_id
-PluginManager.get_instance = get_instance
 PluginManager.list_instances = list_instances
 
-
-# %% ../../nbs/core/manager.ipynb #2ad990f8
+# %% ../../nbs/core/manager.ipynb #pm-fn-_worker_env_specs
 # ------------------------------------------------------------------
 # CR-12: worker-environment overlay composition (secrets + visible vars)
 # ------------------------------------------------------------------
-
 def _worker_env_specs(
     self,
     plugin_meta: PluginMeta  # Plugin whose WORKER_ENV contract to read
@@ -704,7 +731,9 @@ def _worker_env_specs(
     flat = getattr(plugin_meta, "manifest", None) or {}
     return list(flat.get("worker_env") or [])
 
+PluginManager._worker_env_specs = _worker_env_specs
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-_resolve_worker_env
 def _resolve_worker_env(
     self,
     plugin_meta: PluginMeta,        # Plugin being loaded
@@ -744,7 +773,9 @@ def _resolve_worker_env(
                 overlay[name] = str(default)
     return overlay
 
+PluginManager._resolve_worker_env = _resolve_worker_env
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_worker_env_status
 def get_worker_env_status(
     self,
     name_or_meta: Any,              # Plugin name (loaded/discovered) or a PluginMeta
@@ -785,7 +816,9 @@ def get_worker_env_status(
         })
     return out
 
+PluginManager.get_worker_env_status = get_worker_env_status
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-missing_required_env
 def missing_required_env(
     self,
     name_or_meta: Any,              # Plugin name or PluginMeta
@@ -797,7 +830,9 @@ def missing_required_env(
         if s["required"] and not s["satisfied"]
     ]
 
+PluginManager.missing_required_env = missing_required_env
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-set_plugin_secret
 def set_plugin_secret(
     self,
     name_or_id: str,             # Plugin name or instance_id whose secret to set
@@ -831,15 +866,9 @@ def set_plugin_secret(
             self.logger.warning(f"set_plugin_secret: reload of {iid!r} failed: {e}")
     return True
 
-
-PluginManager._worker_env_specs = _worker_env_specs
-PluginManager._resolve_worker_env = _resolve_worker_env
-PluginManager.get_worker_env_status = get_worker_env_status
-PluginManager.missing_required_env = missing_required_env
 PluginManager.set_plugin_secret = set_plugin_secret
 
-
-# %% ../../nbs/core/manager.ipynb #pm-lifecycle-code
+# %% ../../nbs/core/manager.ipynb #pm-fn-load_plugin
 def load_plugin(
     self,
     plugin_meta:PluginMeta, # Plugin metadata (with manifest attached)
@@ -999,6 +1028,9 @@ def load_plugin(
         )
         return False
 
+PluginManager.load_plugin = load_plugin
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-load_all
 def load_all(
     self,
     configs:Optional[Dict[str, Dict[str, Any]]]=None # Plugin name -> config mapping
@@ -1014,6 +1046,9 @@ def load_all(
     
     return results
 
+PluginManager.load_all = load_all
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-unload_plugin
 def unload_plugin(
     self,
     name_or_id:str # Plugin name (default-loaded) or instance_id (multi-instance)
@@ -1066,6 +1101,9 @@ def unload_plugin(
         self.logger.error(f"Error unloading {name_or_id!r}: {e}")
         return False
 
+PluginManager.unload_plugin = unload_plugin
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-unload_all
 def unload_all(self) -> None:
     """Unload all plugin instances and terminate all Worker processes (CR-10).
     
@@ -1079,6 +1117,9 @@ def unload_all(self) -> None:
     for name in list(self.plugins.keys()):
         self.unload_plugin(name)
 
+PluginManager.unload_all = unload_all
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin
 def get_plugin(
     self,
     name_or_id:str # Plugin name (default-loaded) or instance_id (multi-instance)
@@ -1097,19 +1138,16 @@ def get_plugin(
     meta = self.plugins.get(name_or_id)
     return meta.instance if meta else None
 
+PluginManager.get_plugin = get_plugin
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-list_plugins
 def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
     """List all loaded plugins."""
     return list(self.plugins.values())
 
-
-PluginManager.load_plugin = load_plugin
-PluginManager.load_all = load_all
-PluginManager.unload_plugin = unload_plugin
-PluginManager.unload_all = unload_all
-PluginManager.get_plugin = get_plugin
 PluginManager.list_plugins = list_plugins
 
-# %% ../../nbs/core/manager.ipynb #pm-execute-code
+# %% ../../nbs/core/manager.ipynb #pm-fn-_record_sample_safe
 def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:bool) -> None:
     """CR-7: best-effort empirical sample recording.
     
@@ -1151,7 +1189,7 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
         api_usage = {k: float(v) for k, v in _usage.items()} if isinstance(_usage, dict) and _usage else None
         sample = ResourceSample(
             cpu_percent=float(worker_stats.get("cpu_percent", 0.0) or 0.0),
-            memory_mb_peak=float(worker_stats.get("memory_mb", 0.0) or 0.0),
+            memory_mb_peak=float(worker_stats.get("memory_rss_mb", 0.0) or 0.0),
             gpu_memory_mb_peak=float(worker_stats.get("gpu_memory_mb", 0.0) or 0.0),
             duration_seconds=duration,
             success=success,
@@ -1166,7 +1204,9 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
             f"CR-7: empirical sample recording failed for {inst.instance_id}: {e}"
         )
 
+PluginManager._record_sample_safe = _record_sample_safe
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-_get_concurrent_limiter
 def _get_concurrent_limiter(self, instance_id:str) -> Optional[asyncio.Semaphore]:
     """SG-33 (CR-7): lazy-create the per-instance asyncio.Semaphore.
     
@@ -1192,7 +1232,9 @@ def _get_concurrent_limiter(self, instance_id:str) -> Optional[asyncio.Semaphore
         limiters[instance_id] = limiter
     return limiter
 
+PluginManager._get_concurrent_limiter = _get_concurrent_limiter
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-_reactive_evict_for
 def _reactive_evict_for(
     self,
     needed_meta:PluginMeta,
@@ -1220,7 +1262,9 @@ def _reactive_evict_for(
         )
     return self._evict_for_resources(needed_meta)
 
+PluginManager._reactive_evict_for = _reactive_evict_for
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-_evict_for_resources
 def _evict_for_resources(self, needed_meta:PluginMeta) -> bool:
     """Attempt to free resources by unloading/releasing idle plugins (LRU).
     
@@ -1285,6 +1329,9 @@ def _evict_for_resources(self, needed_meta:PluginMeta) -> bool:
             
     return False
 
+PluginManager._evict_for_resources = _evict_for_resources
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-execute_plugin
 def execute_plugin(
     self,
     name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
@@ -1398,6 +1445,9 @@ def execute_plugin(
             self._maybe_fire_disable_hook(inst.instance_id)
             self._record_sample_safe(inst, start_time, success)
 
+PluginManager.execute_plugin = execute_plugin
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-execute_plugin_async
 async def execute_plugin_async(
     self,
     name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
@@ -1507,15 +1557,9 @@ async def execute_plugin_async(
             self._maybe_fire_disable_hook(inst.instance_id)
             self._record_sample_safe(inst, start_time, success)
 
-
-PluginManager._record_sample_safe = _record_sample_safe
-PluginManager._get_concurrent_limiter = _get_concurrent_limiter
-PluginManager._reactive_evict_for = _reactive_evict_for
-PluginManager._evict_for_resources = _evict_for_resources
-PluginManager.execute_plugin = execute_plugin
 PluginManager.execute_plugin_async = execute_plugin_async
 
-# %% ../../nbs/core/manager.ipynb #pm-enable-disable-code
+# %% ../../nbs/core/manager.ipynb #pm-fn-enable_plugin
 def enable_plugin(
     self,
     name_or_id:str # Plugin name (default instance) or instance_id (multi-instance)
@@ -1545,6 +1589,9 @@ def enable_plugin(
             self.logger.warning(f"on_enable() raised for {name_or_id}: {e}")
     return True
 
+PluginManager.enable_plugin = enable_plugin
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-disable_plugin
 def disable_plugin(
     self,
     name_or_id:str # Plugin name (default instance) or instance_id (multi-instance)
@@ -1581,6 +1628,9 @@ def disable_plugin(
                 self.logger.warning(f"on_disable() raised for {name_or_id}: {e}")
     return True
 
+PluginManager.disable_plugin = disable_plugin
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin_logs
 def get_plugin_logs(
     self,
     plugin_name:str, # Name of the plugin
@@ -1601,13 +1651,9 @@ def get_plugin_logs(
     except Exception as e:
         return f"Error reading logs: {e}"
 
-
-PluginManager.enable_plugin = enable_plugin
-PluginManager.disable_plugin = disable_plugin
 PluginManager.get_plugin_logs = get_plugin_logs
 
-
-# %% ../../nbs/core/manager.ipynb #a79dda0b
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin_config
 def get_plugin_config(
     self,
     plugin_name: str # Name of the plugin
@@ -1618,6 +1664,9 @@ def get_plugin_config(
         return plugin.get_current_config()
     return None
 
+PluginManager.get_plugin_config = get_plugin_config
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin_config_schema
 def get_plugin_config_schema(
     self,
     plugin_name: str # Name of the plugin
@@ -1628,7 +1677,9 @@ def get_plugin_config_schema(
         return plugin.get_config_schema()
     return None
 
+PluginManager.get_plugin_config_schema = get_plugin_config_schema
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_config_options
 def get_config_options(
     self,
     name_or_id: str # Plugin name (default instance) or instance_id (multi-instance)
@@ -1653,6 +1704,9 @@ def get_config_options(
         self.logger.warning(f"get_config_options({name_or_id!r}) failed: {e}")
         return {}
 
+PluginManager.get_config_options = get_config_options
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_all_plugin_configs
 def get_all_plugin_configs(self) -> Dict[str, Dict[str, Any]]: # Plugin name -> config mapping
     """Get current configuration for all loaded plugins."""
     return {
@@ -1662,6 +1716,9 @@ def get_all_plugin_configs(self) -> Dict[str, Dict[str, Any]]: # Plugin name -> 
         for plugin in [meta.instance]
     }
 
+PluginManager.get_all_plugin_configs = get_all_plugin_configs
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-update_plugin_config
 def update_plugin_config(
     self,
     name_or_id: str, # Plugin name (default instance) or instance_id (multi-instance)
@@ -1708,6 +1765,9 @@ def update_plugin_config(
         self.logger.error(f"Error updating {name_or_id!r} config: {e}")
         return False
 
+PluginManager.update_plugin_config = update_plugin_config
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-reload_plugin
 def reload_plugin(
     self,
     name_or_id: str, # Plugin name (default instance) or instance_id (multi-instance)
@@ -1744,6 +1804,9 @@ def reload_plugin(
         self.logger.error(f"Error reloading {name_or_id!r}: {e}")
         return False
 
+PluginManager.reload_plugin = reload_plugin
+
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin_stats
 def get_plugin_stats(
     self,
     name_or_id: str # Plugin name (default instance) or instance_id (multi-instance)
@@ -1754,13 +1817,6 @@ def get_plugin_stats(
         return inst.proxy.get_stats()
     return None
 
-# Add methods to PluginManager
-PluginManager.get_plugin_config = get_plugin_config
-PluginManager.get_plugin_config_schema = get_plugin_config_schema
-PluginManager.get_config_options = get_config_options
-PluginManager.get_all_plugin_configs = get_all_plugin_configs
-PluginManager.update_plugin_config = update_plugin_config
-PluginManager.reload_plugin = reload_plugin
 PluginManager.get_plugin_stats = get_plugin_stats
 
 # %% ../../nbs/core/manager.ipynb #5ef5a64c
@@ -1798,10 +1854,8 @@ async def execute_plugin_stream(
 # Add to PluginManager
 PluginManager.execute_plugin_stream = execute_plugin_stream
 
-# %% ../../nbs/core/manager.ipynb #127e0807
+# %% ../../nbs/core/manager.ipynb #pm-fn-load_plugin_async
 import asyncio
-
-
 async def load_plugin_async(
     self,
     plugin_meta: PluginMeta,
@@ -1820,7 +1874,9 @@ async def load_plugin_async(
         self.load_plugin, plugin_meta, config, strict, instance_id, new_instance,
     )
 
+PluginManager.load_plugin_async = load_plugin_async
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-unload_plugin_async
 async def unload_plugin_async(
     self,
     name_or_id: str,
@@ -1828,7 +1884,9 @@ async def unload_plugin_async(
     """Async variant of `unload_plugin` (CR-10b)."""
     return await asyncio.to_thread(self.unload_plugin, name_or_id)
 
+PluginManager.unload_plugin_async = unload_plugin_async
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-_spec_requested_key
 def _spec_requested_key(spec: PluginLoadSpec, index: int) -> str:
     """Derive the dict key the load_plugins_concurrent result uses for `spec`.
     
@@ -1843,7 +1901,7 @@ def _spec_requested_key(spec: PluginLoadSpec, index: int) -> str:
         return f"{spec.meta.name}#new[{index}]"
     return spec.meta.name
 
-
+# %% ../../nbs/core/manager.ipynb #pm-fn-load_plugins_concurrent
 async def load_plugins_concurrent(
     self,
     specs: List[PluginLoadSpec],  # Per-plugin load specifications
@@ -1905,7 +1963,9 @@ async def load_plugins_concurrent(
     
     return dict(zip(keys, results))
 
+PluginManager.load_plugins_concurrent = load_plugins_concurrent
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-unload_plugins_concurrent
 async def unload_plugins_concurrent(
     self,
     name_or_ids: List[str],  # Plugin names or instance_ids to unload
@@ -1935,16 +1995,10 @@ async def unload_plugins_concurrent(
     
     return dict(zip(name_or_ids, results))
 
-
-PluginManager.load_plugin_async = load_plugin_async
-PluginManager.unload_plugin_async = unload_plugin_async
-PluginManager.load_plugins_concurrent = load_plugins_concurrent
 PluginManager.unload_plugins_concurrent = unload_plugins_concurrent
 
-# %% ../../nbs/core/manager.ipynb #c8ebac45
+# %% ../../nbs/core/manager.ipynb #pm-cls-PluginBinding
 from dataclasses import dataclass, field as _field
-
-
 @dataclass
 class PluginBinding:
     """Pre-bound view of a single plugin through a shared PluginManager.
@@ -2042,7 +2096,7 @@ class PluginBinding:
         """Resource telemetry for the bound plugin's worker process."""
         return self.manager.get_plugin_stats(self.plugin_name)
 
-
+# %% ../../nbs/core/manager.ipynb #pm-fn-bind
 def bind(
     self,
     plugin_name: str,  # Name of the plugin to pre-bind
@@ -2055,10 +2109,9 @@ def bind(
         default_config=dict(default_config) if default_config else {},
     )
 
-
 PluginManager.bind = bind
 
-# %% ../../nbs/core/manager.ipynb #66b13ecf
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_by_role
 def get_by_role(
     self,
     role: str  # Interface class name segment of the FQCN (e.g., "TranscriptionPlugin")
@@ -2066,7 +2119,9 @@ def get_by_role(
     """CR-1: return discovered plugins implementing the given interface role."""
     return [m for m in self.discovered if m.taxonomy and m.taxonomy.role == role]
 
+PluginManager.get_by_role = get_by_role
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_by_domain
 def get_by_domain(
     self,
     domain: str  # Domain segment of the taxonomy (e.g., "transcription")
@@ -2074,7 +2129,9 @@ def get_by_domain(
     """CR-1: return discovered plugins in the given domain."""
     return [m for m in self.discovered if m.taxonomy and m.taxonomy.domain == domain]
 
+PluginManager.get_by_domain = get_by_domain
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_canonical
 def get_canonical(
     self,
     role: str  # Interface class name to look up
@@ -2101,7 +2158,9 @@ def get_canonical(
         )
     return matches[0] if len(matches) == 1 else None
 
+PluginManager.get_canonical = get_canonical
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-get_compatible_for_current_platform
 def get_compatible_for_current_platform(self) -> List[PluginMeta]:  # Plugins compatible with current platform
     """Phase 5a: return discovered plugins compatible with the host platform.
     
@@ -2128,11 +2187,6 @@ def get_compatible_for_current_platform(self) -> List[PluginMeta]:  # Plugins co
             out.append(m)
     return out
 
-
-# Attach to PluginManager
-PluginManager.get_by_role = get_by_role
-PluginManager.get_by_domain = get_by_domain
-PluginManager.get_canonical = get_canonical
 PluginManager.get_compatible_for_current_platform = get_compatible_for_current_platform
 
 # %% ../../nbs/core/manager.ipynb #1a4951b5-8dfc-4d74-a880-ec4548ca1387
