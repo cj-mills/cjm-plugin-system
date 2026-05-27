@@ -58,33 +58,33 @@ graph LR
     utils_hashing[utils.hashing<br/>Content Hashing Utilities]
     utils_validation[utils.validation<br/>Configuration Validation]
 
-    bootstrap --> core_manager
     bootstrap --> core_queue
+    bootstrap --> core_manager
     bootstrap --> core_scheduling
-    cli --> core_config
-    cli --> core_platform
     cli --> core_manifest_format
+    cli --> core_platform
+    cli --> core_config
     cli --> core_metadata
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_errors
     core_manager --> core_empirical_store
     core_manager --> core_manifest_format
     core_manager --> core_config_store
-    core_manager --> core_config
     core_manager --> core_metadata
-    core_manager --> core_scheduling
-    core_manager --> core_secret_store
-    core_manager --> core_interface
     core_manager --> core_proxy
+    core_manager --> core_scheduling
     core_manager --> utils_validation
+    core_manager --> core_errors
+    core_manager --> core_config
+    core_manager --> core_interface
+    core_manager --> core_secret_store
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
     core_proxy --> core_errors
-    core_proxy --> core_config
     core_proxy --> core_platform
     core_proxy --> core_interface
+    core_proxy --> core_config
     core_queue --> core_errors
     core_scheduling --> core_metadata
     core_worker --> core_platform
@@ -202,7 +202,9 @@ from cjm_plugin_system.cli import (
     estimate_size,
     list_plugins,
     remove_plugin,
-    validate_file
+    validate_file,
+    set_secret,
+    list_secrets
 )
 ```
 
@@ -560,6 +562,53 @@ def validate_file(
     `.yaml`/`.yml` → plugins.yaml). Exits non-zero with a list of validation
     errors if any check fails.
     """
+```
+
+``` python
+def _open_secret_store():
+    """Open the project-local LocalSecretStore at <data_dir>/secrets (CR-12)."""
+    from cjm_plugin_system.core.secret_store import LocalSecretStore
+    cfg = get_config()
+    data_dir = getattr(cfg, "data_dir", None)
+    secrets_dir = (data_dir / "secrets") if data_dir is not None else None
+    return LocalSecretStore(secrets_dir)
+
+
+@app.command("set-secret")
+def set_secret(
+    plugin_name: str = typer.Argument(..., help="Plugin name (manifest 'name', e.g. cjm-transcription-plugin-gemini)"),
+    key: str = typer.Argument(..., help="Secret key = the env-var name the worker reads (e.g. GEMINI_API_KEY)"),
+    value: Optional[str] = typer.Option(None, "--value", help="Secret value (omit to be prompted with hidden input)"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Reserved multi-user scope (default: single-user)"),
+)
+    "Open the project-local LocalSecretStore at <data_dir>/secrets (CR-12)."
+```
+
+``` python
+def set_secret(
+    plugin_name: str = typer.Argument(..., help="Plugin name (manifest 'name', e.g. cjm-transcription-plugin-gemini)"),
+    key: str = typer.Argument(..., help="Secret key = the env-var name the worker reads (e.g. GEMINI_API_KEY)"),
+    value: Optional[str] = typer.Option(None, "--value", help="Secret value (omit to be prompted with hidden input)"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Reserved multi-user scope (default: single-user)"),
+)
+    """
+    Store a plugin secret in the project-local SecretStore (CR-12).
+    
+    The value is written to <data_dir>/secrets/secrets.json (0600) — never to
+    plugins.yaml, manifests, or the config store. Plugins read it from their
+    worker env at spawn. Omit --value to be prompted (hidden input) so the
+    secret stays out of shell history. After setting, reload the plugin (or
+    restart the host) so its worker respawns with the new env — the GUI /
+    PluginManager.set_plugin_secret do this automatically.
+    """
+```
+
+``` python
+def list_secrets(
+    plugin_name: str = typer.Argument(..., help="Plugin name to list secret KEY NAMES for"),
+    scope: Optional[str] = typer.Option(None, "--scope", help="Reserved multi-user scope"),
+)
+    "List the secret KEY NAMES stored for a plugin — never the values (CR-12)."
 ```
 
 #### Variables
@@ -1509,6 +1558,7 @@ from cjm_plugin_system.core.interface import (
     FileBackedDTO,
     ConfigOption,
     FieldOptions,
+    EnvVarSpec,
     PluginInterface,
     plugin_action,
     collect_plugin_actions
@@ -1581,6 +1631,51 @@ class FieldOptions:
     
     options: List[ConfigOption]  # current valid options
     constraints: Dict[str, Any] = dataclasses.field(default_factory=dict)  # derived field-constraint overrides
+```
+
+``` python
+@dataclass
+class EnvVarSpec:
+    """
+    CR-12: one entry of a plugin's spawn-time worker-environment contract.
+    
+    A plugin declares the environment variables its worker subprocess reads at
+    startup via `WORKER_ENV: ClassVar[List[EnvVarSpec]]`. Worker env vars are
+    FIXED AT SPAWN — changing one requires a worker RESPAWN, so the substrate
+    routes such changes through `reload_plugin`, never `reconfigure` (the env is
+    baked into the subprocess at `Popen` and can't be mutated in-process). This
+    is the lifecycle distinction from a normal config field (reconfigurable in
+    place via `reconfigure`/`_release_<trigger>`).
+    
+    Two flavors share this one declaration:
+    
+      - `secret=True`  : value resolved from the `SecretStore` (masked; never
+                         persisted in the config store, echoed in config_schema,
+                         or logged). A secret never carries a `default` — a
+                         baked-in secret is a leak.
+      - `secret=False` : visible value resolved from the override chain
+                         (operator override > manifest `install.env_vars` >
+                         this `default`); safe to display.
+    
+    Both share one injection seam: the substrate composes the resolved
+    {name: value} overlay at load time and injects it into the worker env at
+    spawn (extending the existing CJM_DATA_DIR / CJM_MODELS_DIR injection).
+    This is "derive from behaviour, not metadata" applied to the spawn env: the
+    plugin declares WHICH vars it consumes + whether each is secret/required;
+    the substrate owns resolution + injection.
+    
+    `options` is a forward seam for visible vars with a finite domain (e.g. a
+    device selector enumerating GPUs); unused today but reserved so the
+    plugin-config UI / a future `set-env` surface isn't blocked.
+    """
+    
+    name: str  # The env var the worker reads, e.g. "GEMINI_API_KEY"
+    secret: bool = False  # True -> value resolved from the SecretStore, masked
+    required: bool = False  # Worker can't do useful work until this is satisfied
+    label: str = ''  # Display label for CLI / GUI affordances
+    description: str = ''  # Help text for CLI / GUI
+    default: Optional[str]  # Visible vars only; secrets must leave this None
+    options: Optional[List[str]]  # Forward seam: finite domain for a visible var (unused today)
 ```
 
 ``` python
@@ -2275,6 +2370,91 @@ def get_instance(
 ``` python
 def list_instances(
     "List all loaded instances, optionally filtered by underlying plugin name."
+```
+
+``` python
+def _worker_env_specs(
+    self,
+    plugin_meta: PluginMeta  # Plugin whose WORKER_ENV contract to read
+) -> List[Dict[str, Any]]:  # List of EnvVarSpec-as-dict entries (possibly empty)
+    """
+    Return a plugin's WORKER_ENV contract as spec dicts (CR-12).
+    
+    Prefers the typed manifest_v2 code section; falls back to the flat manifest
+    dict view. Empty list when the plugin declares no worker-env contract.
+    """
+```
+
+``` python
+def _resolve_worker_env(
+    self,
+    plugin_meta: PluginMeta,        # Plugin being loaded
+    scope: Optional[str] = None     # SG-55 forward seam: per-principal scope (None = single-user)
+) -> Dict[str, str]:  # {ENV_NAME: value} overlay injected into the worker at spawn
+    """
+    CR-12: compose the resolved worker-env overlay for a load.
+    
+    Secrets resolve from the SecretStore keyed by plugin_name — so every
+    instance of a plugin shares one credential (CR-10: two Gemini instances,
+    one GEMINI_API_KEY). A missing secret is OMITTED (the worker spawns without
+    it; the plugin reports the gap at execute) rather than injected empty.
+    
+    Visible vars resolve from their declared `default` (the operator-override
+    store is a deferred source; the manifest's static `install.env_vars` already
+    injects fixed visible defaults via the proxy, so this only adds WORKER_ENV
+    defaults not already covered there). All values are fixed at spawn — a
+    change requires `reload_plugin`.
+    """
+```
+
+``` python
+def get_worker_env_status(
+    self,
+    name_or_meta: Any,              # Plugin name (loaded/discovered) or a PluginMeta
+    scope: Optional[str] = None     # SG-55 forward seam
+) -> List[Dict[str, Any]]:  # Per-entry status dicts (secret values never returned)
+    """
+    CR-12: per-entry satisfaction status of a plugin's worker-env contract.
+    
+    Each entry: {name, secret, required, satisfied, label, description}.
+    `satisfied` means a value is resolvable (secret present in the store, or a
+    visible var has a default/override). Secret VALUES are never returned — only
+    whether one is set. The plugin-config UI uses this to gate config display on
+    required secrets being satisfied.
+    """
+```
+
+``` python
+def missing_required_env(
+    self,
+    name_or_meta: Any,              # Plugin name or PluginMeta
+    scope: Optional[str] = None     # SG-55 forward seam
+) -> List[str]:  # Names of required worker-env entries with no resolvable value
+    "CR-12: names of required worker-env entries that are unsatisfied."
+```
+
+``` python
+def set_plugin_secret(
+    self,
+    name_or_id: str,             # Plugin name or instance_id whose secret to set
+    key: str,                    # Secret key (the env-var name, e.g. "GEMINI_API_KEY")
+    value: str,                  # Secret value (stored via the SecretStore, never config/logs)
+    *,
+    scope: Optional[str] = None, # SG-55 forward seam: per-principal scope
+    reload: bool = True          # Respawn loaded worker(s) so the new env is injected
+) -> bool:  # True if the secret was stored
+    """
+    CR-12: store a plugin secret, then respawn its worker(s) to inject it.
+    
+    Secrets are keyed by the underlying PLUGIN name (not instance_id), so all
+    instances of a plugin share one credential — set the Gemini key once and
+    every Gemini instance gets it at (re)spawn. Because worker env is fixed at
+    spawn, the new value only reaches a *running* worker via a RESPAWN, so this
+    reloads each loaded instance of the plugin (unless `reload=False`, e.g. when
+    provisioning a secret before the plugin is loaded). This is the
+    actuation seam both the CLI (`cjm-ctl set-secret`) and a future config UI
+    call. Reload failures are logged, not raised.
+    """
 ```
 
 ``` python
@@ -3222,6 +3402,7 @@ class CodeSection:
     resources: Optional[ResourceRequirements]  # Phase 5a hard-facts
     config_schema: Optional[Dict[str, Any]]  # JSON Schema for plugin config
     regenerated_at: Optional[str]  # ISO-8601 UTC of last regen
+    worker_env: Optional[List[Dict[str, Any]]]  # CR-12 spawn-env contract: asdict(EnvVarSpec) list
 ```
 
 ``` python
@@ -4038,13 +4219,15 @@ async def __aexit__(self, exc_type, exc_val, exc_tb)
 class RemotePluginProxy:
     def __init__(
         self,
-        manifest:Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+        manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
+        extra_env:Optional[Dict[str, str]]=None # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
     )
     "Proxy that forwards plugin calls to an isolated Worker subprocess."
     
     def __init__(
             self,
-            manifest:Dict[str, Any] # Plugin manifest with python_path, module, class, etc.
+            manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
+            extra_env:Optional[Dict[str, str]]=None # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
         )
         "Initialize proxy and start the worker process."
     
