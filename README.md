@@ -39,51 +39,51 @@ Total: 18 notebooks across 2 directories
 
 ``` mermaid
 graph LR
-    bootstrap[bootstrap<br/>Bootstrap]
-    cli[cli<br/>cli]
-    core_config[core.config<br/>Configuration]
-    core_config_store[core.config_store<br/>Plugin Config Store]
-    core_empirical_store[core.empirical_store<br/>Empirical Resource Tracking]
-    core_errors[core.errors<br/>Plugin Error Taxonomy]
-    core_interface[core.interface<br/>Plugin Interface]
-    core_manager[core.manager<br/>Plugin Manager]
-    core_manifest_format[core.manifest_format<br/>Manifest Format (v2.0)]
-    core_metadata[core.metadata<br/>Plugin Metadata]
-    core_platform[core.platform<br/>Platform Utilities]
-    core_proxy[core.proxy<br/>Remote Plugin Proxy]
-    core_queue[core.queue<br/>Job Queue]
-    core_scheduling[core.scheduling<br/>Scheduling]
-    core_secret_store[core.secret_store<br/>Plugin Secret Store]
-    core_worker[core.worker<br/>Universal Worker]
-    utils_hashing[utils.hashing<br/>Content Hashing Utilities]
-    utils_validation[utils.validation<br/>Configuration Validation]
+    bootstrap["bootstrap<br/>Bootstrap"]
+    cli["cli<br/>cli"]
+    core_config["core.config<br/>Configuration"]
+    core_config_store["core.config_store<br/>Plugin Config Store"]
+    core_empirical_store["core.empirical_store<br/>Empirical Resource Tracking"]
+    core_errors["core.errors<br/>Plugin Error Taxonomy"]
+    core_interface["core.interface<br/>Plugin Interface"]
+    core_manager["core.manager<br/>Plugin Manager"]
+    core_manifest_format["core.manifest_format<br/>Manifest Format (v2.0)"]
+    core_metadata["core.metadata<br/>Plugin Metadata"]
+    core_platform["core.platform<br/>Platform Utilities"]
+    core_proxy["core.proxy<br/>Remote Plugin Proxy"]
+    core_queue["core.queue<br/>Job Queue"]
+    core_scheduling["core.scheduling<br/>Scheduling"]
+    core_secret_store["core.secret_store<br/>Plugin Secret Store"]
+    core_worker["core.worker<br/>Universal Worker"]
+    utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
+    utils_validation["utils.validation<br/>Configuration Validation"]
 
-    bootstrap --> core_queue
     bootstrap --> core_manager
     bootstrap --> core_scheduling
-    cli --> core_manifest_format
+    bootstrap --> core_queue
     cli --> core_platform
-    cli --> core_config
     cli --> core_metadata
+    cli --> core_config
+    cli --> core_manifest_format
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
+    core_manager --> core_interface
+    core_manager --> core_metadata
+    core_manager --> core_errors
     core_manager --> core_empirical_store
+    core_manager --> utils_validation
     core_manager --> core_manifest_format
     core_manager --> core_config_store
-    core_manager --> core_metadata
-    core_manager --> core_proxy
-    core_manager --> core_scheduling
-    core_manager --> utils_validation
-    core_manager --> core_errors
     core_manager --> core_config
-    core_manager --> core_interface
+    core_manager --> core_scheduling
     core_manager --> core_secret_store
+    core_manager --> core_proxy
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
-    core_proxy --> core_errors
-    core_proxy --> core_platform
     core_proxy --> core_interface
+    core_proxy --> core_platform
+    core_proxy --> core_errors
     core_proxy --> core_config
     core_queue --> core_errors
     core_scheduling --> core_metadata
