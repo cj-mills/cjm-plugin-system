@@ -61,30 +61,30 @@ graph LR
     bootstrap --> core_manager
     bootstrap --> core_scheduling
     bootstrap --> core_queue
-    cli --> core_platform
     cli --> core_metadata
     cli --> core_config
     cli --> core_manifest_format
+    cli --> core_platform
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_interface
-    core_manager --> core_metadata
     core_manager --> core_errors
+    core_manager --> core_metadata
     core_manager --> core_empirical_store
-    core_manager --> utils_validation
-    core_manager --> core_manifest_format
-    core_manager --> core_config_store
     core_manager --> core_config
+    core_manager --> core_manifest_format
+    core_manager --> utils_validation
     core_manager --> core_scheduling
-    core_manager --> core_secret_store
     core_manager --> core_proxy
-    core_manifest_format --> core_metadata
+    core_manager --> core_secret_store
+    core_manager --> core_config_store
+    core_manager --> core_interface
     core_manifest_format --> utils_hashing
+    core_manifest_format --> core_metadata
     core_platform --> core_config
-    core_proxy --> core_interface
-    core_proxy --> core_platform
     core_proxy --> core_errors
     core_proxy --> core_config
+    core_proxy --> core_platform
+    core_proxy --> core_interface
     core_queue --> core_errors
     core_scheduling --> core_metadata
     core_worker --> core_platform
@@ -987,6 +987,7 @@ class EmpiricalResourceRecord:
     duration_seconds_mean: float  # Welford running mean of sample.duration_seconds
     success_rate: float  # success_count / sample_count
     last_observed: datetime  # tz-aware; tracks most recent ResourceSample.observed_at
+    api_usage_totals: Dict[str, float] = field(...)  # SG-54: cumulative per-unit usage summed across runs (tokens/credits/pages/...); {} for compute-only plugins
 ```
 
 ``` python
@@ -1091,7 +1092,7 @@ success_count incremented by 1 if sample.success else 0."
 #### Variables
 
 ``` python
-_SCHEMA = '\nCREATE TABLE IF NOT EXISTS empirical_resources (\n    instance_id TEXT NOT NULL,\n    plugin_name TEXT NOT NULL,\n    config_hash TEXT NOT NULL,\n    sample_count INTEGER NOT NULL DEFAULT 0,\n    success_count INTEGER NOT NULL DEFAULT 0,\n    cpu_percent_mean REAL NOT NULL DEFAULT 0.0,\n    memory_mb_peak_max REAL NOT NULL DEFAULT 0.0,\n    memory_mb_peak_mean REAL NOT NULL DEFAULT 0.0,\n    gpu_memory_mb_peak_max REAL NOT NULL DEFAULT 0.0,\n    gpu_memory_mb_peak_mean REAL NOT NULL DEFAULT 0.0,\n    duration_seconds_mean REAL NOT NULL DEFAULT 0.0,\n    last_observed TEXT NOT NULL,\n    PRIMARY KEY (instance_id, config_hash)\n)\n'
+_SCHEMA = "\nCREATE TABLE IF NOT EXISTS empirical_resources (\n    instance_id TEXT NOT NULL,\n    plugin_name TEXT NOT NULL,\n    config_hash TEXT NOT NULL,\n    sample_count INTEGER NOT NULL DEFAULT 0,\n    success_count INTEGER NOT NULL DEFAULT 0,\n    cpu_percent_mean REAL NOT NULL DEFAULT 0.0,\n    memory_mb_peak_max REAL NOT NULL DEFAULT 0.0,\n    memory_mb_peak_mean REAL NOT NULL DEFAULT 0.0,\n    gpu_memory_mb_peak_max REAL NOT NULL DEFAULT 0.0,\n    gpu_memory_mb_peak_mean REAL NOT NULL DEFAULT 0.0,\n    duration_seconds_mean REAL NOT NULL DEFAULT 0.0,\n    last_observed TEXT NOT NULL,\n    api_usage_totals TEXT NOT NULL DEFAULT '{}',\n    PRIMARY KEY (instance_id, config_hash)\n)\n"
 ```
 
 ### Plugin Error Taxonomy (`errors.ipynb`)
@@ -2017,6 +2018,27 @@ one strategy over the other). Default: no-op; plugins opt in by overriding."
             message: str = "" # Descriptive status message
         ) -> None
         "Report execution progress. Call during execute() to update status."
+    
+    def report_usage(
+            self,
+            usage: Dict[str, float],  # Measured usage for this execute, keyed by plugin-defined unit name
+        ) -> None
+        "SG-54: report measured API/service usage for the current execute() call.
+
+Unit-agnostic by design — the plugin (which holds the API response)
+supplies whatever unit names it measures: {"input_tokens": .., "output_tokens": ..}
+for an LLM, {"pages": ..} for OCR, {"characters": ..} for TTS,
+{"credits"/"requests"/"minutes": ..} for others. The substrate stores +
+accumulates per unit name WITHOUT interpreting them (summed across runs in
+the empirical store's api_usage_totals). Pricing is deliberately NOT here
+(volatile, per-service, often not API-accessible) — a consumer-side rate
+table turns raw units into cost. "Derive from behaviour": the plugin
+MEASURES actual usage from the response; the substrate aggregates.
+
+Stored on `self._last_api_usage`; the worker exposes it via /stats and the
+substrate folds it into the post-execute ResourceSample. The worker resets
+it before each execute so a failed/usage-less call can't inherit stale
+usage. Default: store-only (parallel to report_progress)."
 ```
 
 ``` python
