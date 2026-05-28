@@ -92,6 +92,34 @@ def create_app(
         print(f"FATAL: Failed to load {module_name}:{class_name} - {e}")
         sys.exit(1)
 
+    @app.on_event("shutdown")
+    def _on_shutdown() -> None:
+        """Session A 2026-05-27: invoke plugin.cleanup() before the worker exits.
+
+        Both the parent_monitor watchdog (SIGTERM via terminate_self) and an
+        external SIGTERM (e.g., substrate's proxy stall-detection killing a
+        wedged prefetch) route through uvicorn's graceful-shutdown path,
+        which fires this event. Pre-fix the plugin's cleanup() hook was only
+        invoked on the manager-driven unload_plugin path — never on watchdog
+        or stall-triggered termination — so plugins that spawn grandchild
+        subprocesses (Voxtral-vLLM's vLLM server is the driving case) leaked
+        them as orphans whenever the worker died abnormally. Cleanup failures
+        are swallowed-with-log because they must NOT prevent uvicorn shutdown.
+        """
+        try:
+            cleanup = getattr(plugin_instance, "cleanup", None)
+            if cleanup is not None:
+                cleanup()
+        except Exception as e:
+            # Best-effort: log but don't propagate — shutdown must continue.
+            try:
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    f"plugin.cleanup() raised during worker shutdown: {e}"
+                )
+            except Exception:
+                pass
+
     @app.get("/health")
     def health_check() -> Dict[str, Any]:
         """Health check endpoint."""

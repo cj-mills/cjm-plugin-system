@@ -700,35 +700,198 @@ RemotePluginProxy.list_processes = list_processes
 RemotePluginProxy.list_processes_async = list_processes_async
 
 # %% ../../nbs/core/proxy.ipynb #f5e578a2
-def prefetch(self) -> bool:  # True if worker accepted the prefetch hook
-    """CR-4: forward the substrate's prefetch signal to the worker process.
-    
-    Plugin can opt in via PluginInterface.prefetch() to eagerly download
-    models / warm caches without invoking execute(). Default implementation
-    is a no-op so silent-pass-through is normal. Errors raised by the
-    plugin (worker 500) propagate as RuntimeError so callers can distinguish
-    "plugin can't acquire" from "worker unreachable" (False).
+def prefetch(
+    self,
+    stall_threshold_seconds: Optional[float] = None,  # Override SubstrateConfig.prefetch_stall_threshold_seconds; None = use config
+    poll_interval_seconds: float = 1.0,               # How often to poll /progress for stall detection
+) -> bool:  # True if worker accepted the prefetch hook
+    """CR-4 / Session A 2026-05-27: forward the substrate's prefetch signal with
+    progress-based stall detection.
+
+    Replaces wall-clock-timeout-based startup waiting (operators racing arbitrary
+    timeouts vs. network speeds for model downloads). Approach:
+
+      1. POST /prefetch fires in a background thread with httpx timeout=None.
+      2. Main thread polls /progress every poll_interval_seconds.
+      3. Each (progress, message) change resets the stall counter.
+      4. If no change in stall_threshold_seconds AND POST still pending →
+         SIGTERM the worker subprocess + raise PluginTimeoutError.
+
+    Plugins opt in to fine-grained stall defeat by calling
+    self.report_progress(...) periodically during long lifecycle operations
+    (model download, server startup, etc.). Plugins that don't report progress
+    are fine as long as the threshold accommodates their slowest plausible
+    silent stretch.
+
+    Errors raised by the plugin (worker 500) propagate as RuntimeError; worker
+    unreachable propagates as `False`; stall fires PluginTimeoutError.
     """
-    try:
-        with httpx.Client(timeout=None) as client:
-            resp = client.post(f"{self.base_url}/prefetch")
-        if resp.status_code == 500:
-            raise RuntimeError(f"Plugin prefetch failed: {resp.text}")
-        return resp.status_code == 200
-    except httpx.ConnectError:
-        return False  # Worker may have died
+    threshold = stall_threshold_seconds if stall_threshold_seconds is not None else _resolve_prefetch_stall_threshold()
+    return _run_prefetch_with_stall_detection(self, threshold, poll_interval_seconds)
 
 
-async def prefetch_async(self) -> bool:  # True if worker accepted the prefetch hook
-    """Async variant of `prefetch`. Same semantics."""
+async def prefetch_async(
+    self,
+    stall_threshold_seconds: Optional[float] = None,
+    poll_interval_seconds: float = 1.0,
+) -> bool:  # True if worker accepted the prefetch hook
+    """Async variant of `prefetch`. Same stall-detection semantics."""
+    threshold = stall_threshold_seconds if stall_threshold_seconds is not None else _resolve_prefetch_stall_threshold()
+    return await _run_prefetch_with_stall_detection_async(self, threshold, poll_interval_seconds)
+
+
+def _resolve_prefetch_stall_threshold() -> float:
+    """Resolve the stall threshold from SubstrateConfig with a defensive fallback."""
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            resp = await client.post(f"{self.base_url}/prefetch")
-        if resp.status_code == 500:
-            raise RuntimeError(f"Plugin prefetch failed: {resp.text}")
-        return resp.status_code == 200
-    except httpx.ConnectError:
+        from cjm_plugin_system.core.config import get_config
+        cfg = get_config()
+        return float(getattr(cfg.substrate, 'prefetch_stall_threshold_seconds', 60.0))
+    except Exception:
+        return 60.0
+
+
+def _run_prefetch_with_stall_detection(
+    proxy: 'RemotePluginProxy',
+    stall_threshold_seconds: float,
+    poll_interval_seconds: float,
+) -> bool:
+    """Sync stall-detecting prefetch implementation.
+
+    Runs POST /prefetch in a daemon thread; main thread polls /progress for
+    a (progress, message) advance every poll_interval_seconds. If no advance
+    in stall_threshold_seconds AND the POST is still in-flight, SIGTERMs the
+    worker subprocess (so its plugin.cleanup() can run via the worker's
+    shutdown handler — closes the orphan-subprocess-on-stall bug) and raises
+    PluginTimeoutError client-side.
+    """
+    import threading
+    import time
+
+    from cjm_plugin_system.core.errors import PluginTimeoutError
+
+    state: Dict[str, Any] = {'status': 'pending', 'error': None}
+
+    def _post_prefetch() -> None:
+        try:
+            with httpx.Client(timeout=None) as client:
+                resp = client.post(f"{proxy.base_url}/prefetch")
+            if resp.status_code == 500:
+                state['error'] = RuntimeError(f"Plugin prefetch failed: {resp.text}")
+            elif resp.status_code == 200:
+                state['status'] = 'done'
+            else:
+                state['status'] = 'unexpected_status'
+        except httpx.ConnectError:
+            state['status'] = 'connect_error'
+        except Exception as e:
+            state['error'] = e
+
+    t = threading.Thread(target=_post_prefetch, daemon=True, name=f"prefetch-{proxy.name}")
+    t.start()
+
+    last_progress: Tuple[float, str] = (-1.0, '__sentinel__')
+    last_change = time.time()
+    while t.is_alive():
+        t.join(timeout=poll_interval_seconds)
+        if not t.is_alive():
+            break
+        # Poll progress to defeat stall counter.
+        try:
+            with httpx.Client(timeout=2.0) as poll_client:
+                pr = poll_client.get(f"{proxy.base_url}/progress")
+            if pr.status_code == 200:
+                pd = pr.json()
+                current = (float(pd.get('progress', 0.0) or 0.0), str(pd.get('message', '')))
+                if current != last_progress:
+                    last_progress = current
+                    last_change = time.time()
+        except Exception:
+            # Polling failure is non-fatal; the POST thread carries the real signal.
+            pass
+
+        if time.time() - last_change > stall_threshold_seconds:
+            # Stall: SIGTERM the worker so its uvicorn shutdown event fires
+            # plugin.cleanup() (closes orphan subprocesses). Re-raise client-side.
+            try:
+                if proxy.process is not None and proxy.process.poll() is None:
+                    proxy.process.terminate()
+            except Exception:
+                pass
+            elapsed = time.time() - last_change
+            raise PluginTimeoutError(proxy.name, elapsed)
+
+    if state['error'] is not None:
+        raise state['error']
+    if state['status'] == 'connect_error':
+        return False  # Worker died
+    return state['status'] == 'done'
+
+
+async def _run_prefetch_with_stall_detection_async(
+    proxy: 'RemotePluginProxy',
+    stall_threshold_seconds: float,
+    poll_interval_seconds: float,
+) -> bool:
+    """Async stall-detecting prefetch implementation. Mirrors the sync variant
+    using asyncio.gather instead of a daemon thread."""
+    import asyncio
+    import time
+
+    from cjm_plugin_system.core.errors import PluginTimeoutError
+
+    async def _post_prefetch() -> Dict[str, Any]:
+        try:
+            async with httpx.AsyncClient(timeout=None) as client:
+                resp = await client.post(f"{proxy.base_url}/prefetch")
+            if resp.status_code == 500:
+                return {'status': 'plugin_error', 'detail': resp.text}
+            if resp.status_code == 200:
+                return {'status': 'done'}
+            return {'status': 'unexpected_status', 'detail': resp.status_code}
+        except httpx.ConnectError:
+            return {'status': 'connect_error'}
+
+    async def _poll_progress() -> None:
+        nonlocal last_progress, last_change
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                pr = await client.get(f"{proxy.base_url}/progress")
+            if pr.status_code == 200:
+                pd = pr.json()
+                current = (float(pd.get('progress', 0.0) or 0.0), str(pd.get('message', '')))
+                if current != last_progress:
+                    last_progress = current
+                    last_change = time.time()
+        except Exception:
+            pass
+
+    last_progress: Tuple[float, str] = (-1.0, '__sentinel__')
+    last_change = time.time()
+    post_task = asyncio.create_task(_post_prefetch())
+    while not post_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(post_task), timeout=poll_interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+        if post_task.done():
+            break
+        await _poll_progress()
+        if time.time() - last_change > stall_threshold_seconds:
+            post_task.cancel()
+            try:
+                if proxy.process is not None and proxy.process.poll() is None:
+                    proxy.process.terminate()
+            except Exception:
+                pass
+            elapsed = time.time() - last_change
+            raise PluginTimeoutError(proxy.name, elapsed)
+
+    result = await post_task
+    if result['status'] == 'plugin_error':
+        raise RuntimeError(f"Plugin prefetch failed: {result['detail']}")
+    if result['status'] == 'connect_error':
         return False
+    return result['status'] == 'done'
 
 
 def reconfigure(

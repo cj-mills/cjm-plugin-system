@@ -55,9 +55,18 @@ class SubstrateConfig:
     - `empirical_tracking` (CR-7): per-execute resource sample recording into
       `EmpiricalResourceStore`. PluginManager skips `record_sample` calls when
       False; the store's lazy-init also short-circuits.
+    - `prefetch_stall_threshold_seconds` (CR-4 / Session A 2026-05-27): how long
+      proxy.prefetch waits with no observed progress (via `/progress` polling)
+      before declaring a stall. Replaces per-plugin wall-clock timeouts —
+      operators no longer race network speed against an arbitrary value. Plugins
+      defeat the stall counter by calling `self.report_progress(...)` periodically
+      during long lifecycle operations (model download / vLLM server startup).
+      Default 60 s; bump higher for plugins that don't report progress, or lower
+      if false-positive stalls are noisy.
     """
     drift_detection:bool=True # Run /config_schema hash compare on every load_plugin
     empirical_tracking:bool=True # Record ResourceSample after every execute_plugin*
+    prefetch_stall_threshold_seconds:float=60.0 # CR-4 / Session A: stall detection threshold for proxy.prefetch
 
 # %% ../../nbs/core/config.ipynb #cjm-config
 @dataclass
@@ -142,6 +151,9 @@ def _load_from_yaml(
     substrate = SubstrateConfig(
         drift_detection=bool(substrate_data.get("drift_detection", True)),
         empirical_tracking=bool(substrate_data.get("empirical_tracking", True)),
+        prefetch_stall_threshold_seconds=float(substrate_data.get(
+            "prefetch_stall_threshold_seconds", 60.0
+        )),
     )
 
     # Parse top-level config
