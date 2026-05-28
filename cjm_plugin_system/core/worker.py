@@ -102,28 +102,75 @@ def create_app(
             "version": getattr(plugin_instance, "version", "unknown")
         }
 
+    # Closure-captured Process instance + per-child baseline cache (SG-40 pattern).
+    # psutil.Process.cpu_percent() caches the prior CPU-time baseline ON THE
+    # INSTANCE: separate Process() instances pointing at the same PID DON'T
+    # share the baseline, so a one-shot prime at module-main-block can't help
+    # a /stats handler that creates a fresh Process() each call. Keeping the
+    # Process instance alive in this closure means the SECOND /stats call onward
+    # returns real CPU% for the worker (the first prime-call happens below).
+    # Children get the same treatment via _child_procs (keyed by PID; new children
+    # are primed on first appearance, return 0% that call, real% thereafter).
+    _worker_proc = psutil.Process()
+    _worker_proc.cpu_percent()  # Prime worker baseline (next call returns delta).
+    _child_procs: Dict[int, psutil.Process] = {}
+
     @app.get("/stats")
     def stats() -> Dict[str, Any]:
-        """Return process tree resource usage."""
-        proc = psutil.Process()
-        
-        # 1. Get Memory of Main Process
-        total_rss = proc.memory_info().rss
-        
-        # 2. Get Memory of Children (Safe Loop)
-        # recursive=True ensures we catch grandchildren
-        for child in proc.children(recursive=True):
+        """Return process-tree resource usage for the worker subprocess.
+
+        Aggregates RSS + CPU% across the worker AND its descendants in one
+        psutil.children() walk so subprocess-spawning plugins (Voxtral-vLLM's
+        managed vLLM server is the driving case) report subtree totals rather
+        than worker-only values. `subtree_pids` is emitted alongside so the
+        substrate's GPU-attribution helper can intersect with the system-
+        monitor plugin's per-PID GPU enumeration without needing its own
+        process-tree walk (which would duplicate this one).
+        """
+        worker_pid = os.getpid()
+
+        # Single walk: descendants used for RSS + CPU% sums + subtree_pids list.
+        try:
+            descendants = _worker_proc.children(recursive=True)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            descendants = []  # No descendants → worker-only totals below.
+
+        total_rss = _worker_proc.memory_info().rss
+        total_cpu = _worker_proc.cpu_percent()  # Delta against the prime call in the closure.
+        subtree_pids = [worker_pid]
+        live_child_pids = set()
+        for child in descendants:
             try:
-                # We must check if child still exists before asking for memory
                 total_rss += child.memory_info().rss
+                # Reuse the cached Process for delta-correctness (first call per child returns 0,
+                # subsequent calls reflect actual CPU%). psutil.Process is hashable on (pid, create_time)
+                # internally; we key by pid since descendants live shorter than the worker and pid recycling
+                # within a single worker lifetime is extremely rare.
+                cached = _child_procs.get(child.pid)
+                if cached is None:
+                    cached = child
+                    cached.cpu_percent()  # Prime; this call returns 0.0
+                    _child_procs[child.pid] = cached
+                    total_cpu += 0.0
+                else:
+                    total_cpu += cached.cpu_percent()
+                subtree_pids.append(child.pid)
+                live_child_pids.add(child.pid)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
-                # Process died or we don't have permission (rare for child), skip it
+                # Process died mid-walk OR we lack permission (rare for descendants); skip.
                 pass
 
+        # Evict cache entries for children that have exited (avoid unbounded growth
+        # in long-running plugins that frequently spawn-and-exit subprocesses).
+        for stale_pid in list(_child_procs.keys()):
+            if stale_pid not in live_child_pids:
+                _child_procs.pop(stale_pid, None)
+
         return {
-            "pid": os.getpid(),
-            "cpu_percent": proc.cpu_percent(), # Note: aggregating CPU % is complex, main pid is usually enough proxy
+            "pid": worker_pid,
+            "cpu_percent": total_cpu,  # Worker + descendants (subtree sum)
             "memory_rss_mb": total_rss / 1024 / 1024,
+            "subtree_pids": subtree_pids,  # Worker + descendants; substrate intersects with sysmon GPU PIDs
             # SG-54: unit-agnostic measured usage the plugin reported via
             # report_usage() during the last execute (None if it reported none).
             "usage": getattr(plugin_instance, "_last_api_usage", None),

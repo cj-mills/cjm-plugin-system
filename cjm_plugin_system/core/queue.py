@@ -28,6 +28,7 @@ from typing import (
 from cjm_plugin_system.core.errors import (
     JobError, TracebackPolicy, map_bare_exception_to_job_error,
 )
+from ._telemetry import attribute_gpu_to_worker_subtree
 
 # CR-6: PluginManager continues to satisfy JobQueueDependencies structurally.
 # Imported under TYPE_CHECKING to thin runtime coupling per OQ-5 resolution —
@@ -1052,6 +1053,13 @@ def _sample_resource_snapshot(
     best-effort: if the named plugin isn't loaded / errors / lacks the CR-3
     typed methods, GPU fields stay None and the worker-only snapshot is
     returned.
+
+    Subprocess-spawning plugins (e.g. Voxtral-vLLM's managed vLLM server)
+    spawn grandchild PIDs that hold GPU memory the worker itself doesn't.
+    GPU attribution delegates to `attribute_gpu_to_worker_subtree`, which
+    intersects the worker-reported `subtree_pids` set with sysmon's per-PID
+    GPU enumeration. The pre-fix path matched only `worker_pid` and reported
+    `gpu_memory_mb=None` for any subprocess-spawning plugin.
     """
     proxy = self._deps.get_plugin(job.plugin_instance_id)
     if not proxy or not hasattr(proxy, 'get_stats'):
@@ -1073,25 +1081,15 @@ def _sample_resource_snapshot(
     if self._sysmon_name:
         sysmon = self._deps.get_plugin(self._sysmon_name)
         if sysmon is not None:
-            # Per-PID GPU usage via list_processes()
-            try:
-                processes = sysmon.list_processes() if hasattr(sysmon, 'list_processes') else None
-                if processes:
-                    for proc in processes:
-                        # proxy returns dicts; handle both dict + dataclass forms
-                        proc_pid = proc.get('pid') if isinstance(proc, dict) else getattr(proc, 'pid', None)
-                        if proc_pid == snapshot.worker_pid:
-                            snapshot.gpu_index = (
-                                proc.get('gpu_index') if isinstance(proc, dict)
-                                else getattr(proc, 'gpu_index', None)
-                            )
-                            snapshot.gpu_memory_mb = (
-                                proc.get('gpu_memory_mb') if isinstance(proc, dict)
-                                else getattr(proc, 'gpu_memory_mb', None)
-                            )
-                            break
-            except Exception:
-                pass  # Sysmon failure shouldn't break the snapshot
+            # Per-subtree GPU usage via the shared substrate helper. Returns None
+            # when sysmon is unreachable; substrate leaves GPU fields at their
+            # defaults. Returns a dict with `gpu_memory_mb` and `gpu_index` when
+            # sysmon is reachable (the dict's gpu_memory_mb is 0.0 for CPU-only
+            # plugins on a GPU box — honest "no GPU usage" signal).
+            attribution = attribute_gpu_to_worker_subtree(stats, sysmon)
+            if attribution is not None:
+                snapshot.gpu_memory_mb = attribution.get('gpu_memory_mb')
+                snapshot.gpu_index = attribution.get('gpu_index')
 
             # Global GPU stats via get_system_status()
             try:
@@ -1133,6 +1131,7 @@ def get_resource_snapshot(
 
 JobQueue._sample_resource_snapshot = _sample_resource_snapshot
 JobQueue.get_resource_snapshot = get_resource_snapshot
+
 
 # %% ../../nbs/core/queue.ipynb #lifecycle
 async def start(self) -> None:

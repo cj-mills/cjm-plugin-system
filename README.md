@@ -12,7 +12,7 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (14)
+    ├── core/ (15)
     │   ├── config.ipynb           # Project-level configuration for paths, runtime settings, and environment management
     │   ├── config_store.ipynb     # Persistent storage for per-plugin configuration (with enabled flag)
     │   ├── empirical_store.ipynb  # Persistent store for empirically-observed resource usage per (instance_id, config_hash) pair. CR-7's data foundation — `record_sample` is called from `PluginManager.execute_plugin*` finally blocks; aggregates feed eviction-candidate selection + future UI hints + cost-aware retry decisions.
@@ -26,6 +26,7 @@ pip install cjm_plugin_system
     │   ├── queue.ipynb            # Resource-aware job queue for sequential plugin execution with cancellation support
     │   ├── scheduling.ipynb       # Resource scheduling policies for plugin execution
     │   ├── secret_store.ipynb     # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
+    │   ├── telemetry.ipynb        # Shared GPU/CPU attribution helpers used by both `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and `PluginManager._record_sample_safe` (CR-7).
     │   └── worker.ipynb           # FastAPI server that runs inside isolated plugin environments
     ├── utils/ (2)
     │   ├── hashing.ipynb     # Shared cryptographic hashing primitives for content integrity verification
@@ -33,7 +34,7 @@ pip install cjm_plugin_system
     ├── bootstrap.ipynb  # One-call factory that assembles a PluginManager + JobQueue + plugin bindings — closes the demo-app boilerplate duplication audited across 5 substrate consumers.
     └── cli.ipynb        # CLI tool for declarative plugin management
 
-Total: 18 notebooks across 2 directories
+Total: 19 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -54,6 +55,7 @@ graph LR
     core_queue["core.queue<br/>Job Queue"]
     core_scheduling["core.scheduling<br/>Scheduling"]
     core_secret_store["core.secret_store<br/>Plugin Secret Store"]
+    core__telemetry["core._telemetry<br/>Substrate Telemetry Helpers"]
     core_worker["core.worker<br/>Universal Worker"]
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
@@ -63,36 +65,38 @@ graph LR
     bootstrap --> core_scheduling
     cli --> core_manifest_format
     cli --> core_platform
-    cli --> core_metadata
     cli --> core_config
+    cli --> core_metadata
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_secret_store
-    core_manager --> core_metadata
-    core_manager --> core_empirical_store
-    core_manager --> core_interface
     core_manager --> core_manifest_format
-    core_manager --> core_errors
-    core_manager --> utils_validation
     core_manager --> core_config_store
-    core_manager --> core_proxy
+    core_manager --> core_empirical_store
     core_manager --> core_config
+    core_manager --> core_metadata
+    core_manager --> core__telemetry
+    core_manager --> core_secret_store
+    core_manager --> core_errors
+    core_manager --> core_interface
     core_manager --> core_scheduling
-    core_manifest_format --> core_metadata
+    core_manager --> core_proxy
+    core_manager --> utils_validation
     core_manifest_format --> utils_hashing
+    core_manifest_format --> core_metadata
     core_platform --> core_config
+    core_proxy --> core_config
+    core_proxy --> core_platform
     core_proxy --> core_errors
     core_proxy --> core_interface
-    core_proxy --> core_platform
-    core_proxy --> core_config
     core_queue --> core_errors
+    core_queue --> core__telemetry
     core_scheduling --> core_metadata
-    core_worker --> core_errors
     core_worker --> core_platform
+    core_worker --> core_errors
     utils_validation --> core_errors
 ```
 
-*32 cross-module dependencies detected*
+*34 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -2568,20 +2572,30 @@ def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
 ```
 
 ``` python
-def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:bool) -> None:
-    """CR-7: best-effort empirical sample recording.
-    
-    Captures worker stats at end-of-execute (proxy of peak), builds a
-    ResourceSample, and records it via the EmpiricalResourceStore. Failures
-    log + swallow — sample recording must never break the execute path
-    (matches CR-2's `_persist_config` best-effort discipline).
-    
-    Stats fetch can fail naturally (e.g. worker died with WorkerOOMError —
-    the proxy is unreachable). The sample still records with zero stats +
-    success=False so we have a record of the failed attempt for the
-    success_rate aggregate.
+def _get_sysmon_plugin(self) -> Optional[Any]:
+    """Resolve the configured MonitorPlugin (CR-3) for GPU subtree attribution.
+
+    Returns the loaded plugin instance keyed by `sysmon_plugin_name`, or
+    None when no sysmon is configured / hasn't been loaded yet. Lazy
+    resolution against `self.plugins` tolerates load-order: the manager
+    can be constructed before the sysmon plugin is loaded; later
+    `_record_sample_safe` calls pick it up automatically.
     """
-    # Defensive against test fixtures that bypass __init__: if empirical_store
+    name = getattr(self, "_sysmon_plugin_name", None)
+    if not name
+    """
+    Resolve the configured MonitorPlugin (CR-3) for GPU subtree attribution.
+    
+    Returns the loaded plugin instance keyed by `sysmon_plugin_name`, or
+    None when no sysmon is configured / hasn't been loaded yet. Lazy
+    resolution against `self.plugins` tolerates load-order: the manager
+    can be constructed before the sysmon plugin is loaded; later
+    `_record_sample_safe` calls pick it up automatically.
+    """
+```
+
+``` python
+def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:bool) -> None
     """
     CR-7: best-effort empirical sample recording.
     
@@ -2594,6 +2608,15 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
     the proxy is unreachable). The sample still records with zero stats +
     success=False so we have a record of the failed attempt for the
     success_rate aggregate.
+    
+    GPU memory is attributed across the worker's process subtree via
+    `attribute_gpu_to_worker_subtree` (intersecting worker-reported
+    `subtree_pids` with sysmon's per-PID GPU enumeration). Pre-fix this
+    function read `worker_stats["gpu_memory_mb"]` — a key the worker `/stats`
+    endpoint NEVER emits — so EmpiricalResourceRecord.gpu_memory_mb_peak_max
+    was silently 0 for every plugin since CR-7 shipped, not just for
+    subprocess-spawning ones. When no sysmon is configured, GPU memory
+    records as 0.0 (honest signal that we can't measure it).
     """
 ```
 
@@ -3023,7 +3046,8 @@ class PluginManager:
         config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
         empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
         secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
-        max_retries:int=1 # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
+        max_retries:int=1, # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
+        sysmon_plugin_name:Optional[str]=None # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
     )
     "Manages plugin discovery, loading, and lifecycle via process isolation."
     
@@ -3035,7 +3059,8 @@ class PluginManager:
             config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
             empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
             secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
-            max_retries:int=1 # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
+            max_retries:int=1, # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
+            sysmon_plugin_name:Optional[str]=None # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
         )
         "Initialize the plugin manager."
 ```
@@ -4705,6 +4730,13 @@ def _sample_resource_snapshot(
     best-effort: if the named plugin isn't loaded / errors / lacks the CR-3
     typed methods, GPU fields stay None and the worker-only snapshot is
     returned.
+    
+    Subprocess-spawning plugins (e.g. Voxtral-vLLM's managed vLLM server)
+    spawn grandchild PIDs that hold GPU memory the worker itself doesn't.
+    GPU attribution delegates to `attribute_gpu_to_worker_subtree`, which
+    intersects the worker-reported `subtree_pids` set with sysmon's per-PID
+    GPU enumeration. The pre-fix path matched only `worker_pid` and reported
+    `gpu_memory_mb=None` for any subprocess-spawning plugin.
     """
 ```
 
@@ -5493,6 +5525,71 @@ class LocalSecretStore:
 ``` python
 _SECRETS_FILENAME = 'secrets.json'
 _DEFAULT_SCOPE = '__default__'
+```
+
+### Substrate Telemetry Helpers (`telemetry.ipynb`)
+
+> Shared GPU/CPU attribution helpers used by both
+> `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and
+> `PluginManager._record_sample_safe` (CR-7).
+
+#### Import
+
+``` python
+# No corresponding Python module found for core.telemetry
+```
+
+#### Functions
+
+``` python
+def _proc_field(proc: Any, key: str, default: Any = None) -> Any:
+    """Read a field from a sysmon process record, accepting dict or dataclass.
+
+    `MonitorPlugin.list_processes()` returns `ProcessStats` dataclasses (CR-3),
+    but proxy round-trips frequently coerce to dicts. Accept both so the
+    helper works against either form without the caller pre-normalizing.
+    """
+    if isinstance(proc, dict)
+    """
+    Read a field from a sysmon process record, accepting dict or dataclass.
+    
+    `MonitorPlugin.list_processes()` returns `ProcessStats` dataclasses (CR-3),
+    but proxy round-trips frequently coerce to dicts. Accept both so the
+    helper works against either form without the caller pre-normalizing.
+    """
+```
+
+``` python
+def _worker_subtree_pids(stats: Dict[str, Any]) -> set:
+    """Build the worker subtree PID set from a `/stats` dict.
+
+    Falls back to a single-pid set when `subtree_pids` is absent (pre-fix
+    workers, mock test fixtures). The worker pid itself is always included.
+    """
+    tree: set = set()
+    """
+    Build the worker subtree PID set from a `/stats` dict.
+    
+    Falls back to a single-pid set when `subtree_pids` is absent (pre-fix
+    workers, mock test fixtures). The worker pid itself is always included.
+    """
+```
+
+``` python
+def attribute_gpu_to_worker_subtree(
+    stats: Dict[str, Any],  # Worker `/stats` payload (must include 'pid'; uses 'subtree_pids' if present)
+    sysmon: Any,            # The configured MonitorPlugin (or None)
+) -> Optional[Dict[str, Any]]
+    """
+    Attribute GPU memory across the worker's process subtree.
+    
+    Returns `{'gpu_memory_mb': float, 'gpu_index': Optional[int]}` when sysmon
+    is reachable, or `None` when sysmon isn't configured / doesn't expose
+    `list_processes()` / errors out. Callers treat `None` as "sysmon
+    unavailable" and leave GPU snapshot fields as their defaults; a 0.0 sum
+    means sysmon worked but no subtree PID holds GPU memory (CPU-only plugin
+    on a GPU box).
+    """
 ```
 
 ### Configuration Validation (`validation.ipynb`)

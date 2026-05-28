@@ -43,6 +43,7 @@ from cjm_plugin_system.core.manifest_format import (
 from .metadata import PluginInstance, PluginLoadSpec, PluginMeta, PluginTaxonomy, ResourceRequirements
 from .proxy import RemotePluginProxy
 from .scheduling import ResourceScheduler, PermissiveScheduler
+from ._telemetry import attribute_gpu_to_worker_subtree
 
 # SG-39: library modules use `logging.getLogger(__name__)` and let the host
 # (CLI entry point, FastHTML app, worker subprocess) own `basicConfig`.
@@ -62,7 +63,8 @@ class PluginManager:
         config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
         empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
         secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
-        max_retries:int=1 # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
+        max_retries:int=1, # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
+        sysmon_plugin_name:Optional[str]=None # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
     ):
         """Initialize the plugin manager."""
         self.plugin_interface = plugin_interface
@@ -138,6 +140,14 @@ class PluginManager:
         
         # CR-7: bounded reactive retries on PluginResourceError (Track A + B).
         self.max_retries: int = max_retries
+        
+        # MonitorPlugin name for GPU subtree attribution at sample-record time.
+        # _record_sample_safe intersects the worker-reported subtree_pids with this
+        # plugin's list_processes() output. Mirrors JobQueue's sysmon_plugin_name;
+        # hosts typically configure both with the same value. Lazy-resolved via
+        # self.plugins to tolerate load-order (sysmon may load after this manager
+        # is constructed).
+        self._sysmon_plugin_name: Optional[str] = sysmon_plugin_name
         
         # SG-33 (part-of-CR-7): per-instance asyncio.Semaphore for the async
         # execute path's concurrency cap. Lazy-created on first execute_plugin_async
@@ -1147,19 +1157,47 @@ def list_plugins(self) -> List[PluginMeta]: # List of loaded plugin metadata
 
 PluginManager.list_plugins = list_plugins
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-_get_sysmon_plugin
+def _get_sysmon_plugin(self) -> Optional[Any]:
+    """Resolve the configured MonitorPlugin (CR-3) for GPU subtree attribution.
+
+    Returns the loaded plugin instance keyed by `sysmon_plugin_name`, or
+    None when no sysmon is configured / hasn't been loaded yet. Lazy
+    resolution against `self.plugins` tolerates load-order: the manager
+    can be constructed before the sysmon plugin is loaded; later
+    `_record_sample_safe` calls pick it up automatically.
+    """
+    name = getattr(self, "_sysmon_plugin_name", None)
+    if not name:
+        return None
+    meta = self.plugins.get(name)
+    return getattr(meta, "instance", None) if meta else None
+
+PluginManager._get_sysmon_plugin = _get_sysmon_plugin
+
+
 # %% ../../nbs/core/manager.ipynb #pm-fn-_record_sample_safe
 def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:bool) -> None:
     """CR-7: best-effort empirical sample recording.
-    
+
     Captures worker stats at end-of-execute (proxy of peak), builds a
     ResourceSample, and records it via the EmpiricalResourceStore. Failures
     log + swallow — sample recording must never break the execute path
     (matches CR-2's `_persist_config` best-effort discipline).
-    
+
     Stats fetch can fail naturally (e.g. worker died with WorkerOOMError —
     the proxy is unreachable). The sample still records with zero stats +
     success=False so we have a record of the failed attempt for the
     success_rate aggregate.
+
+    GPU memory is attributed across the worker's process subtree via
+    `attribute_gpu_to_worker_subtree` (intersecting worker-reported
+    `subtree_pids` with sysmon's per-PID GPU enumeration). Pre-fix this
+    function read `worker_stats["gpu_memory_mb"]` — a key the worker `/stats`
+    endpoint NEVER emits — so EmpiricalResourceRecord.gpu_memory_mb_peak_max
+    was silently 0 for every plugin since CR-7 shipped, not just for
+    subprocess-spawning ones. When no sysmon is configured, GPU memory
+    records as 0.0 (honest signal that we can't measure it).
     """
     # Defensive against test fixtures that bypass __init__: if empirical_store
     # wasn't initialized, the substrate just skips recording. Same pattern
@@ -1182,7 +1220,16 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
             except Exception:
                 # Worker may be dead (WorkerOOMError path). Sample with zero stats.
                 pass
-        
+
+        # GPU subtree attribution via the shared helper. Returns None when no
+        # sysmon is configured / reachable; returns 0.0 for CPU-only plugins.
+        gpu_mb = 0.0
+        sysmon = self._get_sysmon_plugin() if hasattr(self, '_get_sysmon_plugin') else None
+        if sysmon is not None and worker_stats:
+            attribution = attribute_gpu_to_worker_subtree(worker_stats, sysmon)
+            if attribution is not None:
+                gpu_mb = float(attribution.get('gpu_memory_mb') or 0.0)
+
         duration = max(0.0, time.time() - start_time)
         # SG-54: fold plugin-reported measured usage (unit-agnostic) into the sample.
         _usage = worker_stats.get("usage")
@@ -1190,7 +1237,7 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
         sample = ResourceSample(
             cpu_percent=float(worker_stats.get("cpu_percent", 0.0) or 0.0),
             memory_mb_peak=float(worker_stats.get("memory_rss_mb", 0.0) or 0.0),
-            gpu_memory_mb_peak=float(worker_stats.get("gpu_memory_mb", 0.0) or 0.0),
+            gpu_memory_mb_peak=gpu_mb,
             duration_seconds=duration,
             success=success,
             observed_at=datetime.now(timezone.utc),
@@ -1205,6 +1252,7 @@ def _record_sample_safe(self, inst:PluginInstance, start_time:float, success:boo
         )
 
 PluginManager._record_sample_safe = _record_sample_safe
+
 
 # %% ../../nbs/core/manager.ipynb #pm-fn-_get_concurrent_limiter
 def _get_concurrent_limiter(self, instance_id:str) -> Optional[asyncio.Semaphore]:
