@@ -61,38 +61,38 @@ graph LR
     utils_validation["utils.validation<br/>Configuration Validation"]
 
     bootstrap --> core_manager
-    bootstrap --> core_queue
     bootstrap --> core_scheduling
-    cli --> core_manifest_format
+    bootstrap --> core_queue
     cli --> core_platform
     cli --> core_config
+    cli --> core_manifest_format
     cli --> core_metadata
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_manifest_format
-    core_manager --> core_config_store
     core_manager --> core_empirical_store
-    core_manager --> core_config
-    core_manager --> core_metadata
-    core_manager --> core__telemetry
-    core_manager --> core_secret_store
     core_manager --> core_errors
-    core_manager --> core_interface
     core_manager --> core_scheduling
+    core_manager --> core_metadata
     core_manager --> core_proxy
+    core_manager --> core_manifest_format
+    core_manager --> core_config
+    core_manager --> core_interface
+    core_manager --> core_secret_store
+    core_manager --> core_config_store
+    core_manager --> core__telemetry
     core_manager --> utils_validation
-    core_manifest_format --> utils_hashing
     core_manifest_format --> core_metadata
+    core_manifest_format --> utils_hashing
     core_platform --> core_config
-    core_proxy --> core_config
-    core_proxy --> core_platform
     core_proxy --> core_errors
+    core_proxy --> core_platform
+    core_proxy --> core_config
     core_proxy --> core_interface
     core_queue --> core_errors
     core_queue --> core__telemetry
     core_scheduling --> core_metadata
-    core_worker --> core_platform
     core_worker --> core_errors
+    core_worker --> core_platform
     utils_validation --> core_errors
 ```
 
@@ -720,10 +720,19 @@ class SubstrateConfig:
     - `empirical_tracking` (CR-7): per-execute resource sample recording into
       `EmpiricalResourceStore`. PluginManager skips `record_sample` calls when
       False; the store's lazy-init also short-circuits.
+    - `prefetch_stall_threshold_seconds` (CR-4 / Session A 2026-05-27): how long
+      proxy.prefetch waits with no observed progress (via `/progress` polling)
+      before declaring a stall. Replaces per-plugin wall-clock timeouts —
+      operators no longer race network speed against an arbitrary value. Plugins
+      defeat the stall counter by calling `self.report_progress(...)` periodically
+      during long lifecycle operations (model download / vLLM server startup).
+      Default 60 s; bump higher for plugins that don't report progress, or lower
+      if false-positive stalls are noisy.
     """
     
     drift_detection: bool = True  # Run /config_schema hash compare on every load_plugin
     empirical_tracking: bool = True  # Record ResourceSample after every execute_plugin*
+    prefetch_stall_threshold_seconds: float = 60.0  # CR-4 / Session A: stall detection threshold for proxy.prefetch
 ```
 
 ``` python
@@ -4161,23 +4170,79 @@ async def list_processes_async(self) -> Optional[List[Dict[str, Any]]]:  # Proce
 ```
 
 ``` python
-def prefetch(self) -> bool:  # True if worker accepted the prefetch hook
+def prefetch(
+    self,
+    stall_threshold_seconds: Optional[float] = None,  # Override SubstrateConfig.prefetch_stall_threshold_seconds; None = use config
+    poll_interval_seconds: float = 1.0,               # How often to poll /progress for stall detection
+) -> bool:  # True if worker accepted the prefetch hook
     """
-    CR-4: forward the substrate's prefetch signal to the worker process.
+    CR-4 / Session A 2026-05-27: forward the substrate's prefetch signal with
+    progress-based stall detection.
     
-    Plugin can opt in via PluginInterface.prefetch() to eagerly download
-    models / warm caches without invoking execute(). Default implementation
-    is a no-op so silent-pass-through is normal. Errors raised by the
-    plugin (worker 500) propagate as RuntimeError so callers can distinguish
-    "plugin can't acquire" from "worker unreachable" (False).
+    Replaces wall-clock-timeout-based startup waiting (operators racing arbitrary
+    timeouts vs. network speeds for model downloads). Approach:
+    
+      1. POST /prefetch fires in a background thread with httpx timeout=None.
+      2. Main thread polls /progress every poll_interval_seconds.
+      3. Each (progress, message) change resets the stall counter.
+      4. If no change in stall_threshold_seconds AND POST still pending →
+         SIGTERM the worker subprocess + raise PluginTimeoutError.
+    
+    Plugins opt in to fine-grained stall defeat by calling
+    self.report_progress(...) periodically during long lifecycle operations
+    (model download, server startup, etc.). Plugins that don't report progress
+    are fine as long as the threshold accommodates their slowest plausible
+    silent stretch.
+    
+    Errors raised by the plugin (worker 500) propagate as RuntimeError; worker
+    unreachable propagates as `False`; stall fires PluginTimeoutError.
     """
 ```
 
 ``` python
-async def prefetch_async(self) -> bool:  # True if worker accepted the prefetch hook
-    """Async variant of `prefetch`. Same semantics."""
+async def prefetch_async(
+    self,
+    stall_threshold_seconds: Optional[float] = None,
+    poll_interval_seconds: float = 1.0,
+) -> bool:  # True if worker accepted the prefetch hook
+    "Async variant of `prefetch`. Same stall-detection semantics."
+```
+
+``` python
+def _resolve_prefetch_stall_threshold() -> float:
+    """Resolve the stall threshold from SubstrateConfig with a defensive fallback."""
     try
-    "Async variant of `prefetch`. Same semantics."
+    "Resolve the stall threshold from SubstrateConfig with a defensive fallback."
+```
+
+``` python
+def _run_prefetch_with_stall_detection(
+    proxy: 'RemotePluginProxy',
+    stall_threshold_seconds: float,
+    poll_interval_seconds: float,
+) -> bool
+    """
+    Sync stall-detecting prefetch implementation.
+    
+    Runs POST /prefetch in a daemon thread; main thread polls /progress for
+    a (progress, message) advance every poll_interval_seconds. If no advance
+    in stall_threshold_seconds AND the POST is still in-flight, SIGTERMs the
+    worker subprocess (so its plugin.cleanup() can run via the worker's
+    shutdown handler — closes the orphan-subprocess-on-stall bug) and raises
+    PluginTimeoutError client-side.
+    """
+```
+
+``` python
+async def _run_prefetch_with_stall_detection_async(
+    proxy: 'RemotePluginProxy',
+    stall_threshold_seconds: float,
+    poll_interval_seconds: float,
+) -> bool
+    """
+    Async stall-detecting prefetch implementation. Mirrors the sync variant
+    using asyncio.gather instead of a daemon thread.
+    """
 ```
 
 ``` python

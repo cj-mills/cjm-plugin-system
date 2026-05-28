@@ -810,11 +810,15 @@ def _run_prefetch_with_stall_detection(
             pass
 
         if time.time() - last_change > stall_threshold_seconds:
-            # Stall: SIGTERM the worker so its uvicorn shutdown event fires
-            # plugin.cleanup() (closes orphan subprocesses). Re-raise client-side.
+            # Stall: terminate the worker + its full process subtree via
+            # platform.terminate_process (process-group SIGTERM + psutil safety
+            # sweep). The worker's @on_event("shutdown") gets a best-effort
+            # chance to fire plugin.cleanup() during graceful shutdown; the
+            # subtree-kill catches any subprocess (vLLM api_server, EngineCore,
+            # etc.) that the shutdown path missed. Re-raise client-side.
             try:
-                if proxy.process is not None and proxy.process.poll() is None:
-                    proxy.process.terminate()
+                from cjm_plugin_system.core.platform import terminate_process as _tp
+                _tp(proxy.process, timeout=3.0)
             except Exception:
                 pass
             elapsed = time.time() - last_change
@@ -879,8 +883,8 @@ async def _run_prefetch_with_stall_detection_async(
         if time.time() - last_change > stall_threshold_seconds:
             post_task.cancel()
             try:
-                if proxy.process is not None and proxy.process.poll() is None:
-                    proxy.process.terminate()
+                from cjm_plugin_system.core.platform import terminate_process as _tp
+                _tp(proxy.process, timeout=3.0)
             except Exception:
                 pass
             elapsed = time.time() - last_change

@@ -103,25 +103,104 @@ def get_popen_isolation_kwargs() -> Dict[str, Any]:
 
 # %% ../../nbs/core/platform.ipynb #process-terminate
 def terminate_process(
-    process: subprocess.Popen,  # Process to terminate
+    process: subprocess.Popen,  # Process to terminate (must be a session/group leader for subtree kill)
     timeout: float = 2.0  # Seconds to wait before force kill
 ) -> None:
-    """Terminate a subprocess gracefully, with fallback to force kill.
-    
-    On all platforms:
-    1. Calls process.terminate() (SIGTERM on Unix, TerminateProcess on Windows)
-    2. Waits for timeout seconds
-    3. If still running, calls process.kill() (SIGKILL on Unix, TerminateProcess on Windows)
+    """Terminate a subprocess + its entire process subtree (grandchildren, etc).
+
+    Session A 2026-05-27: enhanced from worker-only termination to FULL subtree
+    termination. Workers are spawned with `get_popen_isolation_kwargs()` which
+    sets `start_new_session=True` on Unix → the worker is its own session leader
+    and ALL of its descendants inherit the same process-group ID (unless they
+    setsid themselves, which is rare). `os.killpg(worker_pid, SIGTERM/SIGKILL)`
+    sends the signal to every process in that group atomically — closes the
+    orphan-grandchild bug surfaced by Voxtral-vLLM (vLLM api_server spawned its
+    own EngineCore subprocess; pre-fix, the worker terminated cleanly but vLLM
+    + EngineCore kept running as orphans, eating GPU memory until manual kill).
+
+    Strategy on Unix:
+      1. SIGTERM the worker's process group via os.killpg (atomic).
+      2. Wait up to `timeout` for the worker to exit.
+      3. If anything still alive, SIGKILL the process group.
+      4. psutil-based safety sweep for any process that setsid-ed away from the
+         original group (rare but possible — e.g., a poorly-isolated subprocess).
+
+    Strategy on Windows:
+      1. process.terminate() + wait + kill (legacy path). True process-group
+         signaling on Windows requires Job Objects which the substrate doesn't
+         currently wire — Windows users are advised to avoid plugins that
+         spawn subprocesses until that's added. (TODO: track as substrate gap.)
     """
     if process is None or process.poll() is not None:
         return  # Already terminated
-    
-    process.terminate()
+
+    if is_windows():
+        # Legacy path: worker only. Windows subtree-kill needs Job Objects (TODO).
+        process.terminate()
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        return
+
+    # Unix path: kill the whole process group atomically.
+    import signal
+    pid = process.pid
+    try:
+        pgid = os.getpgid(pid)
+    except (ProcessLookupError, OSError):
+        # Race: process died between poll() and getpgid(). Done.
+        try:
+            process.wait(timeout=0.5)
+        except Exception:
+            pass
+        return
+
+    # SIGTERM to the group.
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        pass  # Group already gone.
+
+    # Wait for the worker (and by extension, the group) to exit.
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait()  # Reap the process
+        # SIGKILL the group + safety-sweep stragglers.
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+        try:
+            process.wait(timeout=2.0)
+        except Exception:
+            pass
+
+    # Safety sweep: catch any descendant that set its own session and escaped
+    # the process-group kill. psutil walks the parent/child tree directly
+    # (not the session/group tree).
+    try:
+        import psutil
+        try:
+            survivors = psutil.Process(pid).children(recursive=True)
+        except psutil.NoSuchProcess:
+            survivors = []
+        for child in survivors:
+            try:
+                child.terminate()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        # Brief wait + SIGKILL stubborn survivors.
+        gone, alive = psutil.wait_procs(survivors, timeout=1.0)
+        for child in alive:
+            try:
+                child.kill()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        # Safety sweep is best-effort; never let it raise.
+        pass
 
 # %% ../../nbs/core/platform.ipynb #self-terminate
 def terminate_self() -> None:
