@@ -749,19 +749,43 @@ def _resolve_worker_env(
     plugin_meta: PluginMeta,        # Plugin being loaded
     scope: Optional[str] = None     # SG-55 forward seam: per-principal scope (None = single-user)
 ) -> Dict[str, str]:  # {ENV_NAME: value} overlay injected into the worker at spawn
-    """CR-12: compose the resolved worker-env overlay for a load.
+    """CR-12 + Q1-A: compose the resolved worker-env overlay for a load.
 
     Secrets resolve from the SecretStore keyed by plugin_name — so every
     instance of a plugin shares one credential (CR-10: two Gemini instances,
     one GEMINI_API_KEY). A missing secret is OMITTED (the worker spawns without
     it; the plugin reports the gap at execute) rather than injected empty.
 
-    Visible vars resolve from their declared `default` (the operator-override
-    store is a deferred source; the manifest's static `install.env_vars` already
-    injects fixed visible defaults via the proxy, so this only adds WORKER_ENV
-    defaults not already covered there). All values are fixed at spawn — a
-    change requires `reload_plugin`.
+    Visible vars resolve from their declared `default`, with Q1-A template
+    substitution applied: a default like ``"${CJM_MODELS_DIR}/huggingface"``
+    expands to an absolute path using the substrate's current `cfg.models_dir`
+    + `cfg.plugin_data_dir`. Static defaults (no `${...}` syntax) pass through
+    unchanged. A template-substitution failure — unknown placeholder (plugin
+    author bug) OR unresolved value (operator hasn't configured
+    `cfg.models_dir`) — is WARN-and-OMIT: the worker still spawns, and the
+    plugin can surface the gap via `missing_required_env()` if the field was
+    declared `required=True`. This matches secret omission behaviour
+    (operator-side concerns don't break load; the plugin signals at execute).
+    Plugin-author-bug-class errors (unknown placeholders) surface at
+    install/release time via `cjm-ctl validate` + `template_check_placeholders`,
+    not here. All values are fixed at spawn — a change requires `reload_plugin`.
     """
+    from cjm_plugin_system.core.interface import expand_worker_env_template
+
+    cfg = get_config()
+    # Build the placeholder context once per load. The substrate is the
+    # source of truth for CJM_*_DIR; PLUGIN_DATA_DIR is conventionally
+    # `<cfg.plugin_data_dir>/<plugin_name>` (matches the per-plugin data
+    # subdirectory each plugin's meta.py traditionally computed).
+    placeholders: Dict[str, Optional[str]] = {
+        "CJM_MODELS_DIR": str(cfg.models_dir) if cfg.models_dir else None,
+        "CJM_DATA_DIR": str(cfg.plugin_data_dir) if cfg.plugin_data_dir else None,
+        "PLUGIN_DATA_DIR": (
+            str(cfg.plugin_data_dir / plugin_meta.name) if cfg.plugin_data_dir else None
+        ),
+        "PLUGIN_NAME": plugin_meta.name,
+    }
+
     overlay: Dict[str, str] = {}
     for spec in self._worker_env_specs(plugin_meta):
         name = spec.get("name")
@@ -779,8 +803,25 @@ def _resolve_worker_env(
                 overlay[name] = val
         else:
             default = spec.get("default")
-            if default is not None:
-                overlay[name] = str(default)
+            if default is None:
+                continue
+            try:
+                overlay[name] = expand_worker_env_template(
+                    str(default),
+                    placeholders,
+                    plugin_name=plugin_meta.name,
+                    var_name=name,
+                )
+            except Exception as e:
+                # WARN + OMIT (matches secret omission shape). The plugin's
+                # missing_required_env() check will surface this at execute
+                # time if the field was required; cjm-ctl validate catches
+                # plugin-author-bug-class errors (unknown placeholders) at
+                # install/release time via template_check_placeholders.
+                self.logger.warning(
+                    f"failed to expand worker-env default for "
+                    f"{plugin_meta.name!r} EnvVarSpec(name={name!r}, default={default!r}): {e}"
+                )
     return overlay
 
 PluginManager._resolve_worker_env = _resolve_worker_env

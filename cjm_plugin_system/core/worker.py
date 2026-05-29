@@ -17,8 +17,9 @@ import os
 import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any, Dict, Generator
+from typing import Any, AsyncIterator, Dict, Generator
 
 import psutil
 import uvicorn
@@ -80,10 +81,13 @@ def create_app(
     class_name: str   # Plugin class name (e.g., "WhisperPlugin")
 ) -> FastAPI: # Configured FastAPI application
     """Create FastAPI app that hosts the specified plugin."""
-    app = FastAPI(title="Plugin Worker")
     plugin_instance = None
 
-    # Dynamic Loading
+    # Dynamic Loading — runs synchronously before app construction so a
+    # load failure terminates the worker process with exit code 1 (matches
+    # pre-lifespan behavior; loading must succeed for the worker to be useful
+    # at all). The plugin instance is captured in the lifespan closure below
+    # so the shutdown half can call cleanup() on the same instance.
     try:
         module = importlib.import_module(module_name)
         plugin_cls = getattr(module, class_name)
@@ -92,26 +96,42 @@ def create_app(
         print(f"FATAL: Failed to load {module_name}:{class_name} - {e}")
         sys.exit(1)
 
-    @app.on_event("shutdown")
-    def _on_shutdown() -> None:
-        """Session A 2026-05-27: invoke plugin.cleanup() before the worker exits.
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """FastAPI lifespan replacing the deprecated @app.on_event("shutdown") path.
 
-        Both the parent_monitor watchdog (SIGTERM via terminate_self) and an
-        external SIGTERM (e.g., substrate's proxy stall-detection killing a
-        wedged prefetch) route through uvicorn's graceful-shutdown path,
-        which fires this event. Pre-fix the plugin's cleanup() hook was only
-        invoked on the manager-driven unload_plugin path — never on watchdog
-        or stall-triggered termination — so plugins that spawn grandchild
+        Migration 2026-05-28: FastAPI deprecated `on_event` decorators in favor
+        of the lifespan context manager (the DeprecationWarning fired in worker
+        logs post-Session-A publish). Behavior is preserved verbatim:
+
+        - Startup half is empty: the plugin is already instantiated above
+          BEFORE the FastAPI app is constructed (load failure exits the
+          process before lifespan runs). No async startup work is needed.
+        - Shutdown half: invoke plugin.cleanup() before uvicorn exits.
+
+        Session A 2026-05-27 rationale (still applies): both the parent_monitor
+        watchdog (SIGTERM via terminate_self) and an external SIGTERM (e.g.,
+        substrate's proxy stall-detection killing a wedged prefetch) route
+        through uvicorn's graceful-shutdown path, which fires this lifespan
+        teardown. Pre-Session-A the plugin's cleanup() hook was only invoked
+        on the manager-driven unload_plugin path — never on watchdog or
+        stall-triggered termination — so plugins that spawn grandchild
         subprocesses (Voxtral-vLLM's vLLM server is the driving case) leaked
         them as orphans whenever the worker died abnormally. Cleanup failures
         are swallowed-with-log because they must NOT prevent uvicorn shutdown.
+
+        cleanup() is synchronous (PluginInterface contract). Calling a sync
+        function from this async block briefly blocks the event loop during
+        shutdown, which is acceptable — uvicorn is already winding down.
         """
+        # Startup: nothing to do (plugin loaded above synchronously).
+        yield
+        # Shutdown: invoke plugin.cleanup() best-effort.
         try:
             cleanup = getattr(plugin_instance, "cleanup", None)
             if cleanup is not None:
                 cleanup()
         except Exception as e:
-            # Best-effort: log but don't propagate — shutdown must continue.
             try:
                 import logging as _lg
                 _lg.getLogger(__name__).warning(
@@ -119,6 +139,8 @@ def create_app(
                 )
             except Exception:
                 pass
+
+    app = FastAPI(title="Plugin Worker", lifespan=lifespan)
 
     @app.get("/health")
     def health_check() -> Dict[str, Any]:
