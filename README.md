@@ -28,13 +28,14 @@ pip install cjm_plugin_system
     │   ├── secret_store.ipynb     # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
     │   ├── telemetry.ipynb        # Shared GPU/CPU attribution helpers used by both `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and `PluginManager._record_sample_safe` (CR-7).
     │   └── worker.ipynb           # FastAPI server that runs inside isolated plugin environments
-    ├── utils/ (2)
-    │   ├── hashing.ipynb     # Shared cryptographic hashing primitives for content integrity verification
-    │   └── validation.ipynb  # Validation helpers for plugin configuration dataclasses
+    ├── utils/ (3)
+    │   ├── cache_paths.ipynb  # Per-(input-content, config) deterministic cache directories for plugin outputs
+    │   ├── hashing.ipynb      # Shared cryptographic hashing primitives for content integrity verification
+    │   └── validation.ipynb   # Validation helpers for plugin configuration dataclasses
     ├── bootstrap.ipynb  # One-call factory that assembles a PluginManager + JobQueue + plugin bindings — closes the demo-app boilerplate duplication audited across 5 substrate consumers.
     └── cli.ipynb        # CLI tool for declarative plugin management
 
-Total: 19 notebooks across 2 directories
+Total: 20 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -57,46 +58,49 @@ graph LR
     core_secret_store["core.secret_store<br/>Plugin Secret Store"]
     core__telemetry["core._telemetry<br/>Substrate Telemetry Helpers"]
     core_worker["core.worker<br/>Universal Worker"]
+    utils_cache_paths["utils.cache_paths<br/>Cache Paths"]
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
 
+    bootstrap --> core_queue
     bootstrap --> core_manager
     bootstrap --> core_scheduling
-    bootstrap --> core_queue
-    cli --> core_platform
-    cli --> core_config
     cli --> core_manifest_format
+    cli --> core_config
+    cli --> core_platform
     cli --> core_metadata
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
     core_manager --> core_empirical_store
-    core_manager --> core_errors
-    core_manager --> core_scheduling
-    core_manager --> core_metadata
-    core_manager --> core_proxy
-    core_manager --> core_manifest_format
-    core_manager --> core_config
-    core_manager --> core_interface
-    core_manager --> core_secret_store
-    core_manager --> core_config_store
     core_manager --> core__telemetry
+    core_manager --> core_scheduling
+    core_manager --> core_manifest_format
+    core_manager --> core_errors
+    core_manager --> core_config_store
+    core_manager --> core_interface
+    core_manager --> core_metadata
+    core_manager --> core_config
+    core_manager --> core_proxy
+    core_manager --> core_secret_store
     core_manager --> utils_validation
-    core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
+    core_manifest_format --> core_metadata
     core_platform --> core_config
     core_proxy --> core_errors
     core_proxy --> core_platform
-    core_proxy --> core_config
     core_proxy --> core_interface
-    core_queue --> core_errors
+    core_proxy --> core_config
     core_queue --> core__telemetry
+    core_queue --> core_errors
     core_scheduling --> core_metadata
     core_worker --> core_errors
     core_worker --> core_platform
+    utils_cache_paths --> utils_hashing
+    utils_cache_paths --> core_empirical_store
     utils_validation --> core_errors
 ```
 
-*34 cross-module dependencies detected*
+*36 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -186,6 +190,174 @@ class Pipeline:
         
         async def __aenter__(self) -> "Pipeline"
         "Stop the job queue and unload all plugins."
+```
+
+### Cache Paths (`cache_paths.ipynb`)
+
+> Per-(input-content, config) deterministic cache directories for plugin
+> outputs
+
+#### Import
+
+``` python
+from cjm_plugin_system.utils.cache_paths import (
+    cache_dir_for_config,
+    list_cache_entries,
+    prune_cache_for_input
+)
+```
+
+#### Functions
+
+``` python
+def _sanitize_stem(
+    input_path: Union[str, Path],  # Path whose stem to sanitize
+) -> str:                            # Filesystem-portable stem string
+    """
+    Return a filesystem-portable, length-capped version of input_path's stem.
+    
+    Steps: take `Path(input_path).stem`, replace unsafe characters with `_`,
+    strip leading/trailing dots + whitespace (Windows path-component rule),
+    length-cap to `_MAX_STEM_LEN`. Empty stems (degenerate paths like `.`)
+    return `_` so callers always get a usable path component.
+    """
+```
+
+``` python
+def _get_stat_cache_path() -> Optional[Path]:
+    """Locate the stat-cache SQLite path under the substrate's data dir.
+
+    Returns the configured `cfg.data_dir / "input_hash_cache.db"` when the
+    substrate config is available, falling back to `~/.cjm/input_hash_cache.db`
+    when get_config() raises (e.g., during early-init tests). Returns None
+    only when neither resolves — callers then skip caching entirely.
+    """
+    try
+    """
+    Locate the stat-cache SQLite path under the substrate's data dir.
+    
+    Returns the configured `cfg.data_dir / "input_hash_cache.db"` when the
+    substrate config is available, falling back to `~/.cjm/input_hash_cache.db`
+    when get_config() raises (e.g., during early-init tests). Returns None
+    only when neither resolves — callers then skip caching entirely.
+    """
+```
+
+``` python
+def _ensure_stat_cache_schema(conn: sqlite3.Connection) -> None
+    "Create the stat-cache table + indices if not present."
+```
+
+``` python
+def _hash_input_with_stat_cache(
+    input_path: Path,                      # File whose content hash we need
+    cache_path: Optional[Path] = None,     # Explicit cache DB path (default: substrate-resolved)
+    *,
+    skip_cache: bool = False,              # If True, bypass cache entirely (compute always)
+) -> str:                                   # Hash string in "algo:hexdigest" format
+    """
+    Return the SHA-256 content hash of `input_path`, with stat-cache memoization.
+    
+    Fast path: stat the file, look up `(absolute_path, mtime_ns, size)` in the
+    SQLite cache; cache hit returns in microseconds. Cold path: `hash_file`
+    streams the file content, then writes the result to the cache.
+    
+    `skip_cache=True` bypasses the cache entirely — useful for callers that
+    KNOW the file content changed (e.g., a plugin just wrote it and wants
+    to record the canonical hash without polluting the cache with intermediate
+    states).
+    
+    File not found / unreadable → propagates the underlying OSError. Cache
+    DB errors are LOG-and-FALLBACK to direct hashing — the cache is an
+    optimization, not a correctness invariant.
+    """
+```
+
+``` python
+def cache_dir_for_config(
+    plugin_data_dir: Union[str, Path],     # The plugin's own data subdirectory (typically <cfg.plugin_data_dir>/<plugin_name>)
+    input_path: Union[str, Path],           # The input file the plugin operates on
+    action: str,                            # The plugin action name (e.g., "segment_audio", "convert", "execute")
+    config_dict: Dict[str, Any],            # The plugin's effective config for this action
+    *,
+    input_hash_length: int = 6,             # Truncation length for the input content hash in the directory name
+    config_hash_length: int = 12,           # Truncation length for the config hash in the directory name
+    create: bool = True,                    # Auto-create the directory (parents=True, exist_ok=True)
+    hash_input_content: bool = True,        # If False, hash str(input_path) instead (e.g., URL inputs)
+    skip_input_cache: bool = False,         # If True, bypass the stat-cache (always recompute content hash)
+) -> Path:                                   # The deterministic cache directory path
+    """
+    Return (and optionally create) a per-(input-content, config) cache directory.
+    
+    Path layout::
+    
+        <plugin_data_dir>/<action>/<sanitized-stem>/<input_hash[:N]>_<config_hash[:M]>/
+    
+    The same `(input_content, action, config_dict)` always resolves to the same
+    path; any change to input content OR config produces a different path. This
+    means:
+    
+    1. Different configs go to different directories — no silent overwrite.
+    2. Stale-artifact accumulation is impossible — each unique
+       `(input_content, config)` tuple has its OWN directory.
+    3. For chained plugin sequences, upstream config changes propagate through
+       content changes: if plugin A's output content depends on A's config and
+       plugin B reads that output, B's cache key automatically reflects A's
+       config indirectly.
+    
+    `hash_input_content=False` switches to hashing the string form of
+    `input_path` instead of file content — for plugins whose "input" is a URL,
+    a database row ID, or another non-file identifier. Sequence chaining via
+    content propagation only works for true file inputs.
+    
+    `skip_input_cache=True` recomputes the input content hash even if the
+    stat-cache has a record. Useful for plugins that just wrote the input file
+    and want to record its canonical hash without stale-cache risk.
+    
+    Raises FileNotFoundError if `input_path` doesn't exist and
+    `hash_input_content=True`. Raises OSError on directory-create failure
+    when `create=True`.
+    """
+```
+
+``` python
+def list_cache_entries(
+    """
+    Enumerate all per-config cache directories for a given (input, action).
+    
+    Returns the paths of every `<input_hash>_<config_hash>` directory under
+    `<plugin_data_dir>/<action>/<sanitized-stem>/`. Each entry corresponds to
+    a unique `(input_content, config)` tuple — operators can inspect their
+    contents, diff them, or pass selected ones to `prune_cache_for_input` to
+    keep them through a sweep.
+    
+    Returns an empty list if the parent directory doesn't exist (plugin never
+    ran this action for this input).
+    """
+```
+
+``` python
+def prune_cache_for_input(
+    """
+    Delete per-config cache directories for `(input, action)`, optionally
+    preserving a `keep` set.
+    
+    Pairs with `list_cache_entries` for inspect-then-prune workflows: list
+    candidates, choose which to keep, then call prune with the keep set.
+    `keep=None` deletes ALL entries.
+    
+    `dry_run=True` returns the would-delete list without touching the
+    filesystem — useful for operator confirmation before destructive ops.
+    
+    Returns the list of deleted (or would-delete) paths.
+    """
+```
+
+#### Variables
+
+``` python
+_MAX_STEM_LEN = 100
+_UNSAFE_CHARS
 ```
 
 ### cli (`cli.ipynb`)
@@ -1569,10 +1741,13 @@ def hash_dict_canonical(
 ``` python
 from cjm_plugin_system.core.interface import (
     RELOAD_TRIGGER,
+    WORKER_ENV_TEMPLATE_PLACEHOLDERS,
     FileBackedDTO,
     ConfigOption,
     FieldOptions,
     EnvVarSpec,
+    expand_worker_env_template,
+    template_check_placeholders,
     PluginInterface,
     plugin_action,
     collect_plugin_actions
@@ -1580,6 +1755,116 @@ from cjm_plugin_system.core.interface import (
 ```
 
 #### Functions
+
+``` python
+def expand_worker_env_template(
+    template: str,                       # The raw EnvVarSpec.default value (may contain ${...} placeholders)
+    placeholders: Mapping[str, Optional[str]],  # Resolved values keyed by placeholder name
+    *,
+    plugin_name: str = "",               # For error context ("template X on plugin Y references ...")
+    var_name: str = "",                  # For error context ("on EnvVarSpec(name=Z)")
+) -> str
+    """
+    Substitute `${VAR}` placeholders in `template` using `placeholders`.
+    
+    Strict mode (no `safe_substitute`): unknown placeholders raise
+    `PluginConfigError` with descriptive context. Single-pass, non-recursive —
+    substituted values are taken verbatim, never re-scanned for further
+    placeholders. Templates without any `${...}` syntax pass through unchanged
+    (so plain static defaults work as before).
+    
+    The allowed placeholder vocabulary is fixed via `WORKER_ENV_TEMPLATE_PLACEHOLDERS`.
+    A `${FOO}` whose name is in the vocabulary but whose RESOLVED value is None
+    (e.g. `CJM_MODELS_DIR` when the operator hasn't configured one) raises
+    `PluginConfigError` with the same shape — operators get a clear signal that
+    the plugin needs a value they haven't provided, rather than a silent
+    substitution of empty string into a load-bearing path.
+    """
+```
+
+``` python
+def template_check_placeholders(
+    template: str,                       # The raw EnvVarSpec.default value
+) -> Set[str]:                            # Placeholder names referenced (allowed-vocabulary-validated)
+    """
+    Return the set of placeholder names referenced by a worker-env template.
+    
+    Validates the vocabulary (unknown names raise PluginConfigError) without
+    requiring a placeholder-value mapping. Useful for `cjm-ctl validate`'s
+    dry-run check at install/release time — surface the bug BEFORE the plugin
+    tries to spawn a worker with a malformed default.
+    
+    Templates without `${...}` return an empty set.
+    """
+```
+
+``` python
+def _report_progress_threadsafe(
+    self,
+    progress: float,  # 0.0 to 1.0, or -1.0 for indeterminate
+    message: str = "",  # Descriptive status message
+) -> None
+    """
+    Thread-safe report_progress — replaces PluginInterface.report_progress.
+    
+    Writes `_progress` + `_status_message_base` + `_status_message` under the
+    plugin's `_progress_lock` if one exists (lazy-init by `heartbeat()` before
+    spawning its thread). When no lock exists yet — the single-threaded common
+    case before any heartbeat() call — the writes happen without lock overhead.
+    
+    The heartbeat thread reads `_status_message_base` (NOT `_status_message`)
+    so heartbeat-amended messages don't accumulate elapsed-time suffixes when
+    `report_progress` is called concurrently. The plugin's call overwrites both
+    fields atomically; the next heartbeat tick reads the new base.
+    """
+```
+
+``` python
+@contextmanager
+def _heartbeat(
+    self,
+    phase: str,                    # Phase label embedded in the heartbeat message
+    *,
+    interval: float = 0.5,         # Seconds between heartbeats (substrate stalls at 60s default)
+    progress: Optional[float] = None,  # Optional initial progress; None preserves current
+) -> Iterator[None]
+    """
+    Heartbeat context manager — spawn a daemon thread that advances the
+    (progress, message) tuple every `interval` seconds, defeating the
+    substrate's prefetch stall detection during silent blocking calls.
+    
+    Usage:
+    
+        def prefetch(self):
+            with self.heartbeat("loading whisper model"):
+                self._load_model()  # Blocking; HF Hub download / from_pretrained
+    
+    Behavior:
+    
+    - At entry: writes `(progress, phase)` to set the initial state. If
+      `progress` is None, preserves whatever `self._progress` already holds
+      (defaulting to 0.5 indeterminate if never set).
+    - During the block: a daemon thread emits an updated `_status_message =
+      "<base> ({elapsed:.1f}s)"` every `interval` seconds. The thread reads
+      `_status_message_base` (set by `report_progress`) for the base, so an
+      explicit `report_progress(0.3, "downloading weights")` from inside the
+      block makes the next heartbeat tick display "downloading weights (Xs)".
+    - At exit: signals the thread to stop, joins with timeout (the thread is
+      daemon so cleanup is best-effort but reliable). The plugin's final
+      `_status_message` state is left as the last heartbeat-amended value;
+      callers wanting a clean "completed" state should call
+      `report_progress(1.0, "done")` after the with-block.
+    
+    Thread safety: relies on the upgraded thread-safe `report_progress`
+    (loaded by this same cell). The lock is lazy-initialized HERE — before
+    spawning the heartbeat thread — so concurrent main-thread + heartbeat-
+    thread calls always see a lock.
+    
+    Cancellation: the heartbeat thread checks `stop_event` between sleeps
+    and exits cleanly. If the with-block raises, the `finally` clause still
+    fires `stop_event.set()`, so the thread won't leak.
+    """
+```
 
 ``` python
 def plugin_action(
@@ -2081,6 +2366,7 @@ class _CR4MinimalPlugin(PluginInterface):
 
 ``` python
 RELOAD_TRIGGER = 'reload_trigger'
+WORKER_ENV_TEMPLATE_PLACEHOLDERS: Set[str]
 ```
 
 ### Plugin Manager (`manager.ipynb`)
@@ -2416,18 +2702,26 @@ def _resolve_worker_env(
     scope: Optional[str] = None     # SG-55 forward seam: per-principal scope (None = single-user)
 ) -> Dict[str, str]:  # {ENV_NAME: value} overlay injected into the worker at spawn
     """
-    CR-12: compose the resolved worker-env overlay for a load.
+    CR-12 + Q1-A: compose the resolved worker-env overlay for a load.
     
     Secrets resolve from the SecretStore keyed by plugin_name — so every
     instance of a plugin shares one credential (CR-10: two Gemini instances,
     one GEMINI_API_KEY). A missing secret is OMITTED (the worker spawns without
     it; the plugin reports the gap at execute) rather than injected empty.
     
-    Visible vars resolve from their declared `default` (the operator-override
-    store is a deferred source; the manifest's static `install.env_vars` already
-    injects fixed visible defaults via the proxy, so this only adds WORKER_ENV
-    defaults not already covered there). All values are fixed at spawn — a
-    change requires `reload_plugin`.
+    Visible vars resolve from their declared `default`, with Q1-A template
+    substitution applied: a default like ``"${CJM_MODELS_DIR}/huggingface"``
+    expands to an absolute path using the substrate's current `cfg.models_dir`
+    + `cfg.plugin_data_dir`. Static defaults (no `${...}` syntax) pass through
+    unchanged. A template-substitution failure — unknown placeholder (plugin
+    author bug) OR unresolved value (operator hasn't configured
+    `cfg.models_dir`) — is WARN-and-OMIT: the worker still spawns, and the
+    plugin can surface the gap via `missing_required_env()` if the field was
+    declared `required=True`. This matches secret omission behaviour
+    (operator-side concerns don't break load; the plugin signals at execute).
+    Plugin-author-bug-class errors (unknown placeholders) surface at
+    install/release time via `cjm-ctl validate` + `template_check_placeholders`,
+    not here. All values are fixed at spawn — a change requires `reload_plugin`.
     """
 ```
 
@@ -3747,16 +4041,34 @@ def get_popen_isolation_kwargs() -> Dict[str, Any]:
 
 ``` python
 def terminate_process(
-    process: subprocess.Popen,  # Process to terminate
+    process: subprocess.Popen,  # Process to terminate (must be a session/group leader for subtree kill)
     timeout: float = 2.0  # Seconds to wait before force kill
 ) -> None
     """
-    Terminate a subprocess gracefully, with fallback to force kill.
+    Terminate a subprocess + its entire process subtree (grandchildren, etc).
     
-    On all platforms:
-    1. Calls process.terminate() (SIGTERM on Unix, TerminateProcess on Windows)
-    2. Waits for timeout seconds
-    3. If still running, calls process.kill() (SIGKILL on Unix, TerminateProcess on Windows)
+    Session A 2026-05-27: enhanced from worker-only termination to FULL subtree
+    termination. Workers are spawned with `get_popen_isolation_kwargs()` which
+    sets `start_new_session=True` on Unix → the worker is its own session leader
+    and ALL of its descendants inherit the same process-group ID (unless they
+    setsid themselves, which is rare). `os.killpg(worker_pid, SIGTERM/SIGKILL)`
+    sends the signal to every process in that group atomically — closes the
+    orphan-grandchild bug surfaced by Voxtral-vLLM (vLLM api_server spawned its
+    own EngineCore subprocess; pre-fix, the worker terminated cleanly but vLLM
+    + EngineCore kept running as orphans, eating GPU memory until manual kill).
+    
+    Strategy on Unix:
+      1. SIGTERM the worker's process group via os.killpg (atomic).
+      2. Wait up to `timeout` for the worker to exit.
+      3. If anything still alive, SIGKILL the process group.
+      4. psutil-based safety sweep for any process that setsid-ed away from the
+         original group (rare but possible — e.g., a poorly-isolated subprocess).
+    
+    Strategy on Windows:
+      1. process.terminate() + wait + kill (legacy path). True process-group
+         signaling on Windows requires Job Objects which the substrate doesn't
+         currently wire — Windows users are advised to avoid plugins that
+         spawn subprocesses until that's added. (TODO: track as substrate gap.)
     """
 ```
 
