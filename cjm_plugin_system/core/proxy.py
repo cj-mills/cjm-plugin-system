@@ -137,7 +137,7 @@ class RemotePluginProxy(PluginInterface):
         env.update(self.extra_env)
         
         # Inject CJM paths for plugin runtime
-        env["CJM_DATA_DIR"] = str(cfg.plugin_data_dir)
+        env["CJM_PLUGIN_DATA_DIR"] = str(cfg.plugin_data_dir)
         if cfg.models_dir:
             env["CJM_MODELS_DIR"] = str(cfg.models_dir)
 

@@ -330,7 +330,7 @@ print(json.dumps(meta, indent=2))
     
     # Build environment with CJM paths for plugin introspection
     env = dict(os.environ)
-    env["CJM_DATA_DIR"] = str(cfg.plugin_data_dir)
+    env["CJM_PLUGIN_DATA_DIR"] = str(cfg.plugin_data_dir)
     if cfg.models_dir:
         env["CJM_MODELS_DIR"] = str(cfg.models_dir)
     
@@ -1356,7 +1356,7 @@ def _validate_manifest_v2_dict(
     # Required code.* fields (mirroring v1.0 contract)
     for key in ("name", "version", "description", "module", "class", "interface"):
         val = code.get(key) if isinstance(code, dict) else None
-        if val is None or val == "":
+        if val is None or (isinstance(val, str) and not val.strip()):
             errors.append(f"manifest: required field 'code.{key}' is missing or empty")
         elif not isinstance(val, str):
             errors.append(f"manifest: 'code.{key}' must be a string, got {type(val).__name__}")
@@ -1408,6 +1408,30 @@ def _validate_manifest_v2_dict(
             path_prefix="manifest: code",
         ))
     
+    # T23: worker-env default templating — every EnvVarSpec.default's ${...}
+    # placeholders must be in the allowed vocabulary, else the substrate can't
+    # resolve them when it spawns the worker. Surface the plugin-author bug at
+    # validate/release time rather than first load_plugin.
+    if isinstance(code, dict) and code.get("worker_env") is not None:
+        from cjm_plugin_system.core.interface import template_check_placeholders
+        from cjm_plugin_system.core.errors import PluginConfigError
+        worker_env = code["worker_env"]
+        if not isinstance(worker_env, list):
+            errors.append("manifest: 'code.worker_env' must be a list when present")
+        else:
+            for j, spec in enumerate(worker_env):
+                if not isinstance(spec, dict):
+                    errors.append(f"manifest: 'code.worker_env[{j}]' must be an object")
+                    continue
+                default = spec.get("default")
+                if isinstance(default, str) and default:
+                    try:
+                        template_check_placeholders(default)
+                    except PluginConfigError as e:
+                        errors.append(
+                            f"manifest: 'code.worker_env[{j}]' (name={spec.get('name')!r}): {e}"
+                        )
+
     # drift_tracking.config_schema_hash type-check (optional even when present)
     if isinstance(drift, dict) and "config_schema_hash" in drift and drift["config_schema_hash"] is not None:
         if not isinstance(drift["config_schema_hash"], str):
@@ -1432,7 +1456,7 @@ def _validate_manifest_v1_dict(
     # for; making it dead-letter optional is what SG-6 explicitly fixes.
     for key in ("name", "version", "description", "module", "class", "interface", "python_path"):
         val = data.get(key)
-        if val is None or val == "":
+        if val is None or (isinstance(val, str) and not val.strip()):
             errors.append(f"manifest: required field {key!r} is missing or empty")
         elif not isinstance(val, str):
             errors.append(f"manifest: field {key!r} must be a string, got {type(val).__name__}")
@@ -1552,6 +1576,56 @@ def _validate_plugins_yaml_dict(
     return errors
 
 
+def _collect_manifest_warnings(
+    data: Any  # Loaded manifest JSON
+) -> List[str]:  # Human-readable warning strings (non-failing lints)
+    """T23: non-failing manifest lints (warnings, not errors).
+
+    - V4: a single-element `enum` in a config_schema property offers no operator
+          choice — the field should be dropped or its domain expanded.
+    - V12: quantitative resource fields (`min_gpu_vram_mb` / `recommended_gpu_vram_mb`
+          / `min_system_ram_mb`) were dropped by the CR-7 reactive-resource reframe;
+          the substrate ignores them, so they are stale dead data.
+
+    Resolves the resources/config_schema location for both v2.0 (nested under
+    `code`) and legacy v1.0 (flat) layouts. The `validate` command prints these
+    without exiting non-zero (warnings alone don't fail validation).
+    """
+    warnings: List[str] = []
+    if not isinstance(data, dict):
+        return warnings
+    if data.get("format_version") == "2.0":
+        code = data.get("code") if isinstance(data.get("code"), dict) else {}
+        res = code.get("resources")
+        cs = code.get("config_schema")
+        res_path, cs_path = "code.resources", "code.config_schema"
+    else:
+        res = data.get("resources")
+        cs = data.get("config_schema")
+        res_path, cs_path = "resources", "config_schema"
+
+    # V12 — dropped quantitative resource fields (CR-7 reframe).
+    if isinstance(res, dict):
+        for dead_key in ("min_gpu_vram_mb", "recommended_gpu_vram_mb", "min_system_ram_mb"):
+            if dead_key in res:
+                warnings.append(
+                    f"V12: '{res_path}.{dead_key}' is a dropped quantitative resource field "
+                    f"(CR-7 reactive-resource reframe); the substrate ignores it — remove it"
+                )
+
+    # V4 — single-element enum offers no operator choice.
+    if isinstance(cs, dict) and isinstance(cs.get("properties"), dict):
+        for field_name, spec in cs["properties"].items():
+            if isinstance(spec, dict):
+                enum = spec.get("enum")
+                if isinstance(enum, list) and len(enum) == 1:
+                    warnings.append(
+                        f"V4: '{cs_path}.properties.{field_name}.enum' has a single value "
+                        f"{enum!r} — drop the field or expand the domain"
+                    )
+    return warnings
+
+
 def _detect_manifest_format(
     path: Path  # File to inspect
 ) -> Optional[str]:  # 'manifest' | 'plugins_yaml' | None
@@ -1591,11 +1665,13 @@ def validate_file(
         )
         raise typer.Exit(code=1)
     
+    warnings: List[str] = []
     try:
         if fmt == "manifest":
             with open(path) as f:
                 data = json.load(f)
             errors = _validate_manifest_dict(data)
+            warnings = _collect_manifest_warnings(data)
             kind = "manifest"
         elif fmt == "plugins_yaml":
             with open(path) as f:
@@ -1609,13 +1685,20 @@ def validate_file(
         typer.echo(f"Parse error in {path}: {e}", err=True)
         raise typer.Exit(code=1)
     
+    # T23: warnings (V4 single-element enum, V12 dropped resource fields) are
+    # non-failing lints — surface them but don't exit non-zero on warnings alone.
+    if warnings:
+        typer.echo(f"⚠ {path} ({kind}): {len(warnings)} warning(s)", err=True)
+        for w in warnings:
+            typer.echo(f"  - {w}", err=True)
+    
     if errors:
         typer.echo(f"✗ {path} ({kind}): {len(errors)} error(s)", err=True)
         for err in errors:
             typer.echo(f"  - {err}", err=True)
         raise typer.Exit(code=1)
     
-    typer.echo(f"✓ {path} ({kind}): valid")
+    typer.echo(f"✓ {path} ({kind}): valid{' (with warnings)' if warnings else ''}")
 
 # %% ../nbs/cli.ipynb #74a2ec87
 # ----------------------------------------------------------------

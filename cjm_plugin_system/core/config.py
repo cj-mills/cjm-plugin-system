@@ -185,6 +185,13 @@ def load_config(
         config = _load_from_yaml(yaml_path)
 
     # 3. Override with environment variables
+    # NOTE (T31): `CJM_DATA_DIR` here is the OPERATOR-facing knob for the
+    # substrate ROOT (`cfg.data_dir` — the parent of manifests/ data/ logs/
+    # secrets/). It is DISTINCT from the worker-injected `CJM_PLUGIN_DATA_DIR`
+    # (= `cfg.plugin_data_dir` = `<data_dir>/data`), which the substrate sets on
+    # each worker subprocess. Renaming the injection var (proxy/manager/cli)
+    # removed the prior overload where one name meant two different paths; this
+    # root knob deliberately keeps the `CJM_DATA_DIR` name.
     if env_data_dir := os.environ.get("CJM_DATA_DIR"):
         config.data_dir = Path(env_data_dir)
     if env_conda_prefix := os.environ.get("CJM_CONDA_PREFIX"):

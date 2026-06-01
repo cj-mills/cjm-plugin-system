@@ -19,7 +19,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Generator, Iterator, List, Mapping, Optional, Protocol, Set, runtime_checkable
 
-from .errors import PluginCancelledError, PluginConfigError
+from .errors import PluginCancelledError, PluginConfigError, PluginInputError
 
 # CR-4: metadata key for declarative reload triggers on config dataclass fields.
 # Plugin authors annotate fields whose changes require resource release:
@@ -92,7 +92,7 @@ class EnvVarSpec:
 
     Both share one injection seam: the substrate composes the resolved
     {name: value} overlay at load time and injects it into the worker env at
-    spawn (extending the existing CJM_DATA_DIR / CJM_MODELS_DIR injection).
+    spawn (extending the existing CJM_PLUGIN_DATA_DIR / CJM_MODELS_DIR injection).
     This is "derive from behaviour, not metadata" applied to the spawn env: the
     plugin declares WHICH vars it consumes + whether each is secret/required;
     the substrate owns resolution + injection.
@@ -132,12 +132,12 @@ class EnvVarSpec:
 #
 # Allowed placeholders (the minimum viable set per the audit):
 #   - ${CJM_MODELS_DIR}   — substrate-injected models directory (may be None)
-#   - ${CJM_DATA_DIR}     — substrate-injected data directory base
-#   - ${PLUGIN_DATA_DIR}  — plugin's own data subdirectory (CJM_DATA_DIR/<name>)
+#   - ${CJM_PLUGIN_DATA_DIR}     — substrate-injected data directory base
+#   - ${PLUGIN_DATA_DIR}  — plugin's own data subdirectory (CJM_PLUGIN_DATA_DIR/<name>)
 #   - ${PLUGIN_NAME}      — plugin name (for one-off path components like NLTK)
 WORKER_ENV_TEMPLATE_PLACEHOLDERS: Set[str] = {
     "CJM_MODELS_DIR",
-    "CJM_DATA_DIR",
+    "CJM_PLUGIN_DATA_DIR",
     "PLUGIN_DATA_DIR",
     "PLUGIN_NAME",
 }
@@ -788,6 +788,43 @@ def collect_plugin_actions(
             if isinstance(tag, str):
                 actions.add(tag)
     return actions
+
+# %% ../../nbs/core/interface.ipynb #91b2cd38
+def _dispatch_to_action(
+    self,
+    action: str,  # Action name to dispatch (matched against @plugin_action tags)
+    **kwargs,     # Forwarded verbatim to the resolved handler
+) -> Any:         # Whatever the handler returns
+    """T28: dispatch `action` to its `@plugin_action`-tagged handler.
+
+    Walks the instance's MRO for a method tagged `_plugin_action == action`
+    (the SAME markers `collect_plugin_actions` / `supported_actions` are built
+    from) and calls it as `handler(self, **kwargs)`. Unknown actions raise the
+    typed `PluginInputError(fields_invalid=["action"])` (CR-5) — identical
+    behaviour to the hand-rolled dispatchers this replaces.
+
+    Dispatcher-style plugins (MediaProcessing / Graph / Text) collapse their
+    `execute` to a one-liner instead of reimplementing the MRO walk in every
+    plugin (the 5x copy SG-44 + this helper retire):
+
+        @plugin_action("separate_vocals")
+        def _separate_vocals(self, **kwargs): ...
+
+        supported_actions = collect_plugin_actions(MyPlugin)
+
+        def execute(self, action="separate_vocals", **kwargs):
+            return self.dispatch_to_action(action, **kwargs)
+    """
+    for klass in type(self).__mro__:
+        for attr in vars(klass).values():
+            if getattr(attr, "_plugin_action", None) == action:
+                return attr(self, **kwargs)
+    raise PluginInputError(
+        f"Unknown action: {action}", fields_invalid=["action"],
+    )
+
+
+PluginInterface.dispatch_to_action = _dispatch_to_action
 
 # %% ../../nbs/core/interface.ipynb #9342f856-f07e-4e18-b016-4f089a50c4c4
 class _CR4MinimalPlugin(PluginInterface):

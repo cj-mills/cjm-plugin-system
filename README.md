@@ -62,32 +62,32 @@ graph LR
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
 
-    bootstrap --> core_queue
-    bootstrap --> core_manager
     bootstrap --> core_scheduling
-    cli --> core_manifest_format
+    bootstrap --> core_manager
+    bootstrap --> core_queue
     cli --> core_config
     cli --> core_platform
     cli --> core_metadata
+    cli --> core_manifest_format
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_empirical_store
-    core_manager --> core__telemetry
-    core_manager --> core_scheduling
-    core_manager --> core_manifest_format
     core_manager --> core_errors
-    core_manager --> core_config_store
     core_manager --> core_interface
     core_manager --> core_metadata
+    core_manager --> core_config_store
+    core_manager --> core_empirical_store
+    core_manager --> core_scheduling
     core_manager --> core_config
-    core_manager --> core_proxy
+    core_manager --> core_manifest_format
+    core_manager --> core__telemetry
     core_manager --> core_secret_store
+    core_manager --> core_proxy
     core_manager --> utils_validation
-    core_manifest_format --> utils_hashing
     core_manifest_format --> core_metadata
+    core_manifest_format --> utils_hashing
     core_platform --> core_config
-    core_proxy --> core_errors
     core_proxy --> core_platform
+    core_proxy --> core_errors
     core_proxy --> core_interface
     core_proxy --> core_config
     core_queue --> core__telemetry
@@ -95,8 +95,8 @@ graph LR
     core_scheduling --> core_metadata
     core_worker --> core_errors
     core_worker --> core_platform
-    utils_cache_paths --> utils_hashing
     utils_cache_paths --> core_empirical_store
+    utils_cache_paths --> utils_hashing
     utils_validation --> core_errors
 ```
 
@@ -713,6 +713,25 @@ def _validate_plugins_yaml_dict(
     
     Each plugin entry must have name + env_name + package, plus either env_file
     or python_version (one defines how the conda env is created).
+    """
+```
+
+``` python
+def _collect_manifest_warnings(
+    data: Any  # Loaded manifest JSON
+) -> List[str]:  # Human-readable warning strings (non-failing lints)
+    """
+    T23: non-failing manifest lints (warnings, not errors).
+    
+    - V4: a single-element `enum` in a config_schema property offers no operator
+          choice — the field should be dropped or its domain expanded.
+    - V12: quantitative resource fields (`min_gpu_vram_mb` / `recommended_gpu_vram_mb`
+          / `min_system_ram_mb`) were dropped by the CR-7 reactive-resource reframe;
+          the substrate ignores them, so they are stale dead data.
+    
+    Resolves the resources/config_schema location for both v2.0 (nested under
+    `code`) and legacy v1.0 (flat) layouts. The `validate` command prints these
+    without exiting non-zero (warnings alone don't fail validation).
     """
 ```
 
@@ -1895,6 +1914,35 @@ def collect_plugin_actions(
     """
 ```
 
+``` python
+def _dispatch_to_action(
+    self,
+    action: str,  # Action name to dispatch (matched against @plugin_action tags)
+    **kwargs,     # Forwarded verbatim to the resolved handler
+) -> Any:         # Whatever the handler returns
+    """
+    T28: dispatch `action` to its `@plugin_action`-tagged handler.
+    
+    Walks the instance's MRO for a method tagged `_plugin_action == action`
+    (the SAME markers `collect_plugin_actions` / `supported_actions` are built
+    from) and calls it as `handler(self, **kwargs)`. Unknown actions raise the
+    typed `PluginInputError(fields_invalid=["action"])` (CR-5) — identical
+    behaviour to the hand-rolled dispatchers this replaces.
+    
+    Dispatcher-style plugins (MediaProcessing / Graph / Text) collapse their
+    `execute` to a one-liner instead of reimplementing the MRO walk in every
+    plugin (the 5x copy SG-44 + this helper retire):
+    
+        @plugin_action("separate_vocals")
+        def _separate_vocals(self, **kwargs): ...
+    
+        supported_actions = collect_plugin_actions(MyPlugin)
+    
+        def execute(self, action="separate_vocals", **kwargs):
+            return self.dispatch_to_action(action, **kwargs)
+    """
+```
+
 #### Classes
 
 ``` python
@@ -1958,7 +2006,7 @@ class EnvVarSpec:
     
     Both share one injection seam: the substrate composes the resolved
     {name: value} overlay at load time and injects it into the worker env at
-    spawn (extending the existing CJM_DATA_DIR / CJM_MODELS_DIR injection).
+    spawn (extending the existing CJM_PLUGIN_DATA_DIR / CJM_MODELS_DIR injection).
     This is "derive from behaviour, not metadata" applied to the spawn env: the
     plugin declares WHICH vars it consumes + whether each is secret/required;
     the substrate owns resolution + injection.

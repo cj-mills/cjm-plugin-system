@@ -779,7 +779,7 @@ def _resolve_worker_env(
     # subdirectory each plugin's meta.py traditionally computed).
     placeholders: Dict[str, Optional[str]] = {
         "CJM_MODELS_DIR": str(cfg.models_dir) if cfg.models_dir else None,
-        "CJM_DATA_DIR": str(cfg.plugin_data_dir) if cfg.plugin_data_dir else None,
+        "CJM_PLUGIN_DATA_DIR": str(cfg.plugin_data_dir) if cfg.plugin_data_dir else None,
         "PLUGIN_DATA_DIR": (
             str(cfg.plugin_data_dir / plugin_meta.name) if cfg.plugin_data_dir else None
         ),
