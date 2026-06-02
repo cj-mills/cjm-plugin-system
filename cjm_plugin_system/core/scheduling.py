@@ -145,6 +145,10 @@ class SafetyScheduler(ResourceScheduler):
         """Called when execution finishes (for future resource release)."""
         pass
 
+# %% ../../nbs/core/scheduling.ipynb #imports-fastcore-patch-21ceb0
+from fastcore.basics import patch
+
+
 # %% ../../nbs/core/scheduling.ipynb #qccqnhgxde
 class QueueScheduler(ResourceScheduler):
     """Scheduler that waits for resources to become available."""
@@ -160,33 +164,6 @@ class QueueScheduler(ResourceScheduler):
         self.logger = logging.getLogger(f"{__name__}.{type(self).__name__}")
         self._active_plugins: Set[str] = set()  # Track plugins with running executions
 
-    def _check_resources(
-        self,
-        plugin_meta: PluginMeta,  # Plugin metadata with manifest
-        stats: Dict[str, Any]  # Current system stats
-    ) -> bool:  # True if resources available
-        """Check if system has sufficient resources for the plugin."""
-        reqs = {}
-        if hasattr(plugin_meta, 'manifest'):
-            reqs = plugin_meta.manifest.get('resources', {})
-            
-        if not reqs:
-            return True
-
-        # Check GPU Memory
-        if reqs.get('requires_gpu', False):
-            needed_vram = reqs.get('min_gpu_vram_mb', 0)
-            available_vram = stats.get('gpu_free_memory_mb')
-            if available_vram is not None and needed_vram > available_vram:
-                return False
-                
-        # Check System RAM
-        needed_ram = reqs.get('min_system_ram_mb', 0)
-        available_ram = stats.get('memory_available_mb')
-        if available_ram is not None and needed_ram > available_ram:
-            return False
-            
-        return True
     
     def allocate(
         self,
@@ -242,6 +219,38 @@ class QueueScheduler(ResourceScheduler):
         """Track that a plugin has finished executing."""
         self._active_plugins.discard(plugin_name)
 
-    def get_active_plugins(self) -> Set[str]:  # Set of currently executing plugin names
-        """Get the set of plugins with active executions."""
-        return self._active_plugins.copy()
+# %% ../../nbs/core/scheduling.ipynb #m-check-resources
+@patch
+def _check_resources(
+    self:QueueScheduler,
+    plugin_meta: PluginMeta,  # Plugin metadata with manifest
+    stats: Dict[str, Any]  # Current system stats
+) -> bool:  # True if resources available
+    """Check if system has sufficient resources for the plugin."""
+    reqs = {}
+    if hasattr(plugin_meta, 'manifest'):
+        reqs = plugin_meta.manifest.get('resources', {})
+
+    if not reqs:
+        return True
+
+    # Check GPU Memory
+    if reqs.get('requires_gpu', False):
+        needed_vram = reqs.get('min_gpu_vram_mb', 0)
+        available_vram = stats.get('gpu_free_memory_mb')
+        if available_vram is not None and needed_vram > available_vram:
+            return False
+
+    # Check System RAM
+    needed_ram = reqs.get('min_system_ram_mb', 0)
+    available_ram = stats.get('memory_available_mb')
+    if available_ram is not None and needed_ram > available_ram:
+        return False
+
+    return True
+
+# %% ../../nbs/core/scheduling.ipynb #m-get-active-plugins
+@patch
+def get_active_plugins(self:QueueScheduler) -> Set[str]:  # Set of currently executing plugin names
+    """Get the set of plugins with active executions."""
+    return self._active_plugins.copy()
