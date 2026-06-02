@@ -117,7 +117,7 @@ class PluginDisabledError(PluginInputError):
         super().__init__(f"Plugin {plugin_name!r} is disabled")
         self.plugin_name = plugin_name
 
-
+# %% ../../nbs/core/errors.ipynb #cls-PluginNotLoadedError
 class PluginNotLoadedError(PluginFatalError):
     """Caller submitted to a plugin that was never loaded.
     
@@ -131,7 +131,7 @@ class PluginNotLoadedError(PluginFatalError):
         super().__init__(f"Plugin {plugin_name!r} is not loaded")
         self.plugin_name = plugin_name
 
-
+# %% ../../nbs/core/errors.ipynb #cls-PluginTimeoutError
 class PluginTimeoutError(PluginTransientError):
     """A per-job timeout fired before the plugin finished.
     
@@ -154,7 +154,7 @@ class PluginTimeoutError(PluginTransientError):
         self.plugin_name = plugin_name
         self.timeout_seconds = timeout_seconds
 
-
+# %% ../../nbs/core/errors.ipynb #cls-PluginCancelledError
 class PluginCancelledError(PluginTransientError):
     """Cooperative cancellation signal raised from `PluginInterface.check_cancel()`.
     
@@ -177,7 +177,7 @@ class PluginCancelledError(PluginTransientError):
         super().__init__(f"Plugin {plugin_name!r} cancelled by operator")
         self.plugin_name = plugin_name
 
-
+# %% ../../nbs/core/errors.ipynb #cls-WorkerOOMError
 class WorkerOOMError(PluginResourceError):
     """The worker subprocess died with a kill-signal during an active execute call.
     
@@ -295,9 +295,6 @@ class JobError:
     occurred_at: Optional[datetime] = None  # When the failure was recorded
 
 # %% ../../nbs/core/errors.ipynb #mapping
-# Built-in exception → substrate category. Order doesn't matter (MRO walk picks
-# the FIRST ancestor that matches), but listing more-specific types ahead of
-# more-general ones makes the table readable.
 _BARE_EXCEPTION_CATEGORY_MAP: "dict[type, Literal['user_input', 'transient', 'resource', 'fatal']]" = {
     # user_input: caller passed bad data, the substrate knows how to surface this to the operator
     FileNotFoundError: 'user_input',
@@ -316,8 +313,6 @@ _BARE_EXCEPTION_CATEGORY_MAP: "dict[type, Literal['user_input', 'transient', 're
     MemoryError: 'resource',
     OSError: 'transient',  # broad; FileNotFoundError etc. above will match first via MRO
 }
-
-
 _CATEGORY_RETRIABLE_DEFAULTS: "dict[str, bool]" = {
     'user_input': True,
     'transient': True,
@@ -325,7 +320,7 @@ _CATEGORY_RETRIABLE_DEFAULTS: "dict[str, bool]" = {
     'fatal': False,
 }
 
-
+# %% ../../nbs/core/errors.ipynb #fn-classify-exception
 def classify_exception(
     exc: BaseException  # The exception to classify
 ) -> "Literal['user_input', 'transient', 'resource', 'fatal']":  # Category
@@ -343,7 +338,7 @@ def classify_exception(
             return _BARE_EXCEPTION_CATEGORY_MAP[ancestor]
     return 'fatal'
 
-
+# %% ../../nbs/core/errors.ipynb #fn-map-bare-exception-to-job-error
 def map_bare_exception_to_job_error(
     exc: BaseException,  # The raised exception
     *,
