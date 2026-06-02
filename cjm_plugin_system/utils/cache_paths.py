@@ -56,13 +56,9 @@ def _sanitize_stem(
     return cleaned[:_MAX_STEM_LEN]
 
 # %% ../../nbs/utils/cache_paths.ipynb #cell-stat-cache
-# Module-level lock serializes SQLite WRITES across threads. Reads under
-# WAL mode are fine concurrently. The lock is fine-grained — held only
-# for the duration of the cache lookup + write, not during the actual
-# content hash (the expensive part).
 _stat_cache_lock = threading.Lock()
 
-
+# %% ../../nbs/utils/cache_paths.ipynb #fn-get-stat-cache-path
 def _get_stat_cache_path() -> Optional[Path]:
     """Locate the stat-cache SQLite path under the substrate's data dir.
 
@@ -83,7 +79,7 @@ def _get_stat_cache_path() -> Optional[Path]:
     home = Path.home()
     return home / ".cjm" / "input_hash_cache.db"
 
-
+# %% ../../nbs/utils/cache_paths.ipynb #fn-ensure-stat-cache-schema
 def _ensure_stat_cache_schema(conn: sqlite3.Connection) -> None:
     """Create the stat-cache table + indices if not present."""
     conn.execute("PRAGMA journal_mode=WAL")
@@ -98,7 +94,7 @@ def _ensure_stat_cache_schema(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
-
+# %% ../../nbs/utils/cache_paths.ipynb #fn-hash-input-with-stat-cache
 def _hash_input_with_stat_cache(
     input_path: Path,                      # File whose content hash we need
     cache_path: Optional[Path] = None,     # Explicit cache DB path (default: substrate-resolved)
