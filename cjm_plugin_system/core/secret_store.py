@@ -40,6 +40,10 @@ class SecretStore(Protocol):
         """Return the NAMES of secrets stored for a plugin under `scope` — never values."""
         ...
 
+# %% ../../nbs/core/secret_store.ipynb #imports-fastcore-patch-888fbb
+from fastcore.basics import patch
+
+
 # %% ../../nbs/core/secret_store.ipynb #local-impl
 def _default_secrets_dir() -> Path:
     """Default secrets directory: `~/.cjm/secrets` (bootstrap fallback)."""
@@ -61,93 +65,105 @@ class LocalSecretStore:
     def _scope_key(scope: Optional[str]) -> str:
         return scope if scope else _DEFAULT_SCOPE
 
-    def _load(self) -> Dict[str, Dict[str, Dict[str, str]]]:
-        if not self.path.exists():
-            return {}
+# %% ../../nbs/core/secret_store.ipynb #m-load
+@patch
+def _load(self:LocalSecretStore) -> Dict[str, Dict[str, Dict[str, str]]]:
+    if not self.path.exists():
+        return {}
+    try:
+        mode = self.path.stat().st_mode
+        if mode & 0o077:  # group/other bits set -> loose perms
+            _logger.warning(
+                "Secret file %s has loose permissions (%o); expected 0600.",
+                self.path, mode & 0o777,
+            )
+    except OSError:
+        pass
+    try:
+        with open(self.path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        _logger.error("Failed to read secret store %s: %s", self.path, e)
+        return {}
+
+# %% ../../nbs/core/secret_store.ipynb #m-save
+@patch
+def _save(self:LocalSecretStore, data: Dict[str, Dict[str, Dict[str, str]]]) -> None:
+    self.secrets_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(self.secrets_dir, 0o700)
+    except OSError:
+        pass
+    # Create/truncate with 0600 directly to avoid a world-readable window.
+    fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+    finally:
         try:
-            mode = self.path.stat().st_mode
-            if mode & 0o077:  # group/other bits set -> loose perms
-                _logger.warning(
-                    "Secret file %s has loose permissions (%o); expected 0600.",
-                    self.path, mode & 0o777,
-                )
+            os.chmod(self.path, 0o600)
         except OSError:
             pass
-        try:
-            with open(self.path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            _logger.error("Failed to read secret store %s: %s", self.path, e)
-            return {}
 
-    def _save(self, data: Dict[str, Dict[str, Dict[str, str]]]) -> None:
-        self.secrets_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.secrets_dir, 0o700)
-        except OSError:
-            pass
-        # Create/truncate with 0600 directly to avoid a world-readable window.
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w") as f:
-                json.dump(data, f, indent=2)
-        finally:
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
+# %% ../../nbs/core/secret_store.ipynb #m-get-secret
+@patch
+def get_secret(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin the secret belongs to
+    key: str,          # Secret key (typically the env-var name, e.g. GEMINI_API_KEY)
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam; ignored by the local store
+) -> Optional[str]:  # The secret value, or None if absent
+    """Resolve a secret value."""
+    data = self._load()
+    return data.get(self._scope_key(scope), {}).get(plugin_name, {}).get(key)
 
-    def get_secret(
-        self,
-        plugin_name: str,  # Plugin the secret belongs to
-        key: str,          # Secret key (typically the env-var name, e.g. GEMINI_API_KEY)
-        *,
-        scope: Optional[str] = None  # Reserved multi-user seam; ignored by the local store
-    ) -> Optional[str]:  # The secret value, or None if absent
-        """Resolve a secret value."""
-        data = self._load()
-        return data.get(self._scope_key(scope), {}).get(plugin_name, {}).get(key)
+# %% ../../nbs/core/secret_store.ipynb #m-set-secret
+@patch
+def set_secret(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin the secret belongs to
+    key: str,          # Secret key
+    value: str,        # Secret value (stored plaintext at 0600)
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam
+) -> None:
+    """Persist a secret value."""
+    data = self._load()
+    data.setdefault(self._scope_key(scope), {}).setdefault(plugin_name, {})[key] = value
+    self._save(data)
 
-    def set_secret(
-        self,
-        plugin_name: str,  # Plugin the secret belongs to
-        key: str,          # Secret key
-        value: str,        # Secret value (stored plaintext at 0600)
-        *,
-        scope: Optional[str] = None  # Reserved multi-user seam
-    ) -> None:
-        """Persist a secret value."""
-        data = self._load()
-        data.setdefault(self._scope_key(scope), {}).setdefault(plugin_name, {})[key] = value
-        self._save(data)
+# %% ../../nbs/core/secret_store.ipynb #m-delete-secret
+@patch
+def delete_secret(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin the secret belongs to
+    key: str,          # Secret key
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam
+) -> bool:  # True if a secret was removed
+    """Remove a secret, pruning now-empty plugin/scope containers."""
+    data = self._load()
+    sk = self._scope_key(scope)
+    keys = data.get(sk, {}).get(plugin_name, {})
+    if key not in keys:
+        return False
+    del keys[key]
+    if not keys:
+        del data[sk][plugin_name]
+    if not data.get(sk):
+        data.pop(sk, None)
+    self._save(data)
+    return True
 
-    def delete_secret(
-        self,
-        plugin_name: str,  # Plugin the secret belongs to
-        key: str,          # Secret key
-        *,
-        scope: Optional[str] = None  # Reserved multi-user seam
-    ) -> bool:  # True if a secret was removed
-        """Remove a secret, pruning now-empty plugin/scope containers."""
-        data = self._load()
-        sk = self._scope_key(scope)
-        keys = data.get(sk, {}).get(plugin_name, {})
-        if key not in keys:
-            return False
-        del keys[key]
-        if not keys:
-            del data[sk][plugin_name]
-        if not data.get(sk):
-            data.pop(sk, None)
-        self._save(data)
-        return True
-
-    def list_keys(
-        self,
-        plugin_name: str,  # Plugin to list secrets for
-        *,
-        scope: Optional[str] = None  # Reserved multi-user seam
-    ) -> List[str]:  # Secret key NAMES (never values)
-        """Return the names of secrets stored for a plugin (never the values)."""
-        data = self._load()
-        return sorted(data.get(self._scope_key(scope), {}).get(plugin_name, {}).keys())
+# %% ../../nbs/core/secret_store.ipynb #m-list-keys
+@patch
+def list_keys(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin to list secrets for
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam
+) -> List[str]:  # Secret key NAMES (never values)
+    """Return the names of secrets stored for a plugin (never the values)."""
+    data = self._load()
+    return sorted(data.get(self._scope_key(scope), {}).get(plugin_name, {}).keys())
