@@ -42,6 +42,10 @@ from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
 # louder than the substrate's catch-all WARNING degradation path.
 _logger = logging.getLogger(__name__)
 
+# %% ../../nbs/core/proxy.ipynb #imports-fastcore-patch-a0c3f9
+from fastcore.basics import patch
+
+
 # %% ../../nbs/core/proxy.ipynb #proxy-class
 class RemotePluginProxy(PluginInterface):
     """Proxy that forwards plugin calls to an isolated Worker subprocess."""
@@ -79,112 +83,8 @@ class RemotePluginProxy(PluginInterface):
         """Plugin version."""
         return self.manifest.get('version', '0.0.0')
 
-    def _bind_listen_socket(self) -> Tuple[socket.socket, int]:
-        """Bind a listening socket on a kernel-chosen ephemeral port.
-        The socket is kept open so its FD can be inherited by the worker
-        subprocess (Unix). Returns (socket, port)."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(('127.0.0.1', 0))
-        sock.listen(128)
-        return sock, sock.getsockname()[1]
 
-    def _start_process(self) -> None:
-        """Launch the worker subprocess."""
-        python_path = self.manifest['python_path']
 
-        # 1. Setup Log Directory using config
-        cfg = get_config()
-        log_dir = cfg.logs_dir
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 2. Open Log File (Append mode)
-        # We keep the file handle open as long as the process runs
-        self.log_path = log_dir / f"{self.name}.log"
-        self.log_file = open(self.log_path, "a") # Close this in cleanup()
-        
-        # Write a header so we know a new session started
-        self.log_file.write(f"\n--- Starting {self.name} at {time.ctime()} ---\n")
-        self.log_file.flush()
-        
-        # SG-4: prefer FD inheritance over bind-then-close. `pass_fds` is
-        # Unix-only; Windows falls back to the legacy port-handoff (TOCTOU
-        # latent there until cross-platform CI matrix per SG-32).
-        popen_kwargs: Dict[str, Any] = {}
-        if is_windows():
-            self._listen_sock.close()
-            self._listen_sock = None
-            port_args = ["--port", str(self.port)]
-        else:
-            fd = self._listen_sock.fileno()
-            os.set_inheritable(fd, True)
-            popen_kwargs["pass_fds"] = (fd,)
-            port_args = ["--fd", str(fd)]
-
-        cmd = [
-            python_path,
-            "-m", "cjm_plugin_system.core.worker",
-            "--module", self.manifest['module'],
-            "--class", self.manifest['class'],
-            *port_args,
-            "--ppid", str(os.getpid())  # Enable suicide pact
-        ]
-        
-        # Merge environment variables from manifest
-        env = dict(os.environ)
-        env.update(self.manifest.get('env_vars', {}))
-        # CR-12: apply the substrate-composed worker-env overlay (resolved
-        # secrets + visible overrides) on top of the manifest defaults.
-        env.update(self.extra_env)
-        
-        # Inject CJM paths for plugin runtime
-        env["CJM_PLUGIN_DATA_DIR"] = str(cfg.plugin_data_dir)
-        if cfg.models_dir:
-            env["CJM_MODELS_DIR"] = str(cfg.models_dir)
-
-        print(f"[{self.name}] Starting worker on port {self.port}...")
-        # 3. Redirect Output to File
-        # We merge stderr into stdout for a single timeline
-        print(f"[{self.name}] Logs: {self.log_path}")
-        
-        # Get cross-platform process isolation kwargs
-        isolation_kwargs = get_popen_isolation_kwargs()
-        
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=self.log_file,
-            stderr=subprocess.STDOUT, # Merge stderr into stdout
-            env=env,
-            **isolation_kwargs,
-            **popen_kwargs,
-        )
-        # Parent releases its copy of the listening socket once the worker has
-        # inherited the FD; the worker now owns it via uvicorn's --fd path.
-        if self._listen_sock is not None:
-            self._listen_sock.close()
-            self._listen_sock = None
-        self._wait_for_ready()
-
-    def _wait_for_ready(
-        self,
-        timeout:float=30.0 # Max seconds to wait for worker startup
-    ) -> None:
-        """Wait for worker to become responsive."""
-        start = time.time()
-        while time.time() - start < timeout:
-            try:
-                with httpx.Client() as client:
-                    client.get(f"{self.base_url}/health")
-                print(f"[{self.name}] Worker ready.")
-                return
-            except httpx.ConnectError:
-                time.sleep(0.5)
-        
-        # Timeout - get stderr for debugging
-        _, stderr = self.process.communicate(timeout=1)
-        raise TimeoutError(
-            f"Plugin '{self.name}' failed to start within {timeout}s: "
-            f"{stderr.decode() if stderr else 'Unknown error'}"
-        )
 
 
     def initialize(
@@ -233,34 +133,150 @@ class RemotePluginProxy(PluginInterface):
         """Get the plugin's current configuration."""
         with httpx.Client() as client:
             return client.get(f"{self.base_url}/config").json()
-    
-    def config_options(self) -> Dict[str, Any]: # CR-11: live config option domains
-        """Get the plugin's runtime config option providers (CR-11).
-        
-        Returns the worker's get_config_options() output (FieldOptions per
-        dynamic field, JSON-serialized to dicts). Empty dict when the plugin
-        exposes no dynamic options.
-        """
-        with httpx.Client() as client:
-            return client.get(f"{self.base_url}/config_options").json()
 
+# %% ../../nbs/core/proxy.ipynb #m-bind-listen-socket
+@patch
+def _bind_listen_socket(self:RemotePluginProxy) -> Tuple[socket.socket, int]:
+    """Bind a listening socket on a kernel-chosen ephemeral port.
+    The socket is kept open so its FD can be inherited by the worker
+    subprocess (Unix). Returns (socket, port)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(('127.0.0.1', 0))
+    sock.listen(128)
+    return sock, sock.getsockname()[1]
 
-    def cleanup(self) -> None:
-        """Clean up plugin resources and terminate worker process."""
-        # Send cleanup request to worker
+# %% ../../nbs/core/proxy.ipynb #m-start-process
+@patch
+def _start_process(self:RemotePluginProxy) -> None:
+    """Launch the worker subprocess."""
+    python_path = self.manifest['python_path']
+
+    # 1. Setup Log Directory using config
+    cfg = get_config()
+    log_dir = cfg.logs_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2. Open Log File (Append mode)
+    # We keep the file handle open as long as the process runs
+    self.log_path = log_dir / f"{self.name}.log"
+    self.log_file = open(self.log_path, "a") # Close this in cleanup()
+
+    # Write a header so we know a new session started
+    self.log_file.write(f"\n--- Starting {self.name} at {time.ctime()} ---\n")
+    self.log_file.flush()
+
+    # SG-4: prefer FD inheritance over bind-then-close. `pass_fds` is
+    # Unix-only; Windows falls back to the legacy port-handoff (TOCTOU
+    # latent there until cross-platform CI matrix per SG-32).
+    popen_kwargs: Dict[str, Any] = {}
+    if is_windows():
+        self._listen_sock.close()
+        self._listen_sock = None
+        port_args = ["--port", str(self.port)]
+    else:
+        fd = self._listen_sock.fileno()
+        os.set_inheritable(fd, True)
+        popen_kwargs["pass_fds"] = (fd,)
+        port_args = ["--fd", str(fd)]
+
+    cmd = [
+        python_path,
+        "-m", "cjm_plugin_system.core.worker",
+        "--module", self.manifest['module'],
+        "--class", self.manifest['class'],
+        *port_args,
+        "--ppid", str(os.getpid())  # Enable suicide pact
+    ]
+
+    # Merge environment variables from manifest
+    env = dict(os.environ)
+    env.update(self.manifest.get('env_vars', {}))
+    # CR-12: apply the substrate-composed worker-env overlay (resolved
+    # secrets + visible overrides) on top of the manifest defaults.
+    env.update(self.extra_env)
+
+    # Inject CJM paths for plugin runtime
+    env["CJM_PLUGIN_DATA_DIR"] = str(cfg.plugin_data_dir)
+    if cfg.models_dir:
+        env["CJM_MODELS_DIR"] = str(cfg.models_dir)
+
+    print(f"[{self.name}] Starting worker on port {self.port}...")
+    # 3. Redirect Output to File
+    # We merge stderr into stdout for a single timeline
+    print(f"[{self.name}] Logs: {self.log_path}")
+
+    # Get cross-platform process isolation kwargs
+    isolation_kwargs = get_popen_isolation_kwargs()
+
+    self.process = subprocess.Popen(
+        cmd,
+        stdout=self.log_file,
+        stderr=subprocess.STDOUT, # Merge stderr into stdout
+        env=env,
+        **isolation_kwargs,
+        **popen_kwargs,
+    )
+    # Parent releases its copy of the listening socket once the worker has
+    # inherited the FD; the worker now owns it via uvicorn's --fd path.
+    if self._listen_sock is not None:
+        self._listen_sock.close()
+        self._listen_sock = None
+    self._wait_for_ready()
+
+# %% ../../nbs/core/proxy.ipynb #m-wait-for-ready
+@patch
+def _wait_for_ready(
+    self:RemotePluginProxy,
+    timeout:float=30.0 # Max seconds to wait for worker startup
+) -> None:
+    """Wait for worker to become responsive."""
+    start = time.time()
+    while time.time() - start < timeout:
         try:
-            with httpx.Client(timeout=2) as client:
-                client.post(f"{self.base_url}/cleanup")
-        except Exception:
-            pass  # Worker may already be gone
-        
-        # Terminate the subprocess using cross-platform utility
-        terminate_process(self.process, timeout=2.0)
-        self.process = None
+            with httpx.Client() as client:
+                client.get(f"{self.base_url}/health")
+            print(f"[{self.name}] Worker ready.")
+            return
+        except httpx.ConnectError:
+            time.sleep(0.5)
 
-        # Close file handle
-        if hasattr(self, 'log_file') and self.log_file:
-            self.log_file.close()
+    # Timeout - get stderr for debugging
+    _, stderr = self.process.communicate(timeout=1)
+    raise TimeoutError(
+        f"Plugin '{self.name}' failed to start within {timeout}s: "
+        f"{stderr.decode() if stderr else 'Unknown error'}"
+    )
+
+# %% ../../nbs/core/proxy.ipynb #m-config-options
+@patch
+def config_options(self:RemotePluginProxy) -> Dict[str, Any]: # CR-11: live config option domains
+    """Get the plugin's runtime config option providers (CR-11).
+
+    Returns the worker's get_config_options() output (FieldOptions per
+    dynamic field, JSON-serialized to dicts). Empty dict when the plugin
+    exposes no dynamic options.
+    """
+    with httpx.Client() as client:
+        return client.get(f"{self.base_url}/config_options").json()
+
+# %% ../../nbs/core/proxy.ipynb #m-cleanup
+@patch
+def cleanup(self:RemotePluginProxy) -> None:
+    """Clean up plugin resources and terminate worker process."""
+    # Send cleanup request to worker
+    try:
+        with httpx.Client(timeout=2) as client:
+            client.post(f"{self.base_url}/cleanup")
+    except Exception:
+        pass  # Worker may already be gone
+
+    # Terminate the subprocess using cross-platform utility
+    terminate_process(self.process, timeout=2.0)
+    self.process = None
+
+    # Close file handle
+    if hasattr(self, 'log_file') and self.log_file:
+        self.log_file.close()
 
 # %% ../../nbs/core/proxy.ipynb #serialization
 def _maybe_serialize_input(
@@ -312,7 +328,9 @@ async def execute_async(
         raise RuntimeError(f"Execute failed: {resp.text}")
     return resp.json()
 
+RemotePluginProxy.execute_async = execute_async
 
+# %% ../../nbs/core/proxy.ipynb #fn-raise-from-job-error-chunk
 def _raise_from_job_error_chunk(
     job_error: Dict[str, Any],  # _job_error payload from /execute_stream terminal chunk
     plugin_name: str,  # Caller's plugin name (for PluginCancelledError reconstruction)
@@ -354,13 +372,16 @@ def _raise_from_job_error_chunk(
     # Unknown category — surface as RuntimeError with the structured payload
     raise RuntimeError(f"Plugin stream error (unknown category {category!r}): {job_error}")
 
-
+# %% ../../nbs/core/proxy.ipynb #fn-execute-stream-sync
 def execute_stream_sync(self, *args, **kwargs) -> Generator[Any, None, None]:
     """Synchronous wrapper for streaming (blocking)."""
     # This is tricky without "httpx.stream" in sync mode.
     # For now, it's okay to leave it async-only if documented.
     pass
 
+RemotePluginProxy.execute_stream_sync = execute_stream_sync
+
+# %% ../../nbs/core/proxy.ipynb #fn-execute-stream
 async def execute_stream(
     self,
     *args,
@@ -386,8 +407,6 @@ async def execute_stream(
                     _raise_from_job_error_chunk(chunk["_job_error"], self.name)
                 yield chunk
 
-RemotePluginProxy.execute_async = execute_async
-RemotePluginProxy.execute_stream_sync = execute_stream_sync
 RemotePluginProxy.execute_stream = execute_stream
 
 # %% ../../nbs/core/proxy.ipynb #777b41df
@@ -616,7 +635,9 @@ def get_system_status(self) -> Optional[Dict[str, Any]]:  # SystemStats dict, or
     except httpx.ConnectError:
         return None
 
+RemotePluginProxy.get_system_status = get_system_status
 
+# %% ../../nbs/core/proxy.ipynb #fn-get-system-status-async
 async def get_system_status_async(self) -> Optional[Dict[str, Any]]:  # SystemStats dict, or None on transport / config failure
     """Async variant of `get_system_status`. Same 200/404/501/500/ConnectError semantics."""
     try:
@@ -640,7 +661,9 @@ async def get_system_status_async(self) -> Optional[Dict[str, Any]]:  # SystemSt
     except httpx.ConnectError:
         return None
 
+RemotePluginProxy.get_system_status_async = get_system_status_async
 
+# %% ../../nbs/core/proxy.ipynb #fn-list-processes
 def list_processes(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict list, or None on transport / config failure
     """CR-3: typed MonitorPlugin accessor. POSTs to worker's `/list_processes`.
     
@@ -669,7 +692,9 @@ def list_processes(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict
     except httpx.ConnectError:
         return None
 
+RemotePluginProxy.list_processes = list_processes
 
+# %% ../../nbs/core/proxy.ipynb #fn-list-processes-async
 async def list_processes_async(self) -> Optional[List[Dict[str, Any]]]:  # ProcessStats dict list, or None on transport / config failure
     """Async variant of `list_processes`. Same semantics."""
     try:
@@ -693,10 +718,6 @@ async def list_processes_async(self) -> Optional[List[Dict[str, Any]]]:  # Proce
     except httpx.ConnectError:
         return None
 
-
-RemotePluginProxy.get_system_status = get_system_status
-RemotePluginProxy.get_system_status_async = get_system_status_async
-RemotePluginProxy.list_processes = list_processes
 RemotePluginProxy.list_processes_async = list_processes_async
 
 # %% ../../nbs/core/proxy.ipynb #f5e578a2
@@ -729,7 +750,9 @@ def prefetch(
     threshold = stall_threshold_seconds if stall_threshold_seconds is not None else _resolve_prefetch_stall_threshold()
     return _run_prefetch_with_stall_detection(self, threshold, poll_interval_seconds)
 
+RemotePluginProxy.prefetch = prefetch
 
+# %% ../../nbs/core/proxy.ipynb #fn-prefetch-async
 async def prefetch_async(
     self,
     stall_threshold_seconds: Optional[float] = None,
@@ -739,7 +762,9 @@ async def prefetch_async(
     threshold = stall_threshold_seconds if stall_threshold_seconds is not None else _resolve_prefetch_stall_threshold()
     return await _run_prefetch_with_stall_detection_async(self, threshold, poll_interval_seconds)
 
+RemotePluginProxy.prefetch_async = prefetch_async
 
+# %% ../../nbs/core/proxy.ipynb #fn-resolve-prefetch-stall-threshold
 def _resolve_prefetch_stall_threshold() -> float:
     """Resolve the stall threshold from SubstrateConfig with a defensive fallback."""
     try:
@@ -749,7 +774,7 @@ def _resolve_prefetch_stall_threshold() -> float:
     except Exception:
         return 60.0
 
-
+# %% ../../nbs/core/proxy.ipynb #fn-run-prefetch-with-stall-detection
 def _run_prefetch_with_stall_detection(
     proxy: 'RemotePluginProxy',
     stall_threshold_seconds: float,
@@ -830,7 +855,7 @@ def _run_prefetch_with_stall_detection(
         return False  # Worker died
     return state['status'] == 'done'
 
-
+# %% ../../nbs/core/proxy.ipynb #fn-run-prefetch-with-stall-detection-async
 async def _run_prefetch_with_stall_detection_async(
     proxy: 'RemotePluginProxy',
     stall_threshold_seconds: float,
@@ -897,7 +922,7 @@ async def _run_prefetch_with_stall_detection_async(
         return False
     return result['status'] == 'done'
 
-
+# %% ../../nbs/core/proxy.ipynb #fn-reconfigure
 def reconfigure(
     self,
     old_config: Optional[Dict[str, Any]],  # Previous config snapshot
@@ -922,7 +947,9 @@ def reconfigure(
     except httpx.ConnectError:
         return False
 
+RemotePluginProxy.reconfigure = reconfigure
 
+# %% ../../nbs/core/proxy.ipynb #fn-reconfigure-async
 async def reconfigure_async(
     self,
     old_config: Optional[Dict[str, Any]],  # Previous config snapshot
@@ -939,10 +966,6 @@ async def reconfigure_async(
     except httpx.ConnectError:
         return False
 
-
-RemotePluginProxy.prefetch = prefetch
-RemotePluginProxy.prefetch_async = prefetch_async
-RemotePluginProxy.reconfigure = reconfigure
 RemotePluginProxy.reconfigure_async = reconfigure_async
 
 # %% ../../nbs/core/proxy.ipynb #context-manager
