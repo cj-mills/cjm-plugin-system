@@ -504,6 +504,10 @@ JobQueue.cancel = cancel
 JobQueue.reorder = reorder
 
 # %% ../../nbs/core/queue.ipynb #observation
+import re as _re_logslice
+_LOG_TS_PATTERN = _re_logslice.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})\s')
+
+# %% ../../nbs/core/queue.ipynb #fn-get-job
 def get_job(
     self,
     job_id: str  # Job to retrieve
@@ -511,6 +515,9 @@ def get_job(
     """Get a job by ID."""
     return self._jobs.get(job_id)
 
+JobQueue.get_job = get_job
+
+# %% ../../nbs/core/queue.ipynb #fn-wait-for-job
 async def wait_for_job(
     self,
     job_id: str,  # Job to wait for
@@ -536,14 +543,23 @@ async def wait_for_job(
 
     return self._jobs[job_id]
 
+JobQueue.wait_for_job = wait_for_job
+
+# %% ../../nbs/core/queue.ipynb #fn-get-pending
 def get_pending(self) -> List[Job]:  # Pending jobs, priority-sorted
     """Get pending jobs, priority-sorted (higher priority first, then FIFO)."""
     return sorted(self._pending)
 
+JobQueue.get_pending = get_pending
+
+# %% ../../nbs/core/queue.ipynb #fn-get-running
 def get_running(self) -> Optional[Job]:  # Running job or None
     """Get the currently-executing job, or None if idle."""
     return self._running
 
+JobQueue.get_running = get_running
+
+# %% ../../nbs/core/queue.ipynb #fn-get-history
 def get_history(
     self,
     limit: Optional[int] = None,  # Max jobs to return (most recent N); None = all
@@ -557,6 +573,9 @@ def get_history(
     history = self._history if limit is None else self._history[-limit:]
     return list(reversed(history))
 
+JobQueue.get_history = get_history
+
+# %% ../../nbs/core/queue.ipynb #fn-get-stats
 def get_stats(self) -> QueueStats:  # Aggregate counts
     """Get aggregate queue stats — total counts by terminal status."""
     return QueueStats(
@@ -566,13 +585,9 @@ def get_stats(self) -> QueueStats:  # Aggregate counts
         total_cancelled=sum(1 for j in self._history if j.status == JobStatus.cancelled),
     )
 
-# CR-6 Stage 3: log-slicing helpers. Worker log format from `worker.py`
-# `basicConfig`: `%(asctime)s [%(levelname)s] %(message)s`. Default asctime
-# emits local-time with millisecond precision: `YYYY-MM-DD HH:MM:SS,mmm`.
-import re as _re_logslice
-_LOG_TS_PATTERN = _re_logslice.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})\s')
+JobQueue.get_stats = get_stats
 
-
+# %% ../../nbs/core/queue.ipynb #fn-parse-log-timestamp
 def _parse_log_timestamp(line: str) -> Optional[datetime]:
     """Parse the leading timestamp from a worker log line.
 
@@ -589,7 +604,7 @@ def _parse_log_timestamp(line: str) -> Optional[datetime]:
     except ValueError:
         return None
 
-
+# %% ../../nbs/core/queue.ipynb #fn-slice-log-by-job-window
 def _slice_log_by_job_window(
     raw: str,  # Full log content
     started_at: datetime,  # Job's UTC start time
@@ -638,7 +653,7 @@ def _slice_log_by_job_window(
 
     return '\n'.join(selected[-max_lines:])
 
-
+# %% ../../nbs/core/queue.ipynb #fn-get-job-logs
 def get_job_logs(
     self,
     job_id: str,  # Job to get logs for
@@ -668,12 +683,6 @@ def get_job_logs(
 
     return _slice_log_by_job_window(raw, job.started_at, job.completed_at, lines)
 
-JobQueue.get_job = get_job
-JobQueue.wait_for_job = wait_for_job
-JobQueue.get_pending = get_pending
-JobQueue.get_running = get_running
-JobQueue.get_history = get_history
-JobQueue.get_stats = get_stats
 JobQueue.get_job_logs = get_job_logs
 
 # %% ../../nbs/core/queue.ipynb #b4fe9d38
@@ -856,7 +865,9 @@ async def submit_sequence(
     )
     return seq_id
 
+JobQueue.submit_sequence = submit_sequence
 
+# %% ../../nbs/core/queue.ipynb #fn-submit-uniform-sequence
 async def submit_uniform_sequence(
     self,
     plugin_instance_id: str,  # Plugin every step targets
@@ -888,7 +899,9 @@ async def submit_uniform_sequence(
     ]
     return await self.submit_sequence(steps, priority=priority, fail_fast=fail_fast)
 
+JobQueue.submit_uniform_sequence = submit_uniform_sequence
 
+# %% ../../nbs/core/queue.ipynb #fn-cancel-sequence
 async def cancel_sequence(
     self,
     sequence_id: str  # Sequence to cancel
@@ -926,7 +939,9 @@ async def cancel_sequence(
     seq.current_job_id = None
     return True
 
+JobQueue.cancel_sequence = cancel_sequence
 
+# %% ../../nbs/core/queue.ipynb #fn-get-sequence
 def get_sequence(
     self,
     sequence_id: str  # Sequence to retrieve
@@ -934,7 +949,9 @@ def get_sequence(
     """Get a job sequence by ID (read-only inspection)."""
     return self._sequences.get(sequence_id)
 
+JobQueue.get_sequence = get_sequence
 
+# %% ../../nbs/core/queue.ipynb #fn-advance-sequence
 async def _advance_sequence(
     self,
     completed_job: Job  # The member job that just reached terminal status
@@ -1034,11 +1051,6 @@ async def _advance_sequence(
         },
     ))
 
-
-JobQueue.submit_sequence = submit_sequence
-JobQueue.submit_uniform_sequence = submit_uniform_sequence
-JobQueue.cancel_sequence = cancel_sequence
-JobQueue.get_sequence = get_sequence
 JobQueue._advance_sequence = _advance_sequence
 
 # %% ../../nbs/core/queue.ipynb #ee34e330
@@ -1164,6 +1176,9 @@ async def start(self) -> None:
     self._processor_task = asyncio.create_task(self._process_loop())
     self.logger.info("Job queue started")
 
+JobQueue.start = start
+
+# %% ../../nbs/core/queue.ipynb #fn-stop
 async def stop(self) -> None:
     """Stop the queue processor gracefully.
 
@@ -1198,6 +1213,9 @@ async def stop(self) -> None:
 
     self.logger.info("Job queue stopped")
 
+JobQueue.stop = stop
+
+# %% ../../nbs/core/queue.ipynb #fn-on-manager-retry
 def _on_manager_retry(
     self,
     instance_id: str,  # Plugin instance whose execute is retrying
@@ -1244,8 +1262,6 @@ def _on_manager_retry(
         },
     ))
 
-JobQueue.start = start
-JobQueue.stop = stop
 JobQueue._on_manager_retry = _on_manager_retry
 
 # %% ../../nbs/core/queue.ipynb #internal
@@ -1261,12 +1277,18 @@ def _move_to_history(self, job: Job) -> None:
         if evicted is not None:
             evicted.set()
 
+JobQueue._move_to_history = _move_to_history
+
+# %% ../../nbs/core/queue.ipynb #fn-signal-job-completed
 def _signal_job_completed(self, job_id: str) -> None:
     """Signal that a job has completed."""
     event = self._job_completed_events.get(job_id)
     if event:
         event.set()
 
+JobQueue._signal_job_completed = _signal_job_completed
+
+# %% ../../nbs/core/queue.ipynb #fn-emit-state-transition
 def _emit_state_transition(
     self,
     job: Job,
@@ -1286,6 +1308,9 @@ def _emit_state_transition(
         payload={"from": prev_status.value, "to": job.status.value},
     ))
 
+JobQueue._emit_state_transition = _emit_state_transition
+
+# %% ../../nbs/core/queue.ipynb #fn-emit-cancel-phase
 def _emit_cancel_phase(
     self,
     job: Job,
@@ -1312,6 +1337,9 @@ def _emit_cancel_phase(
         },
     ))
 
+JobQueue._emit_cancel_phase = _emit_cancel_phase
+
+# %% ../../nbs/core/queue.ipynb #fn-emit-block-reason
 def _emit_block_reason(
     self,
     job: Job,
@@ -1337,6 +1365,9 @@ def _emit_block_reason(
         payload={"from": prev_reason, "to": new_reason},
     ))
 
+JobQueue._emit_block_reason = _emit_block_reason
+
+# %% ../../nbs/core/queue.ipynb #fn-process-loop
 async def _process_loop(self) -> None:
     """Main processing loop."""
     while self._running_flag:
@@ -1358,6 +1389,9 @@ async def _process_loop(self) -> None:
         # Process the job
         await self._execute_job(job)
 
+JobQueue._process_loop = _process_loop
+
+# %% ../../nbs/core/queue.ipynb #fn-execute-job
 async def _execute_job(self, job: Job) -> None:
     """Execute a single job."""
     self.logger.info(f"Starting job {job.id[:8]} ({job.plugin_instance_id})")
@@ -1448,6 +1482,9 @@ async def _execute_job(self, job: Job) -> None:
 
     self.logger.info(f"Job {job.id[:8]} {job.status.value}")
 
+JobQueue._execute_job = _execute_job
+
+# %% ../../nbs/core/queue.ipynb #fn-execute-with-cancellation
 async def _execute_with_cancellation(
     self,
     job: Job,
@@ -1504,6 +1541,9 @@ async def _execute_with_cancellation(
 
     return exec_task.result()
 
+JobQueue._execute_with_cancellation = _execute_with_cancellation
+
+# %% ../../nbs/core/queue.ipynb #fn-poll-progress
 async def _poll_progress(
     self,
     job: Job,
@@ -1575,14 +1615,6 @@ async def _poll_progress(
 
         await asyncio.sleep(self.progress_poll_interval)
 
-JobQueue._move_to_history = _move_to_history
-JobQueue._signal_job_completed = _signal_job_completed
-JobQueue._emit_state_transition = _emit_state_transition
-JobQueue._emit_cancel_phase = _emit_cancel_phase
-JobQueue._emit_block_reason = _emit_block_reason
-JobQueue._process_loop = _process_loop
-JobQueue._execute_job = _execute_job
-JobQueue._execute_with_cancellation = _execute_with_cancellation
 JobQueue._poll_progress = _poll_progress
 
 # %% ../../nbs/core/queue.ipynb #0c35a476
