@@ -113,6 +113,10 @@ class EmpiricalResourceStore(Protocol):
         """Remove a record. Returns True if a row was deleted."""
         ...
 
+# %% ../../nbs/core/empirical_store.ipynb #imports-fastcore-patch-aa3877
+from fastcore.basics import patch
+
+
 # %% ../../nbs/core/empirical_store.ipynb #local-impl
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS empirical_resources (
@@ -156,155 +160,10 @@ class LocalEmpiricalResourceStore:
         """Initialize the store. `db_path=None` uses `~/.cjm/empirical_resources.db`."""
         self.db_path = Path(db_path) if db_path is not None else _default_db_path()
     
-    @contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]:
-        """Open a connection, creating parent dirs + schema on demand."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
-        try:
-            conn.execute(_SCHEMA)
-            # SG-54: in-place migration for DBs created before api_usage_totals.
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(empirical_resources)").fetchall()}
-            if "api_usage_totals" not in cols:
-                conn.execute("ALTER TABLE empirical_resources ADD COLUMN api_usage_totals TEXT NOT NULL DEFAULT '{}'")
-            conn.commit()
-            yield conn
-        finally:
-            conn.close()
     
-    def record_sample(
-        self,
-        instance_id: str,  # PluginInstance.instance_id
-        plugin_name: str,  # PluginInstance.plugin_name (denormalized for filtering)
-        config_hash: str,  # compute_config_hash(inst.config)
-        sample: ResourceSample,  # One observation
-    ) -> None:
-        """Fold a sample into the running aggregate. Creates a new row on first call.
-        
-        Welford update for each mean. Max-of-peaks for memory metrics.
-        success_count incremented by 1 if sample.success else 0.
-        """
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT sample_count, success_count, cpu_percent_mean, "
-                "memory_mb_peak_max, memory_mb_peak_mean, "
-                "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                "duration_seconds_mean, api_usage_totals "
-                "FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
-                (instance_id, config_hash),
-            ).fetchone()
-            
-            success_delta = 1 if sample.success else 0
-            if row is None:
-                # First sample for this (instance_id, config_hash) pair.
-                n = 1
-                success_count = success_delta
-                cpu_mean = sample.cpu_percent
-                mem_mean = sample.memory_mb_peak
-                gpu_mean = sample.gpu_memory_mb_peak
-                dur_mean = sample.duration_seconds
-                mem_max = sample.memory_mb_peak
-                gpu_max = sample.gpu_memory_mb_peak
-                usage_totals = {k: float(v) for k, v in (sample.api_usage or {}).items()}
-            else:
-                (old_n, old_success_count, old_cpu_mean,
-                 old_mem_max, old_mem_mean,
-                 old_gpu_max, old_gpu_mean,
-                 old_dur_mean, old_usage_totals_json) = row
-                n = old_n + 1
-                success_count = old_success_count + success_delta
-                # Welford running-mean update: mean_n = mean_{n-1} + (x - mean_{n-1}) / n
-                cpu_mean = old_cpu_mean + (sample.cpu_percent - old_cpu_mean) / n
-                mem_mean = old_mem_mean + (sample.memory_mb_peak - old_mem_mean) / n
-                gpu_mean = old_gpu_mean + (sample.gpu_memory_mb_peak - old_gpu_mean) / n
-                dur_mean = old_dur_mean + (sample.duration_seconds - old_dur_mean) / n
-                # Max-of-peaks for memory metrics (eviction-candidate selection reads this)
-                mem_max = max(old_mem_max, sample.memory_mb_peak)
-                gpu_max = max(old_gpu_max, sample.gpu_memory_mb_peak)
-                # SG-54: usage is ADDITIVE (cumulative) — merge-sum per unit name.
-                try:
-                    usage_totals = json.loads(old_usage_totals_json) if old_usage_totals_json else {}
-                except (TypeError, ValueError):
-                    usage_totals = {}
-                for _k, _v in (sample.api_usage or {}).items():
-                    usage_totals[_k] = float(usage_totals.get(_k, 0.0)) + float(_v)
-            
-            conn.execute(
-                "INSERT OR REPLACE INTO empirical_resources ("
-                "instance_id, plugin_name, config_hash, sample_count, success_count, "
-                "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
-                "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                "duration_seconds_mean, last_observed, api_usage_totals"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    instance_id, plugin_name, config_hash, n, success_count,
-                    cpu_mean, mem_max, mem_mean, gpu_max, gpu_mean,
-                    dur_mean, sample.observed_at.isoformat(), json.dumps(usage_totals, sort_keys=True),
-                ),
-            )
-            conn.commit()
     
-    def get_record(
-        self,
-        instance_id: str,
-        config_hash: str,
-    ) -> Optional[EmpiricalResourceRecord]:
-        """Fetch the aggregated record for (instance_id, config_hash), or None."""
-        if not self.db_path.exists():
-            return None
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
-                "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
-                "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                "duration_seconds_mean, last_observed, api_usage_totals "
-                "FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
-                (instance_id, config_hash),
-            ).fetchone()
-        return self._row_to_record(row) if row is not None else None
     
-    def list_records(
-        self,
-        plugin_name: Optional[str] = None,
-    ) -> List[EmpiricalResourceRecord]:
-        """List all records, optionally filtered to a plugin."""
-        if not self.db_path.exists():
-            return []
-        with self._conn() as conn:
-            if plugin_name is not None:
-                rows = conn.execute(
-                    "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
-                    "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
-                    "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                    "duration_seconds_mean, last_observed, api_usage_totals "
-                    "FROM empirical_resources WHERE plugin_name = ?",
-                    (plugin_name,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
-                    "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
-                    "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
-                    "duration_seconds_mean, last_observed, api_usage_totals "
-                    "FROM empirical_resources",
-                ).fetchall()
-        return [self._row_to_record(r) for r in rows]
     
-    def delete_record(
-        self,
-        instance_id: str,
-        config_hash: str,
-    ) -> bool:
-        """Remove a record. Returns True if a row was deleted."""
-        if not self.db_path.exists():
-            return False
-        with self._conn() as conn:
-            cur = conn.execute(
-                "DELETE FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
-                (instance_id, config_hash),
-            )
-            conn.commit()
-            return cur.rowcount > 0
     
     @staticmethod
     def _row_to_record(row) -> EmpiricalResourceRecord:
@@ -340,3 +199,163 @@ class LocalEmpiricalResourceStore:
             last_observed=last_observed,
             api_usage_totals=api_usage_totals,
         )
+
+# %% ../../nbs/core/empirical_store.ipynb #m-conn
+@patch
+@contextmanager
+def _conn(self:LocalEmpiricalResourceStore) -> Iterator[sqlite3.Connection]:
+    """Open a connection, creating parent dirs + schema on demand."""
+    self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(self.db_path)
+    try:
+        conn.execute(_SCHEMA)
+        # SG-54: in-place migration for DBs created before api_usage_totals.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(empirical_resources)").fetchall()}
+        if "api_usage_totals" not in cols:
+            conn.execute("ALTER TABLE empirical_resources ADD COLUMN api_usage_totals TEXT NOT NULL DEFAULT '{}'")
+        conn.commit()
+        yield conn
+    finally:
+        conn.close()
+
+# %% ../../nbs/core/empirical_store.ipynb #m-record-sample
+@patch
+def record_sample(
+    self:LocalEmpiricalResourceStore,
+    instance_id: str,  # PluginInstance.instance_id
+    plugin_name: str,  # PluginInstance.plugin_name (denormalized for filtering)
+    config_hash: str,  # compute_config_hash(inst.config)
+    sample: ResourceSample,  # One observation
+) -> None:
+    """Fold a sample into the running aggregate. Creates a new row on first call.
+
+    Welford update for each mean. Max-of-peaks for memory metrics.
+    success_count incremented by 1 if sample.success else 0.
+    """
+    with self._conn() as conn:
+        row = conn.execute(
+            "SELECT sample_count, success_count, cpu_percent_mean, "
+            "memory_mb_peak_max, memory_mb_peak_mean, "
+            "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
+            "duration_seconds_mean, api_usage_totals "
+            "FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
+            (instance_id, config_hash),
+        ).fetchone()
+
+        success_delta = 1 if sample.success else 0
+        if row is None:
+            # First sample for this (instance_id, config_hash) pair.
+            n = 1
+            success_count = success_delta
+            cpu_mean = sample.cpu_percent
+            mem_mean = sample.memory_mb_peak
+            gpu_mean = sample.gpu_memory_mb_peak
+            dur_mean = sample.duration_seconds
+            mem_max = sample.memory_mb_peak
+            gpu_max = sample.gpu_memory_mb_peak
+            usage_totals = {k: float(v) for k, v in (sample.api_usage or {}).items()}
+        else:
+            (old_n, old_success_count, old_cpu_mean,
+             old_mem_max, old_mem_mean,
+             old_gpu_max, old_gpu_mean,
+             old_dur_mean, old_usage_totals_json) = row
+            n = old_n + 1
+            success_count = old_success_count + success_delta
+            # Welford running-mean update: mean_n = mean_{n-1} + (x - mean_{n-1}) / n
+            cpu_mean = old_cpu_mean + (sample.cpu_percent - old_cpu_mean) / n
+            mem_mean = old_mem_mean + (sample.memory_mb_peak - old_mem_mean) / n
+            gpu_mean = old_gpu_mean + (sample.gpu_memory_mb_peak - old_gpu_mean) / n
+            dur_mean = old_dur_mean + (sample.duration_seconds - old_dur_mean) / n
+            # Max-of-peaks for memory metrics (eviction-candidate selection reads this)
+            mem_max = max(old_mem_max, sample.memory_mb_peak)
+            gpu_max = max(old_gpu_max, sample.gpu_memory_mb_peak)
+            # SG-54: usage is ADDITIVE (cumulative) — merge-sum per unit name.
+            try:
+                usage_totals = json.loads(old_usage_totals_json) if old_usage_totals_json else {}
+            except (TypeError, ValueError):
+                usage_totals = {}
+            for _k, _v in (sample.api_usage or {}).items():
+                usage_totals[_k] = float(usage_totals.get(_k, 0.0)) + float(_v)
+
+        conn.execute(
+            "INSERT OR REPLACE INTO empirical_resources ("
+            "instance_id, plugin_name, config_hash, sample_count, success_count, "
+            "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
+            "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
+            "duration_seconds_mean, last_observed, api_usage_totals"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                instance_id, plugin_name, config_hash, n, success_count,
+                cpu_mean, mem_max, mem_mean, gpu_max, gpu_mean,
+                dur_mean, sample.observed_at.isoformat(), json.dumps(usage_totals, sort_keys=True),
+            ),
+        )
+        conn.commit()
+
+# %% ../../nbs/core/empirical_store.ipynb #m-get-record
+@patch
+def get_record(
+    self:LocalEmpiricalResourceStore,
+    instance_id: str,
+    config_hash: str,
+) -> Optional[EmpiricalResourceRecord]:
+    """Fetch the aggregated record for (instance_id, config_hash), or None."""
+    if not self.db_path.exists():
+        return None
+    with self._conn() as conn:
+        row = conn.execute(
+            "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
+            "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
+            "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
+            "duration_seconds_mean, last_observed, api_usage_totals "
+            "FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
+            (instance_id, config_hash),
+        ).fetchone()
+    return self._row_to_record(row) if row is not None else None
+
+# %% ../../nbs/core/empirical_store.ipynb #m-list-records
+@patch
+def list_records(
+    self:LocalEmpiricalResourceStore,
+    plugin_name: Optional[str] = None,
+) -> List[EmpiricalResourceRecord]:
+    """List all records, optionally filtered to a plugin."""
+    if not self.db_path.exists():
+        return []
+    with self._conn() as conn:
+        if plugin_name is not None:
+            rows = conn.execute(
+                "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
+                "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
+                "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
+                "duration_seconds_mean, last_observed, api_usage_totals "
+                "FROM empirical_resources WHERE plugin_name = ?",
+                (plugin_name,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT instance_id, plugin_name, config_hash, sample_count, success_count, "
+                "cpu_percent_mean, memory_mb_peak_max, memory_mb_peak_mean, "
+                "gpu_memory_mb_peak_max, gpu_memory_mb_peak_mean, "
+                "duration_seconds_mean, last_observed, api_usage_totals "
+                "FROM empirical_resources",
+            ).fetchall()
+    return [self._row_to_record(r) for r in rows]
+
+# %% ../../nbs/core/empirical_store.ipynb #m-delete-record
+@patch
+def delete_record(
+    self:LocalEmpiricalResourceStore,
+    instance_id: str,
+    config_hash: str,
+) -> bool:
+    """Remove a record. Returns True if a row was deleted."""
+    if not self.db_path.exists():
+        return False
+    with self._conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM empirical_resources WHERE instance_id = ? AND config_hash = ?",
+            (instance_id, config_hash),
+        )
+        conn.commit()
+        return cur.rowcount > 0
