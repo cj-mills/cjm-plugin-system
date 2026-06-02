@@ -52,6 +52,10 @@ class PluginConfigStore(Protocol):
         """Return every stored record, keyed by plugin name."""
         ...
 
+# %% ../../nbs/core/config_store.ipynb #imports-fastcore-patch-713009
+from fastcore.basics import patch
+
+
 # %% ../../nbs/core/config_store.ipynb #local-impl
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS plugin_configs (
@@ -79,99 +83,109 @@ class LocalPluginConfigStore:
     def __init__(self, db_path: Optional[Path] = None):
         """Initialize the store. `db_path=None` uses `~/.cjm/plugin_configs.db`."""
         self.db_path = Path(db_path) if db_path is not None else _default_db_path()
-    
-    @contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]:
-        """Open a connection, creating parent dirs + schema on demand."""
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.db_path)
-        try:
-            conn.execute(_SCHEMA)
-            conn.commit()
-            yield conn
-        finally:
-            conn.close()
-    
-    def get(
-        self,
-        plugin_name: str  # Plugin to look up
-    ) -> Optional[PluginConfigRecord]:  # Persisted record or None if absent
-        """Fetch the record for a plugin."""
-        if not self.db_path.exists():
-            return None
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT config_json, enabled, updated_at FROM plugin_configs WHERE plugin_name = ?",
-                (plugin_name,),
-            ).fetchone()
-        if row is None:
-            return None
-        config_json, enabled, updated_at = row
+
+# %% ../../nbs/core/config_store.ipynb #m-conn
+@patch
+@contextmanager
+def _conn(self:LocalPluginConfigStore) -> Iterator[sqlite3.Connection]:
+    """Open a connection, creating parent dirs + schema on demand."""
+    self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(self.db_path)
+    try:
+        conn.execute(_SCHEMA)
+        conn.commit()
+        yield conn
+    finally:
+        conn.close()
+
+# %% ../../nbs/core/config_store.ipynb #m-get
+@patch
+def get(
+    self:LocalPluginConfigStore,
+    plugin_name: str  # Plugin to look up
+) -> Optional[PluginConfigRecord]:  # Persisted record or None if absent
+    """Fetch the record for a plugin."""
+    if not self.db_path.exists():
+        return None
+    with self._conn() as conn:
+        row = conn.execute(
+            "SELECT config_json, enabled, updated_at FROM plugin_configs WHERE plugin_name = ?",
+            (plugin_name,),
+        ).fetchone()
+    if row is None:
+        return None
+    config_json, enabled, updated_at = row
+    try:
+        config = json.loads(config_json) if config_json else {}
+    except json.JSONDecodeError as e:
+        _logger.warning(
+            "Corrupted config row for plugin %s: %s. Returning empty config.",
+            plugin_name, e,
+        )
+        config = {}
+    return PluginConfigRecord(
+        config=config,
+        enabled=bool(enabled),
+        updated_at=float(updated_at),
+    )
+
+# %% ../../nbs/core/config_store.ipynb #m-set
+@patch
+def set(
+    self:LocalPluginConfigStore,
+    plugin_name: str,  # Plugin to write
+    record: PluginConfigRecord  # New record (updated_at overwritten with current time)
+) -> None:
+    """Persist a record. Stamps `updated_at` to the current time."""
+    record.updated_at = time.time()
+    with self._conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO plugin_configs "
+            "(plugin_name, config_json, enabled, updated_at) VALUES (?, ?, ?, ?)",
+            (
+                plugin_name,
+                json.dumps(record.config),
+                1 if record.enabled else 0,
+                record.updated_at,
+            ),
+        )
+        conn.commit()
+
+# %% ../../nbs/core/config_store.ipynb #m-delete
+@patch
+def delete(
+    self:LocalPluginConfigStore,
+    plugin_name: str  # Plugin to remove
+) -> bool:  # True if a row was deleted
+    """Remove the record for a plugin."""
+    if not self.db_path.exists():
+        return False
+    with self._conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM plugin_configs WHERE plugin_name = ?", (plugin_name,),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+# %% ../../nbs/core/config_store.ipynb #m-list-all
+@patch
+def list_all(self:LocalPluginConfigStore) -> Dict[str, PluginConfigRecord]:  # plugin_name -> record
+    """Return all stored records keyed by plugin name."""
+    if not self.db_path.exists():
+        return {}
+    with self._conn() as conn:
+        rows = conn.execute(
+            "SELECT plugin_name, config_json, enabled, updated_at FROM plugin_configs",
+        ).fetchall()
+    out: Dict[str, PluginConfigRecord] = {}
+    for name, config_json, enabled, updated_at in rows:
         try:
             config = json.loads(config_json) if config_json else {}
-        except json.JSONDecodeError as e:
-            _logger.warning(
-                "Corrupted config row for plugin %s: %s. Returning empty config.",
-                plugin_name, e,
-            )
+        except json.JSONDecodeError:
             config = {}
-        return PluginConfigRecord(
+        out[name] = PluginConfigRecord(
             config=config,
             enabled=bool(enabled),
             updated_at=float(updated_at),
         )
-    
-    def set(
-        self,
-        plugin_name: str,  # Plugin to write
-        record: PluginConfigRecord  # New record (updated_at overwritten with current time)
-    ) -> None:
-        """Persist a record. Stamps `updated_at` to the current time."""
-        record.updated_at = time.time()
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO plugin_configs "
-                "(plugin_name, config_json, enabled, updated_at) VALUES (?, ?, ?, ?)",
-                (
-                    plugin_name,
-                    json.dumps(record.config),
-                    1 if record.enabled else 0,
-                    record.updated_at,
-                ),
-            )
-            conn.commit()
-    
-    def delete(
-        self,
-        plugin_name: str  # Plugin to remove
-    ) -> bool:  # True if a row was deleted
-        """Remove the record for a plugin."""
-        if not self.db_path.exists():
-            return False
-        with self._conn() as conn:
-            cur = conn.execute(
-                "DELETE FROM plugin_configs WHERE plugin_name = ?", (plugin_name,),
-            )
-            conn.commit()
-            return cur.rowcount > 0
-    
-    def list_all(self) -> Dict[str, PluginConfigRecord]:  # plugin_name -> record
-        """Return all stored records keyed by plugin name."""
-        if not self.db_path.exists():
-            return {}
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT plugin_name, config_json, enabled, updated_at FROM plugin_configs",
-            ).fetchall()
-        out: Dict[str, PluginConfigRecord] = {}
-        for name, config_json, enabled, updated_at in rows:
-            try:
-                config = json.loads(config_json) if config_json else {}
-            except json.JSONDecodeError:
-                config = {}
-            out[name] = PluginConfigRecord(
-                config=config,
-                enabled=bool(enabled),
-                updated_at=float(updated_at),
-            )
-        return out
+    return out
