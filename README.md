@@ -62,36 +62,36 @@ graph LR
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
 
-    bootstrap --> core_scheduling
     bootstrap --> core_manager
+    bootstrap --> core_scheduling
     bootstrap --> core_queue
+    cli --> core_manifest_format
     cli --> core_config
     cli --> core_platform
     cli --> core_metadata
-    cli --> core_manifest_format
     core_empirical_store --> utils_hashing
     core_interface --> core_errors
-    core_manager --> core_errors
-    core_manager --> core_interface
-    core_manager --> core_metadata
-    core_manager --> core_config_store
-    core_manager --> core_empirical_store
-    core_manager --> core_scheduling
-    core_manager --> core_config
-    core_manager --> core_manifest_format
-    core_manager --> core__telemetry
     core_manager --> core_secret_store
-    core_manager --> core_proxy
+    core_manager --> core_errors
+    core_manager --> core_scheduling
+    core_manager --> core_manifest_format
+    core_manager --> core_config
+    core_manager --> core_empirical_store
+    core_manager --> core__telemetry
+    core_manager --> core_metadata
     core_manager --> utils_validation
+    core_manager --> core_interface
+    core_manager --> core_config_store
+    core_manager --> core_proxy
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
-    core_proxy --> core_platform
-    core_proxy --> core_errors
-    core_proxy --> core_interface
     core_proxy --> core_config
-    core_queue --> core__telemetry
+    core_proxy --> core_errors
+    core_proxy --> core_platform
+    core_proxy --> core_interface
     core_queue --> core_errors
+    core_queue --> core__telemetry
     core_scheduling --> core_metadata
     core_worker --> core_errors
     core_worker --> core_platform
@@ -1003,6 +1003,53 @@ class LocalPluginConfigStore
     "Default SQLite location: `~/.cjm/plugin_configs.db`."
 ```
 
+``` python
+@patch
+@contextmanager
+def _conn(self:LocalPluginConfigStore) -> Iterator[sqlite3.Connection]:
+    """Open a connection, creating parent dirs + schema on demand."""
+    self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(self.db_path)
+    try
+    "Open a connection, creating parent dirs + schema on demand."
+```
+
+``` python
+@patch
+def get(
+    self:LocalPluginConfigStore,
+    plugin_name: str  # Plugin to look up
+) -> Optional[PluginConfigRecord]:  # Persisted record or None if absent
+    "Fetch the record for a plugin."
+```
+
+``` python
+@patch
+def set(
+    self:LocalPluginConfigStore,
+    plugin_name: str,  # Plugin to write
+    record: PluginConfigRecord  # New record (updated_at overwritten with current time)
+) -> None
+    "Persist a record. Stamps `updated_at` to the current time."
+```
+
+``` python
+@patch
+def delete(
+    self:LocalPluginConfigStore,
+    plugin_name: str  # Plugin to remove
+) -> bool:  # True if a row was deleted
+    "Remove the record for a plugin."
+```
+
+``` python
+@patch
+def list_all(self:LocalPluginConfigStore) -> Dict[str, PluginConfigRecord]:  # plugin_name -> record
+    """Return all stored records keyed by plugin name."""
+    if not self.db_path.exists()
+    "Return all stored records keyed by plugin name."
+```
+
 #### Classes
 
 ``` python
@@ -1054,12 +1101,7 @@ the write so callers don't have to manage timestamps."
 
 ``` python
 class LocalPluginConfigStore:
-    def __init__(self, db_path: Optional[Path] = None):
-        """Initialize the store. `db_path=None` uses `~/.cjm/plugin_configs.db`."""
-        self.db_path = Path(db_path) if db_path is not None else _default_db_path()
-    
-    @contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]
+    def __init__(self, db_path: Optional[Path] = None)
     """
     SQLite-backed default implementation of `PluginConfigStore`.
     
@@ -1068,37 +1110,8 @@ class LocalPluginConfigStore:
     a fresh install without preparing the file first.
     """
     
-    def __init__(self, db_path: Optional[Path] = None):
-            """Initialize the store. `db_path=None` uses `~/.cjm/plugin_configs.db`."""
-            self.db_path = Path(db_path) if db_path is not None else _default_db_path()
-        
-        @contextmanager
-        def _conn(self) -> Iterator[sqlite3.Connection]
+    def __init__(self, db_path: Optional[Path] = None)
         "Initialize the store. `db_path=None` uses `~/.cjm/plugin_configs.db`."
-    
-    def get(
-            self,
-            plugin_name: str  # Plugin to look up
-        ) -> Optional[PluginConfigRecord]:  # Persisted record or None if absent
-        "Fetch the record for a plugin."
-    
-    def set(
-            self,
-            plugin_name: str,  # Plugin to write
-            record: PluginConfigRecord  # New record (updated_at overwritten with current time)
-        ) -> None
-        "Persist a record. Stamps `updated_at` to the current time."
-    
-    def delete(
-            self,
-            plugin_name: str  # Plugin to remove
-        ) -> bool:  # True if a row was deleted
-        "Remove the record for a plugin."
-    
-    def list_all(self) -> Dict[str, PluginConfigRecord]:  # plugin_name -> record
-            """Return all stored records keyed by plugin name."""
-            if not self.db_path.exists()
-        "Return all stored records keyed by plugin name."
 ```
 
 #### Variables
@@ -1160,6 +1173,63 @@ class LocalEmpiricalResourceStore
     docs) override this by passing `db_path=cfg.data_dir / "empirical_resources.db"`
     when constructing the store. PluginManager's lazy-init does this automatically.
     """
+```
+
+``` python
+@patch
+@contextmanager
+def _conn(self:LocalEmpiricalResourceStore) -> Iterator[sqlite3.Connection]:
+    """Open a connection, creating parent dirs + schema on demand."""
+    self.db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(self.db_path)
+    try
+    "Open a connection, creating parent dirs + schema on demand."
+```
+
+``` python
+@patch
+def record_sample(
+    self:LocalEmpiricalResourceStore,
+    instance_id: str,  # PluginInstance.instance_id
+    plugin_name: str,  # PluginInstance.plugin_name (denormalized for filtering)
+    config_hash: str,  # compute_config_hash(inst.config)
+    sample: ResourceSample,  # One observation
+) -> None
+    """
+    Fold a sample into the running aggregate. Creates a new row on first call.
+    
+    Welford update for each mean. Max-of-peaks for memory metrics.
+    success_count incremented by 1 if sample.success else 0.
+    """
+```
+
+``` python
+@patch
+def get_record(
+    self:LocalEmpiricalResourceStore,
+    instance_id: str,
+    config_hash: str,
+) -> Optional[EmpiricalResourceRecord]
+    "Fetch the aggregated record for (instance_id, config_hash), or None."
+```
+
+``` python
+@patch
+def list_records(
+    self:LocalEmpiricalResourceStore,
+    plugin_name: Optional[str] = None,
+) -> List[EmpiricalResourceRecord]
+    "List all records, optionally filtered to a plugin."
+```
+
+``` python
+@patch
+def delete_record(
+    self:LocalEmpiricalResourceStore,
+    instance_id: str,
+    config_hash: str,
+) -> bool
+    "Remove a record. Returns True if a row was deleted."
 ```
 
 #### Classes
@@ -1242,8 +1312,13 @@ class LocalEmpiricalResourceStore:
         """Initialize the store. `db_path=None` uses `~/.cjm/empirical_resources.db`."""
         self.db_path = Path(db_path) if db_path is not None else _default_db_path()
     
-    @contextmanager
-    def _conn(self) -> Iterator[sqlite3.Connection]
+    
+    
+    
+    
+    
+    @staticmethod
+    def _row_to_record(row) -> EmpiricalResourceRecord
     """
     SQLite-backed default implementation of `EmpiricalResourceStore`.
     
@@ -1256,41 +1331,14 @@ class LocalEmpiricalResourceStore:
             """Initialize the store. `db_path=None` uses `~/.cjm/empirical_resources.db`."""
             self.db_path = Path(db_path) if db_path is not None else _default_db_path()
         
-        @contextmanager
-        def _conn(self) -> Iterator[sqlite3.Connection]
+        
+        
+        
+        
+        
+        @staticmethod
+        def _row_to_record(row) -> EmpiricalResourceRecord
         "Initialize the store. `db_path=None` uses `~/.cjm/empirical_resources.db`."
-    
-    def record_sample(
-            self,
-            instance_id: str,  # PluginInstance.instance_id
-            plugin_name: str,  # PluginInstance.plugin_name (denormalized for filtering)
-            config_hash: str,  # compute_config_hash(inst.config)
-            sample: ResourceSample,  # One observation
-        ) -> None
-        "Fold a sample into the running aggregate. Creates a new row on first call.
-
-Welford update for each mean. Max-of-peaks for memory metrics.
-success_count incremented by 1 if sample.success else 0."
-    
-    def get_record(
-            self,
-            instance_id: str,
-            config_hash: str,
-        ) -> Optional[EmpiricalResourceRecord]
-        "Fetch the aggregated record for (instance_id, config_hash), or None."
-    
-    def list_records(
-            self,
-            plugin_name: Optional[str] = None,
-        ) -> List[EmpiricalResourceRecord]
-        "List all records, optionally filtered to a plugin."
-    
-    def delete_record(
-            self,
-            instance_id: str,
-            config_hash: str,
-        ) -> bool
-        "Remove a record. Returns True if a row was deleted."
 ```
 
 #### Variables
@@ -1463,12 +1511,7 @@ class PluginFatalError(PluginError):
 
 ``` python
 class PluginDisabledError:
-    def __init__(self, plugin_name: str):
-        super().__init__(f"Plugin {plugin_name!r} is disabled")
-        self.plugin_name = plugin_name
-
-
-class PluginNotLoadedError(PluginFatalError)
+    def __init__(self, plugin_name: str)
     """
     JobQueue / execute_plugin rejected: the plugin is currently disabled.
     
@@ -1477,22 +1520,12 @@ class PluginNotLoadedError(PluginFatalError)
     Raised by CR-2's enable/disable wiring once that lands.
     """
     
-    def __init__(self, plugin_name: str):
-            super().__init__(f"Plugin {plugin_name!r} is disabled")
-            self.plugin_name = plugin_name
-    
-    
-    class PluginNotLoadedError(PluginFatalError)
+    def __init__(self, plugin_name: str)
 ```
 
 ``` python
 class PluginNotLoadedError:
-    def __init__(self, plugin_name: str):
-        super().__init__(f"Plugin {plugin_name!r} is not loaded")
-        self.plugin_name = plugin_name
-
-
-class PluginTimeoutError(PluginTransientError)
+    def __init__(self, plugin_name: str)
     """
     Caller submitted to a plugin that was never loaded.
     
@@ -1502,12 +1535,7 @@ class PluginTimeoutError(PluginTransientError)
     a blanket `except ValueError:`.
     """
     
-    def __init__(self, plugin_name: str):
-            super().__init__(f"Plugin {plugin_name!r} is not loaded")
-            self.plugin_name = plugin_name
-    
-    
-    class PluginTimeoutError(PluginTransientError)
+    def __init__(self, plugin_name: str)
 ```
 
 ``` python
@@ -1538,12 +1566,7 @@ class PluginTimeoutError:
 
 ``` python
 class PluginCancelledError:
-    def __init__(self, plugin_name: str):
-        super().__init__(f"Plugin {plugin_name!r} cancelled by operator")
-        self.plugin_name = plugin_name
-
-
-class WorkerOOMError(PluginResourceError)
+    def __init__(self, plugin_name: str)
     """
     Cooperative cancellation signal raised from `PluginInterface.check_cancel()`.
     
@@ -1561,12 +1584,7 @@ class WorkerOOMError(PluginResourceError)
     protocol.
     """
     
-    def __init__(self, plugin_name: str):
-            super().__init__(f"Plugin {plugin_name!r} cancelled by operator")
-            self.plugin_name = plugin_name
-    
-    
-    class WorkerOOMError(PluginResourceError)
+    def __init__(self, plugin_name: str)
 ```
 
 ``` python
@@ -4253,6 +4271,77 @@ from cjm_plugin_system.core.proxy import (
 #### Functions
 
 ``` python
+@patch
+def _bind_listen_socket(self:RemotePluginProxy) -> Tuple[socket.socket, int]
+    """
+    Bind a listening socket on a kernel-chosen ephemeral port.
+    The socket is kept open so its FD can be inherited by the worker
+    subprocess (Unix). Returns (socket, port).
+    """
+```
+
+``` python
+@patch
+def _start_process(self:RemotePluginProxy) -> None:
+    """Launch the worker subprocess."""
+    python_path = self.manifest['python_path']
+
+    # 1. Setup Log Directory using config
+    cfg = get_config()
+    log_dir = cfg.logs_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2. Open Log File (Append mode)
+    # We keep the file handle open as long as the process runs
+    self.log_path = log_dir / f"{self.name}.log"
+    self.log_file = open(self.log_path, "a") # Close this in cleanup()
+
+    # Write a header so we know a new session started
+    self.log_file.write(f"\n--- Starting {self.name} at {time.ctime()} ---\n")
+    self.log_file.flush()
+
+    # SG-4: prefer FD inheritance over bind-then-close. `pass_fds` is
+    "Launch the worker subprocess."
+```
+
+``` python
+@patch
+def _wait_for_ready(
+    self:RemotePluginProxy,
+    timeout:float=30.0 # Max seconds to wait for worker startup
+) -> None
+    "Wait for worker to become responsive."
+```
+
+``` python
+@patch
+def config_options(self:RemotePluginProxy) -> Dict[str, Any]: # CR-11: live config option domains
+    """Get the plugin's runtime config option providers (CR-11).
+
+    Returns the worker's get_config_options() output (FieldOptions per
+    dynamic field, JSON-serialized to dicts). Empty dict when the plugin
+    exposes no dynamic options.
+    """
+    with httpx.Client() as client
+    """
+    Get the plugin's runtime config option providers (CR-11).
+    
+    Returns the worker's get_config_options() output (FieldOptions per
+    dynamic field, JSON-serialized to dicts). Empty dict when the plugin
+    exposes no dynamic options.
+    """
+```
+
+``` python
+@patch
+def cleanup(self:RemotePluginProxy) -> None:
+    """Clean up plugin resources and terminate worker process."""
+    # Send cleanup request to worker
+    try
+    "Clean up plugin resources and terminate worker process."
+```
+
+``` python
 def _maybe_serialize_input(
     self,
     obj: Any # Object to potentially serialize
@@ -4695,7 +4784,14 @@ class RemotePluginProxy:
             """Plugin version."""
             return self.manifest.get('version', '0.0.0')
     
-        def _bind_listen_socket(self) -> Tuple[socket.socket, int]
+    
+    
+    
+    
+        def initialize(
+            self,
+            config:Optional[Dict[str, Any]]=None # Configuration dictionary
+        ) -> None
         "Plugin version."
     
     def initialize(
@@ -4725,26 +4821,6 @@ from a real plugin failure (500 → RuntimeError as before)."
             """Get the plugin's current configuration."""
             with httpx.Client() as client
         "Get the plugin's current configuration."
-    
-    def config_options(self) -> Dict[str, Any]: # CR-11: live config option domains
-            """Get the plugin's runtime config option providers (CR-11).
-            
-            Returns the worker's get_config_options() output (FieldOptions per
-            dynamic field, JSON-serialized to dicts). Empty dict when the plugin
-            exposes no dynamic options.
-            """
-            with httpx.Client() as client
-        "Get the plugin's runtime config option providers (CR-11).
-
-Returns the worker's get_config_options() output (FieldOptions per
-dynamic field, JSON-serialized to dicts). Empty dict when the plugin
-exposes no dynamic options."
-    
-    def cleanup(self) -> None:
-            """Clean up plugin resources and terminate worker process."""
-            # Send cleanup request to worker
-            try
-        "Clean up plugin resources and terminate worker process."
 ```
 
 ### Job Queue (`queue.ipynb`)
@@ -4869,22 +4945,11 @@ async def wait_for_job(
 
 ``` python
 def get_pending(self) -> List[Job]:  # Pending jobs, priority-sorted
-    """Get pending jobs, priority-sorted (higher priority first, then FIFO)."""
-    return sorted(self._pending)
-
-def get_running(self) -> Optional[Job]:  # Running job or None
     "Get pending jobs, priority-sorted (higher priority first, then FIFO)."
 ```
 
 ``` python
 def get_running(self) -> Optional[Job]:  # Running job or None
-    """Get the currently-executing job, or None if idle."""
-    return self._running
-
-def get_history(
-    self,
-    limit: Optional[int] = None,  # Max jobs to return (most recent N); None = all
-) -> List[Job]:  # Completed/failed/cancelled jobs, most recent first
     "Get the currently-executing job, or None if idle."
 ```
 
@@ -4904,15 +4969,6 @@ def get_history(
 
 ``` python
 def get_stats(self) -> QueueStats:  # Aggregate counts
-    """Get aggregate queue stats — total counts by terminal status."""
-    return QueueStats(
-        total_pending=len(self._pending),
-        total_completed=sum(1 for j in self._history if j.status == JobStatus.completed),
-        total_failed=sum(1 for j in self._history if j.status == JobStatus.failed),
-        total_cancelled=sum(1 for j in self._history if j.status == JobStatus.cancelled),
-    )
-
-# CR-6 Stage 3: log-slicing helpers. Worker log format from `worker.py`
     "Get aggregate queue stats — total counts by terminal status."
 ```
 
@@ -5709,6 +5765,24 @@ from cjm_plugin_system.core.scheduling import (
 )
 ```
 
+#### Functions
+
+``` python
+@patch
+def _check_resources(
+    self:QueueScheduler,
+    plugin_meta: PluginMeta,  # Plugin metadata with manifest
+    stats: Dict[str, Any]  # Current system stats
+) -> bool:  # True if resources available
+    "Check if system has sufficient resources for the plugin."
+```
+
+``` python
+@patch
+def get_active_plugins(self:QueueScheduler) -> Set[str]:  # Set of currently executing plugin names
+    "Get the set of plugins with active executions."
+```
+
 #### Classes
 
 ``` python
@@ -5831,9 +5905,6 @@ class QueueScheduler:
             plugin_name: str  # Name of the plugin finishing execution
         ) -> None
         "Track that a plugin has finished executing."
-    
-    def get_active_plugins(self) -> Set[str]:  # Set of currently executing plugin names
-        "Get the set of plugins with active executions."
 ```
 
 ### Plugin Secret Store (`secret_store.ipynb`)
@@ -5860,6 +5931,67 @@ def _default_secrets_dir() -> Path:
 
 class LocalSecretStore
     "Default secrets directory: `~/.cjm/secrets` (bootstrap fallback)."
+```
+
+``` python
+@patch
+def _load(self:LocalSecretStore) -> Dict[str, Dict[str, Dict[str, str]]]:
+    if not self.path.exists()
+```
+
+``` python
+@patch
+def _save(self:LocalSecretStore, data: Dict[str, Dict[str, Dict[str, str]]]) -> None:
+    self.secrets_dir.mkdir(parents=True, exist_ok=True)
+    try
+```
+
+``` python
+@patch
+def get_secret(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin the secret belongs to
+    key: str,          # Secret key (typically the env-var name, e.g. GEMINI_API_KEY)
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam; ignored by the local store
+) -> Optional[str]:  # The secret value, or None if absent
+    "Resolve a secret value."
+```
+
+``` python
+@patch
+def set_secret(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin the secret belongs to
+    key: str,          # Secret key
+    value: str,        # Secret value (stored plaintext at 0600)
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam
+) -> None
+    "Persist a secret value."
+```
+
+``` python
+@patch
+def delete_secret(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin the secret belongs to
+    key: str,          # Secret key
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam
+) -> bool:  # True if a secret was removed
+    "Remove a secret, pruning now-empty plugin/scope containers."
+```
+
+``` python
+@patch
+def list_keys(
+    self:LocalSecretStore,
+    plugin_name: str,  # Plugin to list secrets for
+    *,
+    scope: Optional[str] = None  # Reserved multi-user seam
+) -> List[str]:  # Secret key NAMES (never values)
+    "Return the names of secrets stored for a plugin (never the values)."
 ```
 
 #### Classes
@@ -5907,42 +6039,6 @@ class LocalSecretStore:
             secrets_dir: Optional[Path] = None  # Directory for secrets.json; None -> ~/.cjm/secrets
         )
         "Initialize the store. `secrets_dir=None` uses `~/.cjm/secrets`."
-    
-    def get_secret(
-            self,
-            plugin_name: str,  # Plugin the secret belongs to
-            key: str,          # Secret key (typically the env-var name, e.g. GEMINI_API_KEY)
-            *,
-            scope: Optional[str] = None  # Reserved multi-user seam; ignored by the local store
-        ) -> Optional[str]:  # The secret value, or None if absent
-        "Resolve a secret value."
-    
-    def set_secret(
-            self,
-            plugin_name: str,  # Plugin the secret belongs to
-            key: str,          # Secret key
-            value: str,        # Secret value (stored plaintext at 0600)
-            *,
-            scope: Optional[str] = None  # Reserved multi-user seam
-        ) -> None
-        "Persist a secret value."
-    
-    def delete_secret(
-            self,
-            plugin_name: str,  # Plugin the secret belongs to
-            key: str,          # Secret key
-            *,
-            scope: Optional[str] = None  # Reserved multi-user seam
-        ) -> bool:  # True if a secret was removed
-        "Remove a secret, pruning now-empty plugin/scope containers."
-    
-    def list_keys(
-            self,
-            plugin_name: str,  # Plugin to list secrets for
-            *,
-            scope: Optional[str] = None  # Reserved multi-user seam
-        ) -> List[str]:  # Secret key NAMES (never values)
-        "Return the names of secrets stored for a plugin (never the values)."
 ```
 
 #### Variables
