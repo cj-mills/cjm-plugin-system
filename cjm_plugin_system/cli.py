@@ -622,7 +622,7 @@ def _conda_env_exists_configured(
     else:
         return conda_env_exists(env_name, conda_cmd)
 
-
+# %% ../nbs/cli.ipynb #fn-install-all
 @app.command()
 def install_all(
     plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
@@ -765,6 +765,9 @@ def setup_host(
     typer.echo("\nHost environment setup complete.")
 
 # %% ../nbs/cli.ipynb #w8lkxjiwtcl
+_PYPI_404_CACHE: set[str] = set()
+
+# %% ../nbs/cli.ipynb #fn-format-size
 def _format_size(
     size_bytes: int  # Size in bytes
 ) -> str:  # Human-readable size string
@@ -775,12 +778,7 @@ def _format_size(
         size_bytes /= 1024
     return f"{size_bytes:.1f} PB"
 
-
-# SG-37: in-process cache of PyPI 404 responses so a single estimate-size run
-# doesn't re-query the same missing name across multiple plugins.
-_PYPI_404_CACHE: set[str] = set()
-
-
+# %% ../nbs/cli.ipynb #fn-get-pypi-size
 def _get_pypi_size(
     package_spec: str  # Package name or git URL
 ) -> tuple[int, str]:  # (size_bytes, package_name)
@@ -837,7 +835,7 @@ def _get_pypi_size(
     # Nothing matched; surface the canonical form to the caller for display.
     return 0, candidates[0] if candidates else raw_name
 
-
+# %% ../nbs/cli.ipynb #fn-estimate-conda-size
 def _estimate_conda_size(
     env_file: str,  # Path or URL to environment.yml
     env_name: str  # Target environment name
@@ -883,7 +881,7 @@ def _estimate_conda_size(
             except IOError:
                 pass
 
-
+# %% ../nbs/cli.ipynb #fn-estimate-pip-sizes
 def _estimate_pip_sizes(
     packages: list[str]  # List of pip package specs
 ) -> tuple[int, int, list[tuple[str, int]]]:  # (total_bytes, found_count, [(name, size), ...])
@@ -1025,7 +1023,7 @@ def _get_conda_envs() -> set[str]: # Set of existing conda environment names
         pass
     return set()
 
-
+# %% ../nbs/cli.ipynb #fn-v2-to-legacy-flat-view
 def _v2_to_legacy_flat_view(
     raw: Dict[str, Any]  # Manifest JSON dict as read from disk
 ) -> Dict[str, Any]:  # Flat-shaped dict (install + code merged at top level)
@@ -1049,7 +1047,7 @@ def _v2_to_legacy_flat_view(
     flat["format_version"] = raw.get("format_version", CURRENT_FORMAT_VERSION)
     return flat
 
-
+# %% ../nbs/cli.ipynb #fn-get-installed-manifests
 def _get_installed_manifests(
     manifest_dir:Optional[Path]=None # Directory to scan (uses config default if None)
 ) -> list[dict]: # List of manifest dictionaries
@@ -1080,7 +1078,7 @@ def _get_installed_manifests(
     
     return manifests
 
-
+# %% ../nbs/cli.ipynb #fn-extract-env-from-python-path
 def _extract_env_from_python_path(
     python_path:str # Path like /home/user/miniforge3/envs/my-env/bin/python
 ) -> str: # Extracted environment name or empty string
@@ -1096,7 +1094,7 @@ def _extract_env_from_python_path(
     
     return ''
 
-
+# %% ../nbs/cli.ipynb #fn-list-plugins
 @app.command("list")
 def list_plugins(
     plugins_path:Optional[str]=typer.Option(None, "--plugins", help="Path to plugins.yaml for cross-reference"),
@@ -1287,7 +1285,7 @@ def _validate_taxonomy_block(
         )
     return errors
 
-
+# %% ../nbs/cli.ipynb #fn-validate-resources-block
 def _validate_resources_block(
     res: Any,  # resources sub-dict (may be None or non-dict; we type-check here)
     path_prefix: str,  # Error message prefix
@@ -1310,7 +1308,7 @@ def _validate_resources_block(
                 errors.append(f"{path_prefix}: 'resources.{list_key}' must contain only strings")
     return errors
 
-
+# %% ../nbs/cli.ipynb #fn-validate-manifest-v2-dict
 def _validate_manifest_v2_dict(
     data: Dict[str, Any]  # v2.0 nested manifest dict (caller already verified format_version)
 ) -> List[str]:  # Empty list = valid
@@ -1439,7 +1437,7 @@ def _validate_manifest_v2_dict(
     
     return errors
 
-
+# %% ../nbs/cli.ipynb #fn-validate-manifest-v1-dict
 def _validate_manifest_v1_dict(
     data: Dict[str, Any]  # Legacy flat manifest dict (no format_version)
 ) -> List[str]:  # Empty list = valid
@@ -1497,7 +1495,7 @@ def _validate_manifest_v1_dict(
     
     return errors
 
-
+# %% ../nbs/cli.ipynb #fn-validate-manifest-dict
 def _validate_manifest_dict(
     data: Any  # Loaded manifest JSON
 ) -> List[str]:  # List of human-readable error messages (empty == valid)
@@ -1522,7 +1520,7 @@ def _validate_manifest_dict(
         f"expected '2.0' or legacy (no format_version field)"
     ]
 
-
+# %% ../nbs/cli.ipynb #fn-validate-plugins-yaml-dict
 def _validate_plugins_yaml_dict(
     data: Any  # Loaded plugins.yaml content
 ) -> List[str]:  # List of human-readable error messages (empty == valid)
@@ -1575,7 +1573,7 @@ def _validate_plugins_yaml_dict(
     
     return errors
 
-
+# %% ../nbs/cli.ipynb #fn-collect-manifest-warnings
 def _collect_manifest_warnings(
     data: Any  # Loaded manifest JSON
 ) -> List[str]:  # Human-readable warning strings (non-failing lints)
@@ -1625,7 +1623,7 @@ def _collect_manifest_warnings(
                     )
     return warnings
 
-
+# %% ../nbs/cli.ipynb #fn-detect-manifest-format
 def _detect_manifest_format(
     path: Path  # File to inspect
 ) -> Optional[str]:  # 'manifest' | 'plugins_yaml' | None
