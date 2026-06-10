@@ -92,6 +92,11 @@ class PluginMeta:
     # `live_config_schema` for the post-regenerate-manifest preview).
     config_schema_drift:bool=False
     live_config_schema:Optional[Dict[str, Any]]=None
+    # Pass-2 Thread 3 (stage 2): set when the worker's live-derived
+    # structural surface disagrees with the manifest's witness hash
+    # (same CR-8 idiom as config_schema_drift; stage-4 adapter
+    # compatibility matches against the RECORDED surface).
+    structural_surface_drift:bool=False
 
 # %% ../../nbs/core/metadata.ipynb #f192f9bf
 @dataclass

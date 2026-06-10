@@ -7,10 +7,11 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/capability.html.md"""
 # %% auto #0
 __all__ = ['RELOAD_TRIGGER', 'WORKER_ENV_TEMPLATE_PLACEHOLDERS', 'ConfigOption', 'FieldOptions', 'EnvVarSpec',
            'expand_worker_env_template', 'template_check_placeholders', 'ToolCapability', 'plugin_action',
-           'collect_plugin_actions']
+           'collect_plugin_actions', 'derive_structural_surface']
 
 # %% ../../nbs/core/capability.ipynb #f96db51b
 import dataclasses
+import inspect
 import logging
 import string
 import threading
@@ -837,3 +838,41 @@ class _CR4MinimalPlugin(ToolCapability):
     def execute(self, *args, **kwargs): return None
     def get_config_schema(self) -> Dict[str, Any]: return {}
     def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
+
+# %% ../../nbs/core/capability.ipynb #8b54c90a
+def derive_structural_surface(
+    cls: type,  # The capability class to introspect
+) -> Dict[str, Any]:  # {"methods": [...], "properties": [...], "attributes": [...]}
+    """Record a capability class's structural surface by pure self-introspection.
+
+    The FULL public surface is recorded, inherited members included —
+    the surface is what adapter protocols match against, and protocol
+    members may name inherited methods. Deterministic (name-sorted) so
+    the canonical-JSON witness hash is stable across runs.
+
+    Classification: `property` → properties (names only); functions
+    (static/class methods unwrapped) → methods with `str(inspect.signature)`;
+    everything else public → attributes with the value's type name
+    (config_class, supported_actions, WORKER_ENV, ...).
+    """
+    methods: List[Dict[str, str]] = []
+    properties: List[str] = []
+    attributes: List[Dict[str, str]] = []
+    for name in sorted(dir(cls)):
+        if name.startswith("_"):
+            continue
+        attr = inspect.getattr_static(cls, name)
+        if isinstance(attr, property):
+            properties.append(name)
+            continue
+        if isinstance(attr, (staticmethod, classmethod)):
+            attr = attr.__func__
+        if inspect.isfunction(attr):
+            try:
+                sig = str(inspect.signature(attr))
+            except (ValueError, TypeError):
+                sig = "(...)"
+            methods.append({"name": name, "signature": sig})
+        else:
+            attributes.append({"name": name, "type": type(attr).__name__})
+    return {"methods": methods, "properties": properties, "attributes": attributes}

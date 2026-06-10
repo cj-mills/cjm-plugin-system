@@ -6,7 +6,7 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/manifest_format.html.md""
 
 # %% auto #0
 __all__ = ['CURRENT_FORMAT_VERSION', 'InstallSection', 'CodeSection', 'DriftTracking', 'ManifestV2', 'compute_config_schema_hash',
-           'load_manifest', 'manifest_to_dict', 'write_manifest']
+           'compute_structural_surface_hash', 'load_manifest', 'manifest_to_dict', 'write_manifest']
 
 # %% ../../nbs/core/manifest_format.ipynb #exports
 import json
@@ -63,6 +63,7 @@ class CodeSection:
     config_schema: Optional[Dict[str, Any]] = None    # JSON Schema for plugin config
     regenerated_at: Optional[str] = None              # ISO-8601 UTC of last regen
     worker_env: Optional[List[Dict[str, Any]]] = None # CR-12 spawn-env contract: asdict(EnvVarSpec) list
+    structural_surface: Optional[Dict[str, Any]] = None  # Pass-2 Thread 3: public surface recorded in-env (methods/properties/attributes)
 
 # %% ../../nbs/core/manifest_format.ipynb #drift-tracking
 @dataclass
@@ -77,6 +78,7 @@ class DriftTracking:
     warning log.
     """
     config_schema_hash: Optional[str] = None  # "sha256:hexdigest" of canonical config_schema
+    structural_surface_hash: Optional[str] = None  # Pass-2 Thread 3 witness: hash of code.structural_surface (None = pre-surface manifest)
 
 # %% ../../nbs/core/manifest_format.ipynb #manifest-v2
 @dataclass
@@ -106,6 +108,20 @@ def compute_config_schema_hash(
     install and load still gets a drift warning rather than a crash.
     """
     canonical = json.dumps(schema or {}, sort_keys=True, separators=(",", ":"))
+    return hash_bytes(canonical.encode("utf-8"))
+
+# %% ../../nbs/core/manifest_format.ipynb #985908e0
+def compute_structural_surface_hash(
+    surface: Optional[Dict[str, Any]],  # derive_structural_surface output or None
+) -> str:                               # "sha256:hexdigest"
+    """Hash a structural surface with stable canonicalization.
+
+    Same canonical-JSON + hash_bytes shape as `compute_config_schema_hash`
+    (the CR-8 idiom). None hashes as `{}` — but note the drift check skips
+    when the STORED hash is None (pre-surface-era manifest ≠ drift);
+    `_generate_manifest` only writes a hash when a surface was recorded.
+    """
+    canonical = json.dumps(surface or {}, sort_keys=True, separators=(",", ":"))
     return hash_bytes(canonical.encode("utf-8"))
 
 # %% ../../nbs/core/manifest_format.ipynb #parser-helpers
@@ -159,9 +175,11 @@ def _from_v2_dict(
         config_schema=code_d.get("config_schema"),
         regenerated_at=code_d.get("regenerated_at"),
         worker_env=code_d.get("worker_env"),
+        structural_surface=code_d.get("structural_surface"),
     )
     drift = DriftTracking(
         config_schema_hash=drift_d.get("config_schema_hash"),
+        structural_surface_hash=drift_d.get("structural_surface_hash"),
     )
     return ManifestV2(
         install=install,
@@ -284,6 +302,8 @@ def _code_section_to_dict(c: CodeSection) -> Dict[str, Any]:
         d["worker_env"] = c.worker_env
     if c.regenerated_at is not None:
         d["regenerated_at"] = c.regenerated_at
+    if c.structural_surface is not None:
+        d["structural_surface"] = c.structural_surface
     return d
 
 # %% ../../nbs/core/manifest_format.ipynb #manifest-to-dict
@@ -310,6 +330,7 @@ def manifest_to_dict(
         "code": _code_section_to_dict(m.code),
         "drift_tracking": {
             "config_schema_hash": m.drift_tracking.config_schema_hash,
+            "structural_surface_hash": m.drift_tracking.structural_surface_hash,
         },
         "overrides": dict(m.overrides),
     }

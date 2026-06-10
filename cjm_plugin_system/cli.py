@@ -34,6 +34,7 @@ from cjm_plugin_system.core.manifest_format import (
     ManifestV2, InstallSection, CodeSection, DriftTracking,
     CURRENT_FORMAT_VERSION,
     load_manifest, write_manifest, manifest_to_dict, compute_config_schema_hash,
+    compute_structural_surface_hash,
 )
 
 app = typer.Typer(help="CJM Plugin System CLI", no_args_is_help=True)
@@ -325,6 +326,23 @@ try:
 except Exception:
     pass
 
+# Pass-2 Thread 3: record the capability's STRUCTURAL SURFACE (public
+# methods + signatures + properties + class attributes) by pure
+# self-introspection — zero protocol/adapter knowledge. Read off the
+# CLASS (no instantiation). Tolerant import: a plugin env still on a
+# pre-fracture substrate has no core.capability — the manifest simply
+# omits the surface until the env resyncs (install-all --force).
+try:
+    from cjm_plugin_system.core.capability import derive_structural_surface
+    _sm = meta.get("module", "{module_name}.plugin")
+    _sc = meta.get("class", "")
+    if _sm and _sc:
+        _smod = importlib.import_module(_sm)
+        _scls = getattr(_smod, _sc)
+        meta["structural_surface"] = derive_structural_surface(_scls)
+except Exception:
+    pass
+
 print(json.dumps(meta, indent=2))
 '''
     
@@ -424,6 +442,10 @@ print(json.dumps(meta, indent=2))
             config_schema = meta_json.get("config_schema")
             # CR-12: worker-env contract (list of asdict(EnvVarSpec)); None for plugins without one.
             intro_worker_env = meta_json.get("worker_env")
+            # Pass-2 Thread 3: surface recorded in-env; None when the plugin
+            # env still runs a pre-fracture substrate (hash stays None so the
+            # drift check skips rather than flagging every old install).
+            intro_surface = meta_json.get("structural_surface")
 
             manifest = ManifestV2(
                 install=InstallSection(
@@ -450,9 +472,12 @@ print(json.dumps(meta, indent=2))
                     config_schema=config_schema,
                     regenerated_at=now_iso,
                     worker_env=intro_worker_env,
+                    structural_surface=intro_surface,
                 ),
                 drift_tracking=DriftTracking(
                     config_schema_hash=compute_config_schema_hash(config_schema),
+                    structural_surface_hash=(compute_structural_surface_hash(intro_surface)
+                                             if intro_surface is not None else None),
                 ),
                 overrides={},
             )
@@ -464,6 +489,10 @@ print(json.dumps(meta, indent=2))
                 print(f"[{env_name}] Interface: {manifest.code.interface}")
             if config_schema is not None:
                 print(f"[{env_name}] Config schema: captured")
+            if intro_surface is not None:
+                print(f"[{env_name}] Structural surface: "
+                      f"{len(intro_surface.get('methods', []))} methods, "
+                      f"{len(intro_surface.get('properties', []))} properties")
             
             write_manifest(out_file, manifest)
             print(f"[{env_name}] Wrote manifest to {out_file}")

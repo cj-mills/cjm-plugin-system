@@ -36,6 +36,7 @@ logging.basicConfig(
     force=True
 )
 
+from .capability import derive_structural_surface
 from .wire import wire_encode
 
 # %% ../../nbs/core/worker.ipynb #encoder
@@ -236,6 +237,16 @@ def _register_identity_endpoints(
             # report_usage() during the last execute (None if it reported none).
             "usage": getattr(plugin_instance, "_last_api_usage", None),
         }
+
+    @app.get("/structural_surface")
+    def structural_surface() -> Dict[str, Any]:
+        """Pass-2 Thread 3 live companion: re-derive the structural surface
+        at runtime so the manager can compare it against the manifest's
+        stored witness hash and flag `surface_drift` (the CR-8 idiom's
+        third instance). Same derivation the introspection script records
+        at install/regenerate time.
+        """
+        return derive_structural_surface(type(plugin_instance))
 
 
 

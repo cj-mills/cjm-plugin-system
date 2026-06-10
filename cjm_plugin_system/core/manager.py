@@ -594,6 +594,56 @@ def _check_config_schema_drift(
 
 PluginManager._check_config_schema_drift = _check_config_schema_drift
 
+# %% ../../nbs/core/manager.ipynb #dc8497fc
+def _check_structural_surface_drift(
+    self,
+    proxy:Any, # RemotePluginProxy with a live worker
+    plugin_meta:PluginMeta, # Metadata to flag if drift is detected
+) -> None:
+    """Pass-2 Thread 3 (stage 2): compare the worker's live-derived structural
+    surface to the manifest's stored witness hash — third instance of the
+    CR-8 hashed-witness + live-companion idiom (after config_schema and the
+    compatibility-transport protocol membership it superseded).
+
+    Stage-4 adapter compatibility matches `required_tool_protocol` against
+    the RECORDED surface, so a stale recording silently mis-answers
+    compatibility queries — this check is what makes that visible.
+
+    Skips silently when: drift detection is opted out (same cjm.yaml switch
+    as config-schema drift); the manifest predates surface recording
+    (stored hash None — `regenerate-manifest` adds it); or the worker
+    predates the /structural_surface endpoint (proxy returns None).
+    """
+    try:
+        cfg = get_config()
+        if not cfg.substrate.drift_detection:
+            return
+    except AttributeError:
+        pass
+
+    manifest_v2 = getattr(plugin_meta, 'manifest_v2', None)
+    stored_hash = (manifest_v2.drift_tracking.structural_surface_hash
+                   if manifest_v2 is not None else None)
+    if stored_hash is None:
+        return  # pre-surface-era manifest: nothing recorded, not drift
+
+    live_surface = (proxy.get_structural_surface()
+                    if hasattr(proxy, 'get_structural_surface') else None)
+    if live_surface is None:
+        return  # old worker / transport failure: skip, don't guess
+
+    from cjm_plugin_system.core.manifest_format import compute_structural_surface_hash
+    if compute_structural_surface_hash(live_surface) != stored_hash:
+        plugin_meta.structural_surface_drift = True
+        self.logger.warning(
+            f"Structural-surface drift for {plugin_meta.name}: the installed "
+            f"code's public surface disagrees with the manifest recording. Run "
+            f"`cjm-ctl regenerate-manifest {plugin_meta.name}` to refresh "
+            f"(adapter compatibility matches against the recorded surface)."
+        )
+
+PluginManager._check_structural_surface_drift = _check_structural_surface_drift
+
 # %% ../../nbs/core/manager.ipynb #pm-fn-_persist_config
 def _persist_config(
     self,
@@ -1007,6 +1057,9 @@ def load_plugin(
         # `plugin_meta.manifest_v2.drift_tracking.config_schema_hash` and
         # honors `cfg.substrate.drift_detection` opt-out internally.
         self._check_config_schema_drift(proxy, plugin_meta)
+        # Pass-2 Thread 3 companion: structural-surface drift (same idiom,
+        # same cjm.yaml opt-out switch).
+        self._check_structural_surface_drift(proxy, plugin_meta)
         
         # CR-2: effective config = caller > persisted (default-only) > manifest defaults.
         if not config and persisted is not None and persisted.config:

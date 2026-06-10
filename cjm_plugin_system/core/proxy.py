@@ -6,9 +6,10 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/proxy.html.md"""
 
 # %% auto #0
 __all__ = ['RemotePluginProxy', 'execute_async', 'execute_stream_sync', 'execute_stream', 'execute_with_oom_check',
-           'execute_async_with_oom_check', 'get_stats', 'is_alive', 'cancel', 'cancel_async', 'get_progress',
-           'get_progress_async', 'on_disable', 'on_enable', 'get_system_status', 'get_system_status_async',
-           'list_processes', 'list_processes_async', 'prefetch', 'prefetch_async', 'reconfigure', 'reconfigure_async']
+           'execute_async_with_oom_check', 'get_stats', 'is_alive', 'get_structural_surface', 'cancel', 'cancel_async',
+           'get_progress', 'get_progress_async', 'on_disable', 'on_enable', 'get_system_status',
+           'get_system_status_async', 'list_processes', 'list_processes_async', 'prefetch', 'prefetch_async',
+           'reconfigure', 'reconfigure_async']
 
 # %% ../../nbs/core/proxy.ipynb #exports
 import json
@@ -512,6 +513,26 @@ def is_alive(self) -> bool: # True if worker is responsive
 
 RemotePluginProxy.get_stats = get_stats
 RemotePluginProxy.is_alive = is_alive
+
+# %% ../../nbs/core/proxy.ipynb #0440bd8c
+def get_structural_surface(self) -> Optional[Dict[str, Any]]:  # Live-derived surface, or None
+    """Pass-2 Thread 3 live companion: fetch the worker's runtime-derived
+    structural surface (`GET /structural_surface`).
+
+    Returns None when the worker predates the endpoint (a pre-fracture
+    substrate in a snapshot env → 404) or on transport failure — callers
+    treat None as "skip the drift check", never as an empty surface.
+    """
+    try:
+        with httpx.Client(timeout=5) as client:
+            resp = client.get(f"{self.base_url}/structural_surface")
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except Exception:
+        return None
+
+RemotePluginProxy.get_structural_surface = get_structural_surface
 
 # %% ../../nbs/core/proxy.ipynb #drz681mgef7
 def cancel(self) -> bool: # True if cancel request was sent
