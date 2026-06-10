@@ -34,7 +34,7 @@ from cjm_plugin_system.core.errors import (
     WorkerOOMError,
 )
 from .capability import ToolCapability
-from .wire import FileBackedDTO
+from .wire import FileBackedDTO, wire_decode
 from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
 
 # CR-3 follow-up: module-level logger so the proxy can log close-to-wire
@@ -123,7 +123,7 @@ class RemotePluginProxy(ToolCapability):
             raise PluginCancelledError(self.name)
         if resp.status_code != 200:
             raise RuntimeError(f"Execute failed: {resp.text}")
-        return resp.json()
+        return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
     
     def get_config_schema(self) -> Dict[str, Any]: # JSON Schema
         """Get the plugin's configuration schema."""
@@ -327,7 +327,7 @@ async def execute_async(
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
         raise RuntimeError(f"Execute failed: {resp.text}")
-    return resp.json()
+    return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
 
 RemotePluginProxy.execute_async = execute_async
 
@@ -406,7 +406,7 @@ async def execute_stream(
                 # SG-52: typed error sentinel → raise rather than yield
                 if isinstance(chunk, dict) and "_job_error" in chunk:
                     _raise_from_job_error_chunk(chunk["_job_error"], self.name)
-                yield chunk
+                yield wire_decode(chunk)  # stage 2: typed chunks for registered DTOs
 
 RemotePluginProxy.execute_stream = execute_stream
 
@@ -468,7 +468,7 @@ def execute_with_oom_check(self, *args, **kwargs) -> Any:
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
         raise RuntimeError(f"Execute failed: {resp.text}")
-    return resp.json()
+    return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
 
 
 async def execute_async_with_oom_check(self, *args, **kwargs) -> Any:
@@ -486,7 +486,7 @@ async def execute_async_with_oom_check(self, *args, **kwargs) -> Any:
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
         raise RuntimeError(f"Execute failed: {resp.text}")
-    return resp.json()
+    return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
 
 
 RemotePluginProxy._check_worker_death = _check_worker_death

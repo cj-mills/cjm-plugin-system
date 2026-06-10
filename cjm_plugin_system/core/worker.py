@@ -7,7 +7,7 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/worker.html.md"""
 # %% auto #0
 __all__ = ['EnhancedJSONEncoder', 'parent_monitor', 'create_app', 'run_worker']
 
-# %% ../../nbs/core/worker.ipynb #exports
+# %% ../../nbs/core/worker.ipynb #40cdd4bb
 import argparse
 import asyncio
 import dataclasses
@@ -35,6 +35,8 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     force=True
 )
+
+from .wire import wire_encode
 
 # %% ../../nbs/core/worker.ipynb #encoder
 class EnhancedJSONEncoder(json.JSONEncoder):
@@ -75,27 +77,30 @@ def parent_monitor(
         # Use cross-platform self-termination
         terminate_self()
 
-# %% ../../nbs/core/worker.ipynb #app-factory
-def create_app(
+# %% ../../nbs/core/worker.ipynb #43392a64
+def _load_plugin_instance(
     module_name: str, # Python module path (e.g., "my_plugin.plugin")
     class_name: str   # Plugin class name (e.g., "WhisperPlugin")
-) -> FastAPI: # Configured FastAPI application
-    """Create FastAPI app that hosts the specified plugin."""
-    plugin_instance = None
+):                    # Instantiated plugin object
+    """Dynamically load + instantiate the plugin class.
 
-    # Dynamic Loading — runs synchronously before app construction so a
-    # load failure terminates the worker process with exit code 1 (matches
-    # pre-lifespan behavior; loading must succeed for the worker to be useful
-    # at all). The plugin instance is captured in the lifespan closure below
-    # so the shutdown half can call cleanup() on the same instance.
+    Runs synchronously before app construction so a load failure terminates
+    the worker process with exit code 1 (matches pre-lifespan behavior;
+    loading must succeed for the worker to be useful at all).
+    """
     try:
         module = importlib.import_module(module_name)
         plugin_cls = getattr(module, class_name)
-        plugin_instance = plugin_cls()
+        return plugin_cls()
     except Exception as e:
         print(f"FATAL: Failed to load {module_name}:{class_name} - {e}")
         sys.exit(1)
 
+# %% ../../nbs/core/worker.ipynb #9e22ad3c
+def _make_lifespan(
+    plugin_instance  # The loaded plugin object (closure-captured for shutdown cleanup)
+):                   # FastAPI lifespan async context manager
+    """Build the FastAPI lifespan that invokes plugin.cleanup() on shutdown."""
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         """FastAPI lifespan replacing the deprecated @app.on_event("shutdown") path.
@@ -140,8 +145,14 @@ def create_app(
             except Exception:
                 pass
 
-    app = FastAPI(title="Plugin Worker", lifespan=lifespan)
+    return lifespan
 
+# %% ../../nbs/core/worker.ipynb #eecf6a8d
+def _register_identity_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None:
+    """/health + /stats: worker identity + process-subtree telemetry."""
     @app.get("/health")
     def health_check() -> Dict[str, Any]:
         """Health check endpoint."""
@@ -226,6 +237,15 @@ def create_app(
             "usage": getattr(plugin_instance, "_last_api_usage", None),
         }
 
+
+
+# %% ../../nbs/core/worker.ipynb #93965851
+def _register_lifecycle_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None:
+    """/initialize /prefetch /reconfigure /on_disable /on_enable /cleanup:
+    the tool-capability lifecycle surface."""
     @app.post("/initialize")
     async def initialize(request: Request) -> Dict[str, str]:
         """Initialize or reconfigure the plugin."""
@@ -275,6 +295,54 @@ def create_app(
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/on_disable")
+    def on_disable() -> Dict[str, str]:
+        """CR-2: forward the substrate's on_disable signal to the loaded plugin.
+        
+        Worker stays alive; plugin's on_disable() hook gets a chance to
+        release heavy resources (GPU memory, model files, etc.). Default
+        PluginInterface.on_disable() is a no-op so plugins that don't
+        opt in see no behavior change.
+        """
+        if hasattr(plugin_instance, 'on_disable'):
+            try:
+                plugin_instance.on_disable()
+                return {"status": "disabled"}
+            except Exception as e:
+                return {"status": "error", "detail": str(e)}
+        return {"status": "not_supported"}
+
+    @app.post("/on_enable")
+    def on_enable() -> Dict[str, str]:
+        """CR-2: forward the substrate's on_enable signal to the loaded plugin.
+        
+        Plugin can eagerly re-acquire heavy resources or rely on lazy
+        re-acquisition via the next execute() call. Default
+        PluginInterface.on_enable() is a no-op.
+        """
+        if hasattr(plugin_instance, 'on_enable'):
+            try:
+                plugin_instance.on_enable()
+                return {"status": "enabled"}
+            except Exception as e:
+                return {"status": "error", "detail": str(e)}
+        return {"status": "not_supported"}
+
+    @app.post("/cleanup")
+    def cleanup() -> Dict[str, str]:
+        """Clean up plugin resources."""
+        if hasattr(plugin_instance, 'cleanup'):
+            plugin_instance.cleanup()
+        return {"status": "cleaned"}
+
+
+
+# %% ../../nbs/core/worker.ipynb #0c433d8e
+def _register_config_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None:
+    """/config_schema /config /config_options: the config surface."""
     @app.get("/config_schema")
     def get_config_schema() -> Dict[str, Any]:
         """Return JSON Schema for plugin configuration."""
@@ -300,6 +368,20 @@ def create_app(
             return json.loads(json.dumps(opts, cls=EnhancedJSONEncoder))
         return {}
 
+
+
+# %% ../../nbs/core/worker.ipynb #7a3145e0
+def _register_task_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None:
+    """/execute /execute_stream /cancel /progress: the task channel.
+
+    Stage 2 (typed wire layer): both result-serialization sites pass
+    through `wire_encode`, so results whose DTO classes are registered
+    via `@wire_type` cross the boundary in the tagged envelope and arrive
+    typed at the proxy; unregistered results serialize exactly as before.
+    """
     @app.post("/execute")
     async def execute(request: Request) -> Any:
         """Execute plugin's main functionality.
@@ -335,8 +417,10 @@ def create_app(
             result = await loop.run_in_executor(
                 None, lambda: plugin_instance.execute(*args, **kwargs)
             )
-            # Serialize result (handles dataclasses)
-            json_str = json.dumps(result, cls=EnhancedJSONEncoder)
+            # Typed wire envelope for registered result DTOs (stage 2);
+            # EnhancedJSONEncoder still flattens unregistered dataclasses
+            # and datetimes exactly as before.
+            json_str = json.dumps(wire_encode(result), cls=EnhancedJSONEncoder)
             return json.loads(json_str)
         except PluginCancelledError as e:
             # CR-4: cooperative cancellation surfaces as 409 Conflict so the
@@ -385,7 +469,7 @@ def create_app(
                 
                 for chunk in iterator:
                     # Line-delimited JSON (NDJSON)
-                    yield json.dumps(chunk, cls=EnhancedJSONEncoder) + "\n"
+                    yield json.dumps(wire_encode(chunk), cls=EnhancedJSONEncoder) + "\n"
             except Exception as e:
                 # SG-52: emit typed JobError as the terminal chunk. Proxy +
                 # downstream consumers detect the `_job_error` sentinel key
@@ -417,39 +501,15 @@ def create_app(
             "message": getattr(plugin_instance, '_status_message', "")
         }
 
-    @app.post("/on_disable")
-    def on_disable() -> Dict[str, str]:
-        """CR-2: forward the substrate's on_disable signal to the loaded plugin.
-        
-        Worker stays alive; plugin's on_disable() hook gets a chance to
-        release heavy resources (GPU memory, model files, etc.). Default
-        PluginInterface.on_disable() is a no-op so plugins that don't
-        opt in see no behavior change.
-        """
-        if hasattr(plugin_instance, 'on_disable'):
-            try:
-                plugin_instance.on_disable()
-                return {"status": "disabled"}
-            except Exception as e:
-                return {"status": "error", "detail": str(e)}
-        return {"status": "not_supported"}
 
-    @app.post("/on_enable")
-    def on_enable() -> Dict[str, str]:
-        """CR-2: forward the substrate's on_enable signal to the loaded plugin.
-        
-        Plugin can eagerly re-acquire heavy resources or rely on lazy
-        re-acquisition via the next execute() call. Default
-        PluginInterface.on_enable() is a no-op.
-        """
-        if hasattr(plugin_instance, 'on_enable'):
-            try:
-                plugin_instance.on_enable()
-                return {"status": "enabled"}
-            except Exception as e:
-                return {"status": "error", "detail": str(e)}
-        return {"status": "not_supported"}
 
+# %% ../../nbs/core/worker.ipynb #354c975f
+def _register_monitor_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+    class_name: str, # Plugin class name (for 404 detail messages)
+) -> None:
+    """/get_system_status /list_processes: CR-3 typed MonitorPlugin accessors."""
     @app.post("/get_system_status")
     def get_system_status_endpoint() -> Dict[str, Any]:
         """CR-3: typed MonitorPlugin accessor. Returns SystemStats.to_dict().
@@ -506,13 +566,26 @@ def create_app(
         # dataclass instances or pre-converted dicts uniformly.
         return json.loads(json.dumps(procs, cls=EnhancedJSONEncoder))
 
-    @app.post("/cleanup")
-    def cleanup() -> Dict[str, str]:
-        """Clean up plugin resources."""
-        if hasattr(plugin_instance, 'cleanup'):
-            plugin_instance.cleanup()
-        return {"status": "cleaned"}
 
+
+# %% ../../nbs/core/worker.ipynb #380d7ae0
+def create_app(
+    module_name: str, # Python module path (e.g., "my_plugin.plugin")
+    class_name: str   # Plugin class name (e.g., "WhisperPlugin")
+) -> FastAPI: # Configured FastAPI application
+    """Create FastAPI app that hosts the specified plugin.
+
+    NB-2 reshape (stage 2): a thin assembler — load the plugin, build the
+    lifespan, register the endpoint groups. Endpoint behavior lives in the
+    module-level `_register_*` helpers above.
+    """
+    plugin_instance = _load_plugin_instance(module_name, class_name)
+    app = FastAPI(title="Plugin Worker", lifespan=_make_lifespan(plugin_instance))
+    _register_identity_endpoints(app, plugin_instance)
+    _register_lifecycle_endpoints(app, plugin_instance)
+    _register_config_endpoints(app, plugin_instance)
+    _register_task_endpoints(app, plugin_instance)
+    _register_monitor_endpoints(app, plugin_instance, class_name)
     return app
 
 # %% ../../nbs/core/worker.ipynb #main-block
