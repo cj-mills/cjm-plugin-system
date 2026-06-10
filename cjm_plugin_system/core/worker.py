@@ -7,7 +7,7 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/worker.html.md"""
 # %% auto #0
 __all__ = ['EnhancedJSONEncoder', 'parent_monitor', 'create_app', 'run_worker']
 
-# %% ../../nbs/core/worker.ipynb #40cdd4bb
+# %% ../../nbs/core/worker.ipynb #50487ea2
 import argparse
 import asyncio
 import dataclasses
@@ -77,7 +77,7 @@ def parent_monitor(
         # Use cross-platform self-termination
         terminate_self()
 
-# %% ../../nbs/core/worker.ipynb #43392a64
+# %% ../../nbs/core/worker.ipynb #19319501
 def _load_plugin_instance(
     module_name: str, # Python module path (e.g., "my_plugin.plugin")
     class_name: str   # Plugin class name (e.g., "WhisperPlugin")
@@ -96,7 +96,7 @@ def _load_plugin_instance(
         print(f"FATAL: Failed to load {module_name}:{class_name} - {e}")
         sys.exit(1)
 
-# %% ../../nbs/core/worker.ipynb #9e22ad3c
+# %% ../../nbs/core/worker.ipynb #45de0055
 def _make_lifespan(
     plugin_instance  # The loaded plugin object (closure-captured for shutdown cleanup)
 ):                   # FastAPI lifespan async context manager
@@ -147,7 +147,7 @@ def _make_lifespan(
 
     return lifespan
 
-# %% ../../nbs/core/worker.ipynb #eecf6a8d
+# %% ../../nbs/core/worker.ipynb #6b3a081a
 def _register_identity_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
@@ -239,7 +239,7 @@ def _register_identity_endpoints(
 
 
 
-# %% ../../nbs/core/worker.ipynb #93965851
+# %% ../../nbs/core/worker.ipynb #a96c1c47
 def _register_lifecycle_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
@@ -337,7 +337,7 @@ def _register_lifecycle_endpoints(
 
 
 
-# %% ../../nbs/core/worker.ipynb #0c433d8e
+# %% ../../nbs/core/worker.ipynb #e93abae4
 def _register_config_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
@@ -370,7 +370,7 @@ def _register_config_endpoints(
 
 
 
-# %% ../../nbs/core/worker.ipynb #7a3145e0
+# %% ../../nbs/core/worker.ipynb #0a62d840
 def _register_task_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
@@ -503,7 +503,7 @@ def _register_task_endpoints(
 
 
 
-# %% ../../nbs/core/worker.ipynb #354c975f
+# %% ../../nbs/core/worker.ipynb #580f8d04
 def _register_monitor_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
@@ -568,7 +568,7 @@ def _register_monitor_endpoints(
 
 
 
-# %% ../../nbs/core/worker.ipynb #380d7ae0
+# %% ../../nbs/core/worker.ipynb #82f0d516
 def create_app(
     module_name: str, # Python module path (e.g., "my_plugin.plugin")
     class_name: str   # Plugin class name (e.g., "WhisperPlugin")

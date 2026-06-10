@@ -11,7 +11,7 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/wire.html.md"""
 # %% auto #0
 __all__ = ['WIRE_KIND_KEY', 'WIRE_DATA_KEY', 'FileBackedDTO', 'flat_from_dict', 'wire_type', 'wire_encode', 'wire_decode']
 
-# %% ../../nbs/core/wire.ipynb #90702fd5
+# %% ../../nbs/core/wire.ipynb #6c220466
 import dataclasses
 import logging
 from typing import Any, Callable, Dict, Protocol, runtime_checkable
@@ -27,7 +27,7 @@ class FileBackedDTO(Protocol):
         """Save the data to a temporary file and return the absolute path."""
         ...
 
-# %% ../../nbs/core/wire.ipynb #f9aa2f68
+# %% ../../nbs/core/wire.ipynb #778f55f5
 # Wire format constants + registries. kind -> class for decode;
 # class -> kind (exact type) for encode.
 WIRE_KIND_KEY = "__wire__"
@@ -36,7 +36,7 @@ WIRE_DATA_KEY = "data"
 _WIRE_TYPES: Dict[str, type] = {}
 _WIRE_KINDS: Dict[type, str] = {}
 
-# %% ../../nbs/core/wire.ipynb #3e944b85
+# %% ../../nbs/core/wire.ipynb #0ed275c5
 def flat_from_dict(
     cls,      # The wire DTO dataclass being reconstructed
     d: dict,  # The envelope's "data" payload
@@ -58,7 +58,7 @@ def flat_from_dict(
                       sorted(extras), cls.__name__)
     return cls(**{k: v for k, v in d.items() if k in names})
 
-# %% ../../nbs/core/wire.ipynb #6e0c671e
+# %% ../../nbs/core/wire.ipynb #fb9c37ec
 def wire_type(
     kind: str  # Stable wire discriminator, e.g. "transcription.result"
 ) -> Callable[[type], type]:  # Class decorator
@@ -68,22 +68,26 @@ def wire_type(
       `dataclasses.asdict` when it defines no `to_dict`).
     - If the class defines no `from_dict`, the flat default
       (`flat_from_dict`) is attached; nested DTOs define their own.
-    - Re-registering the SAME class (module + qualname — notebook re-runs,
-      module reloads) replaces the entry; a DIFFERENT class claiming an
-      already-registered kind raises ValueError.
+    - Re-registering the same LOGICAL class (qualname match; the module is
+      ignored because nbdev's literate workflow defines each class twice —
+      in-notebook `__main__` + the exported module) replaces the decode
+      entry; a DIFFERENT class claiming an already-registered kind raises
+      ValueError.
     """
     def decorator(cls: type) -> type:
         if not dataclasses.is_dataclass(cls):
             raise TypeError(f"@wire_type({kind!r}) requires a dataclass, got {cls!r}")
         existing = _WIRE_TYPES.get(kind)
-        if existing is not None:
-            same = (existing.__module__ == cls.__module__
-                    and existing.__qualname__ == cls.__qualname__)
-            if not same:
-                raise ValueError(
-                    f"wire kind {kind!r} already registered to "
-                    f"{existing.__module__}.{existing.__qualname__}")
-            _WIRE_KINDS.pop(existing, None)
+        if existing is not None and existing.__qualname__ != cls.__qualname__:
+            raise ValueError(
+                f"wire kind {kind!r} already registered to "
+                f"{existing.__module__}.{existing.__qualname__}")
+        # The MODULE is deliberately NOT compared: nbdev's literate workflow
+        # defines the same logical class twice (in-notebook `__main__` + the
+        # exported module import), and both can coexist in one process (e.g.
+        # nbdev-test --n_workers 1 runs sibling notebooks in one worker). Both
+        # registrations stay encodable (the prior class keeps its _WIRE_KINDS
+        # entry); decode resolves to the most recently registered definition.
         if getattr(cls, "from_dict", None) is None:
             cls.from_dict = classmethod(flat_from_dict)
         _WIRE_TYPES[kind] = cls
@@ -91,7 +95,7 @@ def wire_type(
         return cls
     return decorator
 
-# %% ../../nbs/core/wire.ipynb #2629c0f3
+# %% ../../nbs/core/wire.ipynb #4fdcbc79
 def wire_encode(
     obj: Any  # A task result (any shape)
 ) -> Any:     # Tagged envelope dict for registered DTOs; `obj` unchanged otherwise
@@ -110,7 +114,7 @@ def wire_encode(
     return {WIRE_KIND_KEY: kind, WIRE_DATA_KEY: data}
 
 
-# %% ../../nbs/core/wire.ipynb #ed8aea49
+# %% ../../nbs/core/wire.ipynb #2ea90df5
 def wire_decode(
     obj: Any  # A JSON-decoded response body (any shape)
 ) -> Any:     # The typed DTO for known kinds; `obj` unchanged otherwise
