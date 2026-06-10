@@ -514,7 +514,7 @@ def is_alive(self) -> bool: # True if worker is responsive
 RemotePluginProxy.get_stats = get_stats
 RemotePluginProxy.is_alive = is_alive
 
-# %% ../../nbs/core/proxy.ipynb #0440bd8c
+# %% ../../nbs/core/proxy.ipynb #6c4b96d1
 def get_structural_surface(self) -> Optional[Dict[str, Any]]:  # Live-derived surface, or None
     """Pass-2 Thread 3 live companion: fetch the worker's runtime-derived
     structural surface (`GET /structural_surface`).

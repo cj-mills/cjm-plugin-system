@@ -110,7 +110,7 @@ def compute_config_schema_hash(
     canonical = json.dumps(schema or {}, sort_keys=True, separators=(",", ":"))
     return hash_bytes(canonical.encode("utf-8"))
 
-# %% ../../nbs/core/manifest_format.ipynb #985908e0
+# %% ../../nbs/core/manifest_format.ipynb #bd257608
 def compute_structural_surface_hash(
     surface: Optional[Dict[str, Any]],  # derive_structural_surface output or None
 ) -> str:                               # "sha256:hexdigest"

@@ -68,82 +68,92 @@ graph LR
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
 
-    bootstrap --> core_queue
-    bootstrap --> core_scheduling
     bootstrap --> core_manager
-    cli --> core_manifest_format
+    bootstrap --> core_scheduling
+    bootstrap --> core_queue
     cli --> core_platform
     cli --> core_config
+    cli --> core_manifest_format
     cli --> core_metadata
     core_capability --> core_errors
     core_empirical_store --> utils_hashing
     core_interface --> core_capability
-    core_interface --> core_interface
     core_interface --> core
+    core_interface --> core_interface
     core_interface --> core_wire
-    core_manager --> core_metadata
-    core_manager --> core__telemetry
     core_manager --> core_secret_store
-    core_manager --> core_config_store
     core_manager --> core_empirical_store
-    core_manager --> core_errors
     core_manager --> core_scheduling
+    core_manager --> core_metadata
+    core_manager --> core_errors
     core_manager --> core_manifest_format
-    core_manager --> core_capability
+    core_manager --> core__telemetry
     core_manager --> core_proxy
+    core_manager --> core_config_store
     core_manager --> core_config
     core_manager --> utils_validation
+    core_manager --> core_capability
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
     core_proxy --> core_errors
     core_proxy --> core_platform
-    core_proxy --> core_capability
-    core_proxy --> core_config
     core_proxy --> core_wire
-    core_queue --> core__telemetry
+    core_proxy --> core_config
+    core_proxy --> core_capability
     core_queue --> core_errors
+    core_queue --> core__telemetry
     core_scheduling --> core_metadata
+    core_worker --> core_capability
     core_worker --> core_errors
+    core_worker --> core_wire
     core_worker --> core_platform
     utils_cache_paths --> core_empirical_store
     utils_cache_paths --> utils_hashing
     utils_validation --> core_errors
 ```
 
-*41 cross-module dependencies detected*
+*43 cross-module dependencies detected*
 
 ## CLI Reference
 
 ### `cjm-ctl` Command
 
-                                                                                                              
-     Usage: cjm-ctl [OPTIONS] COMMAND [ARGS]...                                                               
-                                                                                                              
-     CJM Plugin System CLI                                                                                    
-                                                                                                              
-    ╭─ Options ──────────────────────────────────────────────────────────────────────────────────────────────╮
-    │ --cjm-config                PATH  Path to cjm.yaml configuration file                                  │
-    │ --data-dir                  PATH  Override data directory (manifests, logs)                            │
-    │ --conda-prefix              PATH  Override conda/mamba prefix path                                     │
-    │ --conda-type                TEXT  Conda implementation: micromamba, miniforge, or conda                │
-    │ --install-completion              Install completion for the current shell.                            │
-    │ --show-completion                 Show completion for the current shell, to copy it or customize the   │
-    │                                   installation.                                                        │
-    │ --help                            Show this message and exit.                                          │
-    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-    ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
-    │ setup-runtime        Download and setup micromamba runtime for project-local mode.                     │
-    │ regenerate-manifest  Re-run introspection for an installed plugin and rewrite its manifest.            │
-    │ install-all          Install and register all plugins defined in plugins.yaml.                         │
-    │ setup-host           Install interface libraries in the current Python environment.                    │
-    │ estimate-size        Estimate disk space required for plugin environments.                             │
-    │ list                 List installed plugins from manifest directory.                                   │
-    │ remove               Remove a plugin's manifest and conda environment.                                 │
-    │ validate             SG-6: validate a manifest JSON or plugins.yaml file's structure.                  │
-    │ set-secret           Store a plugin secret in the project-local SecretStore (CR-12).                   │
-    │ list-secrets         List the secret KEY NAMES stored for a plugin — never the values (CR-12).         │
-    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                    
+     Usage: cjm-ctl [OPTIONS] COMMAND [ARGS]...                                     
+                                                                                    
+     CJM Plugin System CLI                                                          
+                                                                                    
+    ╭─ Options ────────────────────────────────────────────────────────────────────╮
+    │ --cjm-config                PATH  Path to cjm.yaml configuration file        │
+    │ --data-dir                  PATH  Override data directory (manifests, logs)  │
+    │ --conda-prefix              PATH  Override conda/mamba prefix path           │
+    │ --conda-type                TEXT  Conda implementation: micromamba,          │
+    │                                   miniforge, or conda                        │
+    │ --install-completion              Install completion for the current shell.  │
+    │ --show-completion                 Show completion for the current shell, to  │
+    │                                   copy it or customize the installation.     │
+    │ --help                            Show this message and exit.                │
+    ╰──────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Commands ───────────────────────────────────────────────────────────────────╮
+    │ setup-runtime        Download and setup micromamba runtime for project-local │
+    │                      mode.                                                   │
+    │ regenerate-manifest  Re-run introspection for an installed plugin and        │
+    │                      rewrite its manifest.                                   │
+    │ install-all          Install and register all plugins defined in             │
+    │                      plugins.yaml.                                           │
+    │ setup-host           Install interface libraries in the current Python       │
+    │                      environment.                                            │
+    │ estimate-size        Estimate disk space required for plugin environments.   │
+    │ list                 List installed plugins from manifest directory.         │
+    │ remove               Remove a plugin's manifest and conda environment.       │
+    │ validate             SG-6: validate a manifest JSON or plugins.yaml file's   │
+    │                      structure.                                              │
+    │ set-secret           Store a plugin secret in the project-local SecretStore  │
+    │                      (CR-12).                                                │
+    │ list-secrets         List the secret KEY NAMES stored for a plugin — never   │
+    │                      the values (CR-12).                                     │
+    ╰──────────────────────────────────────────────────────────────────────────────╯
 
 For detailed help on any command, use `cjm-ctl <command> --help`.
 
@@ -458,7 +468,8 @@ from cjm_plugin_system.core.capability import (
     template_check_placeholders,
     ToolCapability,
     plugin_action,
-    collect_plugin_actions
+    collect_plugin_actions,
+    derive_structural_surface
 )
 ```
 
@@ -629,6 +640,25 @@ def _dispatch_to_action(
     
         def execute(self, action="separate_vocals", **kwargs):
             return self.dispatch_to_action(action, **kwargs)
+    """
+```
+
+``` python
+def derive_structural_surface(
+    cls: type,  # The capability class to introspect
+) -> Dict[str, Any]:  # {"methods": [...], "properties": [...], "attributes": [...]}
+    """
+    Record a capability class's structural surface by pure self-introspection.
+    
+    The FULL public surface is recorded, inherited members included —
+    the surface is what adapter protocols match against, and protocol
+    members may name inherited methods. Deterministic (name-sorted) so
+    the canonical-JSON witness hash is stable across runs.
+    
+    Classification: `property` → properties (names only); functions
+    (static/class methods unwrapped) → methods with `str(inspect.signature)`;
+    everything else public → attributes with the value's type name
+    (config_class, supported_actions, WORKER_ENV, ...).
     """
 ```
 
@@ -2749,6 +2779,29 @@ def _check_config_schema_drift(
 ```
 
 ``` python
+def _check_structural_surface_drift(
+    self,
+    proxy:Any, # RemotePluginProxy with a live worker
+    plugin_meta:PluginMeta, # Metadata to flag if drift is detected
+) -> None
+    """
+    Pass-2 Thread 3 (stage 2): compare the worker's live-derived structural
+    surface to the manifest's stored witness hash — third instance of the
+    CR-8 hashed-witness + live-companion idiom (after config_schema and the
+    compatibility-transport protocol membership it superseded).
+    
+    Stage-4 adapter compatibility matches `required_tool_protocol` against
+    the RECORDED surface, so a stale recording silently mis-answers
+    compatibility queries — this check is what makes that visible.
+    
+    Skips silently when: drift detection is opted out (same cjm.yaml switch
+    as config-schema drift); the manifest predates surface recording
+    (stored hash None — `regenerate-manifest` adds it); or the worker
+    predates the /structural_surface endpoint (proxy returns None).
+    """
+```
+
+``` python
 def _persist_config(
     self,
     plugin_name: str  # Plugin to persist
@@ -3715,6 +3768,7 @@ from cjm_plugin_system.core.manifest_format import (
     DriftTracking,
     ManifestV2,
     compute_config_schema_hash,
+    compute_structural_surface_hash,
     load_manifest,
     manifest_to_dict,
     write_manifest
@@ -3733,6 +3787,20 @@ def compute_config_schema_hash(
     None is treated as `{}` — the hash records "no schema declared" rather
     than refusing. This way a plugin that lost its config_schema between
     install and load still gets a drift warning rather than a crash.
+    """
+```
+
+``` python
+def compute_structural_surface_hash(
+    surface: Optional[Dict[str, Any]],  # derive_structural_surface output or None
+) -> str:                               # "sha256:hexdigest"
+    """
+    Hash a structural surface with stable canonicalization.
+    
+    Same canonical-JSON + hash_bytes shape as `compute_config_schema_hash`
+    (the CR-8 idiom). None hashes as `{}` — but note the drift check skips
+    when the STORED hash is None (pre-surface-era manifest ≠ drift);
+    `_generate_manifest` only writes a hash when a surface was recorded.
     """
 ```
 
@@ -3880,6 +3948,7 @@ class CodeSection:
     config_schema: Optional[Dict[str, Any]]  # JSON Schema for plugin config
     regenerated_at: Optional[str]  # ISO-8601 UTC of last regen
     worker_env: Optional[List[Dict[str, Any]]]  # CR-12 spawn-env contract: asdict(EnvVarSpec) list
+    structural_surface: Optional[Dict[str, Any]]  # Pass-2 Thread 3: public surface recorded in-env (methods/properties/attributes)
 ```
 
 ``` python
@@ -3897,6 +3966,7 @@ class DriftTracking:
     """
     
     config_schema_hash: Optional[str]  # "sha256:hexdigest" of canonical config_schema
+    structural_surface_hash: Optional[str]  # Pass-2 Thread 3 witness: hash of code.structural_surface (None = pre-surface manifest)
 ```
 
 ``` python
@@ -4013,6 +4083,7 @@ class PluginMeta:
     last_executed: float = 0.0  # Unix timestamp
     config_schema_drift: bool = False
     live_config_schema: Optional[Dict[str, Any]]
+    structural_surface_drift: bool = False
 ```
 
 ``` python
@@ -4332,6 +4403,7 @@ from cjm_plugin_system.core.proxy import (
     execute_async_with_oom_check,
     get_stats,
     is_alive,
+    get_structural_surface,
     cancel,
     cancel_async,
     get_progress,
@@ -4565,6 +4637,26 @@ def is_alive(self) -> bool: # True if worker is responsive
     """Check if the worker process is still running and responsive."""
     if not self.process or self.process.poll() is not None
     "Check if the worker process is still running and responsive."
+```
+
+``` python
+def get_structural_surface(self) -> Optional[Dict[str, Any]]:  # Live-derived surface, or None
+    """Pass-2 Thread 3 live companion: fetch the worker's runtime-derived
+    structural surface (`GET /structural_surface`).
+
+    Returns None when the worker predates the endpoint (a pre-fracture
+    substrate in a snapshot env → 404) or on transport failure — callers
+    treat None as "skip the drift check", never as an empty surface.
+    """
+    try
+    """
+    Pass-2 Thread 3 live companion: fetch the worker's runtime-derived
+    structural surface (`GET /structural_surface`).
+    
+    Returns None when the worker predates the endpoint (a pre-fracture
+    substrate in a snapshot env → 404) or on transport failure — callers
+    treat None as "skip the drift check", never as an empty surface.
+    """
 ```
 
 ``` python
@@ -6307,8 +6399,78 @@ SCHEMA_FORMAT = 'format'  # String format (email, uri, date, etc.)
 
 ``` python
 from cjm_plugin_system.core.wire import (
-    FileBackedDTO
+    WIRE_KIND_KEY,
+    WIRE_DATA_KEY,
+    FileBackedDTO,
+    flat_from_dict,
+    wire_type,
+    wire_encode,
+    wire_decode
 )
+```
+
+#### Functions
+
+``` python
+def flat_from_dict(
+    """
+    Default reconstruction for FLAT wire DTOs (no nested-DTO fields).
+    
+    Filters the payload to the dataclass's declared fields (unknown extras
+    are dropped with a debug log — transport-terminus tolerance, see the
+    envelope design note) and lets the constructor enforce required fields
+    (a missing required field raises TypeError loudly). DTOs with nested
+    DTO fields (e.g. a result carrying a list of typed items) must define
+    their own `from_dict` classmethod; `@wire_type` only attaches this
+    default when the class has none.
+    """
+```
+
+``` python
+def wire_type(
+    kind: str  # Stable wire discriminator, e.g. "transcription.result"
+) -> Callable[[type], type]:  # Class decorator
+    """
+    Register a dataclass as a typed wire DTO under `kind`.
+    
+    - The class must be a dataclass (encode falls back to
+      `dataclasses.asdict` when it defines no `to_dict`).
+    - If the class defines no `from_dict`, the flat default
+      (`flat_from_dict`) is attached; nested DTOs define their own.
+    - Re-registering the same LOGICAL class (qualname match; the module is
+      ignored because nbdev's literate workflow defines each class twice —
+      in-notebook `__main__` + the exported module) replaces the decode
+      entry; a DIFFERENT class claiming an already-registered kind raises
+      ValueError.
+    """
+```
+
+``` python
+def wire_encode(
+    obj: Any  # A task result (any shape)
+) -> Any:     # Tagged envelope dict for registered DTOs; `obj` unchanged otherwise
+    """
+    Wrap a registered wire DTO in its tagged envelope (worker side).
+    
+    Exact-type lookup: subclasses are NOT encoded under the parent's kind
+    (they pass through unregistered, preserving today's behavior).
+    Payload preference: the DTO's own `to_dict()` when defined, else
+    `dataclasses.asdict` (recursive — nested dataclasses flatten).
+    """
+```
+
+``` python
+def wire_decode(
+    obj: Any  # A JSON-decoded response body (any shape)
+) -> Any:     # The typed DTO for known kinds; `obj` unchanged otherwise
+    """
+    Reconstruct a typed result from its tagged envelope (host side).
+    
+    Known kind -> the registered class's `from_dict` (strict: a missing
+    required field raises). Unknown kind -> the dict passes through
+    UNCHANGED with the envelope intact (tolerant degradation for hosts
+    without the result's interface library). Untagged values pass through.
+    """
 ```
 
 #### Classes
@@ -6320,6 +6482,15 @@ class FileBackedDTO(Protocol):
     
     def to_temp_file(self) -> str: # Absolute path to the temporary file
         "Save the data to a temporary file and return the absolute path."
+```
+
+#### Variables
+
+``` python
+WIRE_KIND_KEY = '__wire__'
+WIRE_DATA_KEY = 'data'
+_WIRE_TYPES: Dict[str, type]
+_WIRE_KINDS: Dict[type, str]
 ```
 
 ### Universal Worker (`worker.ipynb`)
@@ -6352,11 +6523,89 @@ def parent_monitor(
 ```
 
 ``` python
+def _load_plugin_instance(
+    module_name: str, # Python module path (e.g., "my_plugin.plugin")
+    class_name: str   # Plugin class name (e.g., "WhisperPlugin")
+):                    # Instantiated plugin object
+    """
+    Dynamically load + instantiate the plugin class.
+    
+    Runs synchronously before app construction so a load failure terminates
+    the worker process with exit code 1 (matches pre-lifespan behavior;
+    loading must succeed for the worker to be useful at all).
+    """
+```
+
+``` python
+def _make_lifespan(
+    plugin_instance  # The loaded plugin object (closure-captured for shutdown cleanup)
+):                   # FastAPI lifespan async context manager
+    "Build the FastAPI lifespan that invokes plugin.cleanup() on shutdown."
+```
+
+``` python
+def _register_identity_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None
+    "/health + /stats: worker identity + process-subtree telemetry."
+```
+
+``` python
+def _register_lifecycle_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None
+    """
+    /initialize /prefetch /reconfigure /on_disable /on_enable /cleanup:
+    the tool-capability lifecycle surface.
+    """
+```
+
+``` python
+def _register_config_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None
+    "/config_schema /config /config_options: the config surface."
+```
+
+``` python
+def _register_task_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+) -> None
+    """
+    /execute /execute_stream /cancel /progress: the task channel.
+    
+    Stage 2 (typed wire layer): both result-serialization sites pass
+    through `wire_encode`, so results whose DTO classes are registered
+    via `@wire_type` cross the boundary in the tagged envelope and arrive
+    typed at the proxy; unregistered results serialize exactly as before.
+    """
+```
+
+``` python
+def _register_monitor_endpoints(
+    app,             # FastAPI app under construction
+    plugin_instance, # The loaded plugin object
+    class_name: str, # Plugin class name (for 404 detail messages)
+) -> None
+    "/get_system_status /list_processes: CR-3 typed MonitorPlugin accessors."
+```
+
+``` python
 def create_app(
     module_name: str, # Python module path (e.g., "my_plugin.plugin")
     class_name: str   # Plugin class name (e.g., "WhisperPlugin")
 ) -> FastAPI: # Configured FastAPI application
-    "Create FastAPI app that hosts the specified plugin."
+    """
+    Create FastAPI app that hosts the specified plugin.
+    
+    NB-2 reshape (stage 2): a thin assembler — load the plugin, build the
+    lifespan, register the endpoint groups. Endpoint behavior lives in the
+    module-level `_register_*` helpers above.
+    """
 ```
 
 ``` python

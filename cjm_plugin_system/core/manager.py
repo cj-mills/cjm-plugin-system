@@ -594,7 +594,7 @@ def _check_config_schema_drift(
 
 PluginManager._check_config_schema_drift = _check_config_schema_drift
 
-# %% ../../nbs/core/manager.ipynb #dc8497fc
+# %% ../../nbs/core/manager.ipynb #108a69d8
 def _check_structural_surface_drift(
     self,
     proxy:Any, # RemotePluginProxy with a live worker

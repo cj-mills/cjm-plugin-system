@@ -839,7 +839,7 @@ class _CR4MinimalPlugin(ToolCapability):
     def get_config_schema(self) -> Dict[str, Any]: return {}
     def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
 
-# %% ../../nbs/core/capability.ipynb #8b54c90a
+# %% ../../nbs/core/capability.ipynb #76176c92
 def derive_structural_surface(
     cls: type,  # The capability class to introspect
 ) -> Dict[str, Any]:  # {"methods": [...], "properties": [...], "attributes": [...]}
