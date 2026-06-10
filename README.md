@@ -12,12 +12,14 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (15)
+    ├── core/ (18)
+    │   ├── adapter.ipynb          # The typed-task half of the capability-unit fracture (pass-2 Thread 3) —
+    │   ├── capability.ipynb       # The tool-capability interface — the manage-the-tool half of the capability-unit fracture (pass-2 Thread 3)
     │   ├── config.ipynb           # Project-level configuration for paths, runtime settings, and environment management
     │   ├── config_store.ipynb     # Persistent storage for per-plugin configuration (with enabled flag)
     │   ├── empirical_store.ipynb  # Persistent store for empirically-observed resource usage per (instance_id, config_hash) pair. CR-7's data foundation — `record_sample` is called from `PluginManager.execute_plugin*` finally blocks; aggregates feed eviction-candidate selection + future UI hints + cost-aware retry decisions.
     │   ├── errors.ipynb           # Typed exception hierarchy + JobError dataclass + default classification of bare Python exceptions. The substrate's CR-5 implementation per the 2026-05-19 substrate audit.
-    │   ├── interface.ipynb        # Abstract base class defining the generic plugin interface
+    │   ├── interface.ipynb        # REMOVE-AFTER-OVERHAUL(option-c-cascade): class-identical legacy import
     │   ├── manager.ipynb          # Plugin discovery, loading, and lifecycle management system
     │   ├── manifest_format.ipynb  # Typed parser + writer for the nested v2.0 manifest layout per the 2026-05-19 substrate audit's CR-8. Substrate manifests transitioned from a flat top-level JSON object to a four-section nested layout: `install` (deployment-specific facts populated at install time), `code` (code-derived facts refreshed by `cjm-ctl regenerate-manifest`), `drift_tracking` (a config_schema hash that records the witness shape so live-vs-stored comparisons can detect drift), and `overrides` (an operator-supplied overlay placeholder).
     │   ├── metadata.ipynb         # Data structures for plugin metadata
@@ -27,6 +29,7 @@ pip install cjm_plugin_system
     │   ├── scheduling.ipynb       # Resource scheduling policies for plugin execution
     │   ├── secret_store.ipynb     # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
     │   ├── telemetry.ipynb        # Shared GPU/CPU attribution helpers used by both `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and `PluginManager._record_sample_safe` (CR-7).
+    │   ├── wire.ipynb             # Typed data transfer at the worker boundary — the zero-copy `FileBackedDTO`
     │   └── worker.ipynb           # FastAPI server that runs inside isolated plugin environments
     ├── utils/ (3)
     │   ├── cache_paths.ipynb  # Per-(input-content, config) deterministic cache directories for plugin outputs
@@ -35,7 +38,7 @@ pip install cjm_plugin_system
     ├── bootstrap.ipynb  # One-call factory that assembles a PluginManager + JobQueue + plugin bindings — closes the demo-app boilerplate duplication audited across 5 substrate consumers.
     └── cli.ipynb        # CLI tool for declarative plugin management
 
-Total: 20 notebooks across 2 directories
+Total: 23 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -43,11 +46,13 @@ Total: 20 notebooks across 2 directories
 graph LR
     bootstrap["bootstrap<br/>Bootstrap"]
     cli["cli<br/>cli"]
+    core_adapter["core.adapter<br/>Task Adapter"]
+    core_capability["core.capability<br/>Tool Capability"]
     core_config["core.config<br/>Configuration"]
     core_config_store["core.config_store<br/>Plugin Config Store"]
     core_empirical_store["core.empirical_store<br/>Empirical Resource Tracking"]
     core_errors["core.errors<br/>Plugin Error Taxonomy"]
-    core_interface["core.interface<br/>Plugin Interface"]
+    core_interface["core.interface<br/>Plugin Interface (compat shim)"]
     core_manager["core.manager<br/>Plugin Manager"]
     core_manifest_format["core.manifest_format<br/>Manifest Format (v2.0)"]
     core_metadata["core.metadata<br/>Plugin Metadata"]
@@ -57,41 +62,47 @@ graph LR
     core_scheduling["core.scheduling<br/>Scheduling"]
     core_secret_store["core.secret_store<br/>Plugin Secret Store"]
     core__telemetry["core._telemetry<br/>Substrate Telemetry Helpers"]
+    core_wire["core.wire<br/>Typed Wire Layer"]
     core_worker["core.worker<br/>Universal Worker"]
     utils_cache_paths["utils.cache_paths<br/>Cache Paths"]
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
 
-    bootstrap --> core_manager
-    bootstrap --> core_scheduling
     bootstrap --> core_queue
+    bootstrap --> core_scheduling
+    bootstrap --> core_manager
     cli --> core_manifest_format
-    cli --> core_config
     cli --> core_platform
+    cli --> core_config
     cli --> core_metadata
+    core_capability --> core_errors
     core_empirical_store --> utils_hashing
-    core_interface --> core_errors
+    core_interface --> core_capability
+    core_interface --> core_interface
+    core_interface --> core
+    core_interface --> core_wire
+    core_manager --> core_metadata
+    core_manager --> core__telemetry
     core_manager --> core_secret_store
+    core_manager --> core_config_store
+    core_manager --> core_empirical_store
     core_manager --> core_errors
     core_manager --> core_scheduling
     core_manager --> core_manifest_format
-    core_manager --> core_config
-    core_manager --> core_empirical_store
-    core_manager --> core__telemetry
-    core_manager --> core_metadata
-    core_manager --> utils_validation
-    core_manager --> core_interface
-    core_manager --> core_config_store
+    core_manager --> core_capability
     core_manager --> core_proxy
+    core_manager --> core_config
+    core_manager --> utils_validation
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
-    core_proxy --> core_config
     core_proxy --> core_errors
     core_proxy --> core_platform
-    core_proxy --> core_interface
-    core_queue --> core_errors
+    core_proxy --> core_capability
+    core_proxy --> core_config
+    core_proxy --> core_wire
     core_queue --> core__telemetry
+    core_queue --> core_errors
     core_scheduling --> core_metadata
     core_worker --> core_errors
     core_worker --> core_platform
@@ -100,15 +111,84 @@ graph LR
     utils_validation --> core_errors
 ```
 
-*36 cross-module dependencies detected*
+*41 cross-module dependencies detected*
 
 ## CLI Reference
 
-No CLI commands found in this project.
+### `cjm-ctl` Command
+
+                                                                                                              
+     Usage: cjm-ctl [OPTIONS] COMMAND [ARGS]...                                                               
+                                                                                                              
+     CJM Plugin System CLI                                                                                    
+                                                                                                              
+    ╭─ Options ──────────────────────────────────────────────────────────────────────────────────────────────╮
+    │ --cjm-config                PATH  Path to cjm.yaml configuration file                                  │
+    │ --data-dir                  PATH  Override data directory (manifests, logs)                            │
+    │ --conda-prefix              PATH  Override conda/mamba prefix path                                     │
+    │ --conda-type                TEXT  Conda implementation: micromamba, miniforge, or conda                │
+    │ --install-completion              Install completion for the current shell.                            │
+    │ --show-completion                 Show completion for the current shell, to copy it or customize the   │
+    │                                   installation.                                                        │
+    │ --help                            Show this message and exit.                                          │
+    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Commands ─────────────────────────────────────────────────────────────────────────────────────────────╮
+    │ setup-runtime        Download and setup micromamba runtime for project-local mode.                     │
+    │ regenerate-manifest  Re-run introspection for an installed plugin and rewrite its manifest.            │
+    │ install-all          Install and register all plugins defined in plugins.yaml.                         │
+    │ setup-host           Install interface libraries in the current Python environment.                    │
+    │ estimate-size        Estimate disk space required for plugin environments.                             │
+    │ list                 List installed plugins from manifest directory.                                   │
+    │ remove               Remove a plugin's manifest and conda environment.                                 │
+    │ validate             SG-6: validate a manifest JSON or plugins.yaml file's structure.                  │
+    │ set-secret           Store a plugin secret in the project-local SecretStore (CR-12).                   │
+    │ list-secrets         List the secret KEY NAMES stored for a plugin — never the values (CR-12).         │
+    ╰────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+For detailed help on any command, use `cjm-ctl <command> --help`.
 
 ## Module Overview
 
 Detailed documentation for each module in the project:
+
+### Task Adapter (`adapter.ipynb`)
+
+> The typed-task half of the capability-unit fracture (pass-2 Thread 3)
+> —
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.adapter import (
+    TaskAdapter
+)
+```
+
+#### Classes
+
+``` python
+class TaskAdapter(ABC):
+    """
+    Base for task adapters — the typed-task half of the capability-unit
+    fracture (pass-2 Thread 3).
+    
+    Subclasses (one ABC per task, in `cjm-<task>-adapter-interface` libraries)
+    declare:
+    
+    - the TYPED task method (the contract `execute(*args, **kwargs)` never
+      gave the task), abstract on the per-task ABC;
+    - `task_name`: the task this adapter serves (e.g. "transcription");
+    - `required_tool_protocol`: the structural contract required of a tool
+      capability (a `typing.Protocol`; provisional `None` until the
+      protocol is evidence-locked — Q5 posture: declare the slot, let
+      stage-4/8 tool-splitting evidence finalize the protocol bodies);
+    - the task's persistence helpers (storage classes), beside the task
+      method rather than on it.
+    
+    Implementations run in-worker beside their tool capability. The base is
+    deliberately mechanism-light: registry/routing is CR-17 pt 2 (stage 4).
+    """
+```
 
 ### Bootstrap (`bootstrap.ipynb`)
 
@@ -358,6 +438,673 @@ def prune_cache_for_input(
 ``` python
 _MAX_STEM_LEN = 100
 _UNSAFE_CHARS
+```
+
+### Tool Capability (`capability.ipynb`)
+
+> The tool-capability interface — the manage-the-tool half of the
+> capability-unit fracture (pass-2 Thread 3)
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.capability import (
+    RELOAD_TRIGGER,
+    WORKER_ENV_TEMPLATE_PLACEHOLDERS,
+    ConfigOption,
+    FieldOptions,
+    EnvVarSpec,
+    expand_worker_env_template,
+    template_check_placeholders,
+    ToolCapability,
+    plugin_action,
+    collect_plugin_actions
+)
+```
+
+#### Functions
+
+``` python
+def expand_worker_env_template(
+    template: str,                       # The raw EnvVarSpec.default value (may contain ${...} placeholders)
+    placeholders: Mapping[str, Optional[str]],  # Resolved values keyed by placeholder name
+    *,
+    plugin_name: str = "",               # For error context ("template X on plugin Y references ...")
+    var_name: str = "",                  # For error context ("on EnvVarSpec(name=Z)")
+) -> str
+    """
+    Substitute `${VAR}` placeholders in `template` using `placeholders`.
+    
+    Strict mode (no `safe_substitute`): unknown placeholders raise
+    `PluginConfigError` with descriptive context. Single-pass, non-recursive —
+    substituted values are taken verbatim, never re-scanned for further
+    placeholders. Templates without any `${...}` syntax pass through unchanged
+    (so plain static defaults work as before).
+    
+    The allowed placeholder vocabulary is fixed via `WORKER_ENV_TEMPLATE_PLACEHOLDERS`.
+    A `${FOO}` whose name is in the vocabulary but whose RESOLVED value is None
+    (e.g. `CJM_MODELS_DIR` when the operator hasn't configured one) raises
+    `PluginConfigError` with the same shape — operators get a clear signal that
+    the plugin needs a value they haven't provided, rather than a silent
+    substitution of empty string into a load-bearing path.
+    """
+```
+
+``` python
+def template_check_placeholders(
+    template: str,                       # The raw EnvVarSpec.default value
+) -> Set[str]:                            # Placeholder names referenced (allowed-vocabulary-validated)
+    """
+    Return the set of placeholder names referenced by a worker-env template.
+    
+    Validates the vocabulary (unknown names raise PluginConfigError) without
+    requiring a placeholder-value mapping. Useful for `cjm-ctl validate`'s
+    dry-run check at install/release time — surface the bug BEFORE the plugin
+    tries to spawn a worker with a malformed default.
+    
+    Templates without `${...}` return an empty set.
+    """
+```
+
+``` python
+def _report_progress_threadsafe(
+    self,
+    progress: float,  # 0.0 to 1.0, or -1.0 for indeterminate
+    message: str = "",  # Descriptive status message
+) -> None
+    """
+    Thread-safe report_progress — replaces ToolCapability.report_progress.
+    
+    Writes `_progress` + `_status_message_base` + `_status_message` under the
+    plugin's `_progress_lock` if one exists (lazy-init by `heartbeat()` before
+    spawning its thread). When no lock exists yet — the single-threaded common
+    case before any heartbeat() call — the writes happen without lock overhead.
+    
+    The heartbeat thread reads `_status_message_base` (NOT `_status_message`)
+    so heartbeat-amended messages don't accumulate elapsed-time suffixes when
+    `report_progress` is called concurrently. The plugin's call overwrites both
+    fields atomically; the next heartbeat tick reads the new base.
+    """
+```
+
+``` python
+@contextmanager
+def _heartbeat(
+    self,
+    phase: str,                    # Phase label embedded in the heartbeat message
+    *,
+    interval: float = 0.5,         # Seconds between heartbeats (substrate stalls at 60s default)
+    progress: Optional[float] = None,  # Optional initial progress; None preserves current
+) -> Iterator[None]
+    """
+    Heartbeat context manager — spawn a daemon thread that advances the
+    (progress, message) tuple every `interval` seconds, defeating the
+    substrate's prefetch stall detection during silent blocking calls.
+    
+    Usage:
+    
+        def prefetch(self):
+            with self.heartbeat("loading whisper model"):
+                self._load_model()  # Blocking; HF Hub download / from_pretrained
+    
+    Behavior:
+    
+    - At entry: writes `(progress, phase)` to set the initial state. If
+      `progress` is None, preserves whatever `self._progress` already holds
+      (defaulting to 0.5 indeterminate if never set).
+    - During the block: a daemon thread emits an updated `_status_message =
+      "<base> ({elapsed:.1f}s)"` every `interval` seconds. The thread reads
+      `_status_message_base` (set by `report_progress`) for the base, so an
+      explicit `report_progress(0.3, "downloading weights")` from inside the
+      block makes the next heartbeat tick display "downloading weights (Xs)".
+    - At exit: signals the thread to stop, joins with timeout (the thread is
+      daemon so cleanup is best-effort but reliable). The plugin's final
+      `_status_message` state is left as the last heartbeat-amended value;
+      callers wanting a clean "completed" state should call
+      `report_progress(1.0, "done")` after the with-block.
+    
+    Thread safety: relies on the upgraded thread-safe `report_progress`
+    (loaded by this same cell). The lock is lazy-initialized HERE — before
+    spawning the heartbeat thread — so concurrent main-thread + heartbeat-
+    thread calls always see a lock.
+    
+    Cancellation: the heartbeat thread checks `stop_event` between sleeps
+    and exits cleanly. If the with-block raises, the `finally` clause still
+    fires `stop_event.set()`, so the thread won't leak.
+    """
+```
+
+``` python
+def plugin_action(
+    action_name: str  # Public action name the decorated method handles
+) -> Callable[[Callable], Callable]:  # Decorator
+    """
+    Marker decorator tagging a plugin method as the handler for `action_name`.
+    
+    Sets `func._plugin_action = action_name`. Plugin authors with dispatcher-style
+    `execute(action, **kwargs)` use `collect_plugin_actions(cls)` to derive their
+    `supported_actions` set from these markers rather than maintaining a separate
+    list. The decorator does not change call semantics — the wrapped function is
+    returned unchanged.
+    """
+```
+
+``` python
+def collect_plugin_actions(
+    cls: type  # Class (or subclass) to scan for @plugin_action-tagged methods
+) -> Set[str]:  # Set of action names handled by `cls` (including inherited)
+    """
+    Collect action names from `@plugin_action`-decorated methods on `cls`.
+    
+    Walks the class's MRO so subclasses inherit action handlers from base
+    classes automatically. The returned set is suitable for
+    `supported_actions: ClassVar[Set[str]] = collect_plugin_actions(MyPlugin)`
+    once the plugin class body has been defined.
+    """
+```
+
+``` python
+def _dispatch_to_action(
+    self,
+    action: str,  # Action name to dispatch (matched against @plugin_action tags)
+    **kwargs,     # Forwarded verbatim to the resolved handler
+) -> Any:         # Whatever the handler returns
+    """
+    T28: dispatch `action` to its `@plugin_action`-tagged handler.
+    
+    Walks the instance's MRO for a method tagged `_plugin_action == action`
+    (the SAME markers `collect_plugin_actions` / `supported_actions` are built
+    from) and calls it as `handler(self, **kwargs)`. Unknown actions raise the
+    typed `PluginInputError(fields_invalid=["action"])` (CR-5) — identical
+    behaviour to the hand-rolled dispatchers this replaces.
+    
+    Dispatcher-style plugins (MediaProcessing / Graph / Text) collapse their
+    `execute` to a one-liner instead of reimplementing the MRO walk in every
+    plugin (the 5x copy SG-44 + this helper retire):
+    
+        @plugin_action("separate_vocals")
+        def _separate_vocals(self, **kwargs): ...
+    
+        supported_actions = collect_plugin_actions(MyPlugin)
+    
+        def execute(self, action="separate_vocals", **kwargs):
+            return self.dispatch_to_action(action, **kwargs)
+    """
+```
+
+#### Classes
+
+``` python
+@dataclass
+class ConfigOption:
+    "CR-11: one live option for a dynamic config field, with optional metadata."
+    
+    value: Any  # option value (e.g. "gemini-2.5-flash")
+    label: str  # display label (e.g. "Gemini 2.5 Flash")
+    metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)  # token limits, descriptions, ...
+```
+
+``` python
+@dataclass
+class FieldOptions:
+    """
+    CR-11: the live option domain for one dynamic config field.
+    
+    Kept SEPARATE from the static config_schema (which CR-8 hashes for drift
+    detection). The plugin-config UI merges these live options on top of the
+    static schema; folding them into the schema would make every API plugin
+    perpetually 'drift'.
+    """
+    
+    options: List[ConfigOption]  # current valid options
+    constraints: Dict[str, Any] = dataclasses.field(default_factory=dict)  # derived field-constraint overrides
+```
+
+``` python
+@dataclass
+class EnvVarSpec:
+    """
+    CR-12: one entry of a plugin's spawn-time worker-environment contract.
+    
+    A plugin declares the environment variables its worker subprocess reads at
+    startup via `WORKER_ENV: ClassVar[List[EnvVarSpec]]`. Worker env vars are
+    FIXED AT SPAWN — changing one requires a worker RESPAWN, so the substrate
+    routes such changes through `reload_plugin`, never `reconfigure` (the env is
+    baked into the subprocess at `Popen` and can't be mutated in-process). This
+    is the lifecycle distinction from a normal config field (reconfigurable in
+    place via `reconfigure`/`_release_<trigger>`).
+    
+    Two flavors share this one declaration:
+    
+      - `secret=True`  : value resolved from the `SecretStore` (masked; never
+                         persisted in the config store, echoed in config_schema,
+                         or logged). A secret never carries a `default` — a
+                         baked-in secret is a leak.
+      - `secret=False` : visible value resolved from the override chain
+                         (operator override > manifest `install.env_vars` >
+                         this `default`); safe to display.
+    
+    Both share one injection seam: the substrate composes the resolved
+    {name: value} overlay at load time and injects it into the worker env at
+    spawn (extending the existing CJM_PLUGIN_DATA_DIR / CJM_MODELS_DIR injection).
+    This is "derive from behaviour, not metadata" applied to the spawn env: the
+    plugin declares WHICH vars it consumes + whether each is secret/required;
+    the substrate owns resolution + injection.
+    
+    `options` is a forward seam for visible vars with a finite domain (e.g. a
+    device selector enumerating GPUs); unused today but reserved so the
+    plugin-config UI / a future `set-env` surface isn't blocked.
+    """
+    
+    name: str  # The env var the worker reads, e.g. "GEMINI_API_KEY"
+    secret: bool = False  # True -> value resolved from the SecretStore, masked
+    required: bool = False  # Worker can't do useful work until this is satisfied
+    label: str = ''  # Display label for CLI / GUI affordances
+    description: str = ''  # Help text for CLI / GUI
+    default: Optional[str]  # Visible vars only; secrets must leave this None
+    options: Optional[List[str]]  # Forward seam: finite domain for a visible var (unused today)
+```
+
+``` python
+class ToolCapability(ABC):
+    """
+    Tool-capability interface: manage the tool/worker — identity, lifecycle,
+    config, cancellation, observability (pass-2 Thread 3 fracture).
+    
+    The task channel is NOT part of this surface: `execute` left the abstract
+    set when the capability-unit fracture split tool capabilities from task
+    adapters. Typed task contracts live on adapters (`core.adapter` + the
+    per-task `cjm-<task>-adapter-interface` libraries). Fused-era plugins (the
+    pre-Option-C 12) still define `execute` themselves and their domain ABCs
+    still declare it abstract — they keep working unchanged through the
+    class-identical `ToolCapability` alias in `core.interface` until the
+    Option C migration cascade splits them.
+    
+    CR-4 extended this surface with: prefetch hook (SG-19), made cleanup optional
+    (SG-43), reconfigure split + RELOAD_TRIGGER declarative-helper (lifecycle
+    hook split), and cooperative-cancellation primitives (SG-16 — flag + callback
+    + context manager).
+    
+    Abstract methods: `name`, `version`, `initialize`, `get_config_schema`,
+    `get_current_config`. Concrete defaults (overridable): `execute_stream`
+    (transitional — see method), `cleanup`, `prefetch`, `reconfigure`,
+    `cancel`, `check_cancel`, `register_cancel_callback`, `cancel_signal_to`,
+    `report_progress`, `report_usage`, `fields_that_changed`,
+    `reconfigure_with_triggers`, `on_disable`, `on_enable`.
+    """
+    
+    def name(self) -> str: # Unique identifier for this plugin
+            """Unique plugin identifier."""
+            ...
+    
+        @property
+        @abstractmethod
+        def version(self) -> str: # Semantic version string (e.g., "1.0.0")
+        "Unique plugin identifier."
+    
+    def version(self) -> str: # Semantic version string (e.g., "1.0.0")
+            """Plugin version."""
+            ...
+    
+        @abstractmethod
+        def initialize(
+            self,
+            config: Optional[Dict[str, Any]] = None # Configuration dictionary
+        ) -> None
+        "Plugin version."
+    
+    def initialize(
+            self,
+            config: Optional[Dict[str, Any]] = None # Configuration dictionary
+        ) -> None
+        "Initialize or re-configure the plugin.
+
+CR-4: this is "first-time setup" — called once after construction with
+the initial config. Substrate uses `reconfigure(old, new)` for delta
+updates afterwards. Plugins predating CR-4 see no behavior change since
+the default `reconfigure()` body delegates to `reconfigure_with_triggers`
+which is a no-op unless the plugin opts in via RELOAD_TRIGGER metadata."
+    
+    def execute_stream(
+            self,
+            *args,
+            **kwargs
+        ) -> Generator[Any, None, None]: # Yields partial results
+        "Stream execution results chunk by chunk.
+
+TRANSITIONAL(option-c-cascade): streaming is substrate/composition-
+supplied under the pass-2 fracture (off both interfaces); the default
+stays here only because fused-era plugins rely on it (it calls the
+plugin's own `execute`, which a split tool capability does not have).
+Relocates when CR-17 adapter routing lands (execution stage 4)."
+    
+    def get_config_schema(self) -> Dict[str, Any]: # JSON Schema for configuration
+            """Return JSON Schema describing the plugin's configuration options."""
+            ...
+    
+        @abstractmethod
+        def get_current_config(self) -> Dict[str, Any]: # Current configuration values
+        "Return JSON Schema describing the plugin's configuration options."
+    
+    def get_current_config(self) -> Dict[str, Any]: # Current configuration values
+            """Return the current configuration state as a dictionary."""
+            ...
+    
+        def get_config_options(self) -> Dict[str, "FieldOptions"]
+        "Return the current configuration state as a dictionary."
+    
+    def get_config_options(self) -> Dict[str, "FieldOptions"]:
+            """CR-11: live option domains for dynamic config fields, keyed by field name.
+    
+            Optional. Default: {} (fully static plugins). For fields whose valid
+            domain is determined at runtime (e.g. an API model list), return a
+            `FieldOptions` carrying current `ConfigOption` values + per-option
+            metadata (token limits, etc.) + optional derived constraints. Runs in
+            the worker subprocess (has the plugin's deps + credentials).
+    
+            Kept SEPARATE from get_config_schema(): the schema is static + hashed for
+            CR-8 drift detection; these options are the live, un-hashed companion the
+            plugin-config UI merges on top. A fetch failure should raise a typed CR-5
+            error; the substrate's PluginManager.get_config_options accessor degrades
+            to {} so the UI can fall back to the static schema.
+            """
+            return {}
+    
+        def cleanup(self) -> None
+        "CR-11: live option domains for dynamic config fields, keyed by field name.
+
+Optional. Default: {} (fully static plugins). For fields whose valid
+domain is determined at runtime (e.g. an API model list), return a
+`FieldOptions` carrying current `ConfigOption` values + per-option
+metadata (token limits, etc.) + optional derived constraints. Runs in
+the worker subprocess (has the plugin's deps + credentials).
+
+Kept SEPARATE from get_config_schema(): the schema is static + hashed for
+CR-8 drift detection; these options are the live, un-hashed companion the
+plugin-config UI merges on top. A fetch failure should raise a typed CR-5
+error; the substrate's PluginManager.get_config_options accessor degrades
+to {} so the UI can fall back to the static schema."
+    
+    def cleanup(self) -> None:
+            """Clean up resources when plugin is unloaded.
+            
+            CR-4: made optional (SG-43 closure). Was `@abstractmethod` before; every
+            audited plugin overrode it with a near-no-op, so the default is now a
+            no-op and plugin authors override only when they have non-trivial
+            teardown (file handles, GPU memory, database connections). The
+            substrate's worker /cleanup endpoint calls this regardless.
+            """
+            pass
+    
+        def prefetch(self) -> None
+        "Clean up resources when plugin is unloaded.
+
+CR-4: made optional (SG-43 closure). Was `@abstractmethod` before; every
+audited plugin overrode it with a near-no-op, so the default is now a
+no-op and plugin authors override only when they have non-trivial
+teardown (file handles, GPU memory, database connections). The
+substrate's worker /cleanup endpoint calls this regardless."
+    
+    def prefetch(self) -> None:
+            """Acquire heavy resources eagerly without invoking execute().
+            
+            CR-4 (SG-19): default no-op. Plugin authors override when downstream
+            callers benefit from eager acquisition — typically transcription /
+            inference plugins that lazy-download models on first execute. The
+            substrate's prefetch_plugin(name) API + worker /prefetch endpoint
+            invoke this. Should be idempotent (safe to call multiple times) since
+            the substrate may pre-warm at load time AND on operator request.
+            """
+            pass
+    
+        def reconfigure(
+            self,
+            old_config: Optional[Dict[str, Any]],  # Previous configuration values
+            new_config: Optional[Dict[str, Any]],  # New configuration values to apply
+        ) -> None
+        "Acquire heavy resources eagerly without invoking execute().
+
+CR-4 (SG-19): default no-op. Plugin authors override when downstream
+callers benefit from eager acquisition — typically transcription /
+inference plugins that lazy-download models on first execute. The
+substrate's prefetch_plugin(name) API + worker /prefetch endpoint
+invoke this. Should be idempotent (safe to call multiple times) since
+the substrate may pre-warm at load time AND on operator request."
+    
+    def reconfigure(
+            self,
+            old_config: Optional[Dict[str, Any]],  # Previous configuration values
+            new_config: Optional[Dict[str, Any]],  # New configuration values to apply
+        ) -> None
+        "Apply a configuration change without re-running full initialize().
+
+CR-4 completion (2026-05-25): reconfigure is the substrate's canonical
+delta path - `PluginManager.update_plugin_config` routes here, NOT through
+a bare `initialize(new_config)`. It fires `_release_<trigger>` releases for
+changed RELOAD_TRIGGER fields, then re-applies config (see body below).
+
+Distinction from initialize(): initialize sets up persistent state once
+after construction; reconfigure applies delta updates and is the
+canonical entry point for hot-reload via the substrate's
+update_plugin_config path."
+    
+    def fields_that_changed(
+            self,
+            old: Dict[str, Any],  # Previous config snapshot
+            new: Dict[str, Any],  # Proposed new config snapshot
+        ) -> Set[str]:  # Field names whose values differ between old and new
+        "Return the set of field names whose values differ between old and new.
+
+Includes fields present in only one dict (treated as a change to/from
+the implicit None). Equality is structural via `!=`; nested dicts /
+lists compare by value, not identity. Hashable-vs-unhashable values
+compare correctly because we never put them in a set themselves."
+    
+    def reconfigure_with_triggers(
+            self,
+            old_config: Dict[str, Any],  # Previous configuration values
+            new_config: Dict[str, Any],  # New configuration values being applied
+        ) -> None
+        "CR-4 helper: walk RELOAD_TRIGGER metadata + fire `_release_<trigger>` methods.
+
+Resolution sequence:
+
+  1. Find the plugin's `config_class` attribute (a dataclass). Absent
+     means the plugin hasn't opted into the declarative pattern; the
+     helper returns silently.
+  2. Compute the diff between `old_config` and `new_config` via
+     `fields_that_changed`.
+  3. For each changed field, read its `RELOAD_TRIGGER` metadata key
+     (if any) and accumulate the trigger names into a set (de-duping
+     when multiple fields share a trigger).
+  4. For each trigger, call `self._release_<trigger>()` if it exists
+     on the instance.
+
+Plugin authors opt in by:
+
+  - Setting `config_class = MyConfigDataclass` as a class attribute.
+  - Annotating field metadata with `{RELOAD_TRIGGER: "model"}` etc.
+  - Implementing matching `_release_model(self)` instance methods.
+
+Plugins WITHOUT config_class or RELOAD_TRIGGER metadata land here as a
+no-op — safe default for the SG-T3tr migration window where the
+cascade hasn't yet adopted the declarative pattern everywhere."
+    
+    def cancel(self) -> None:
+            """Request cooperative cancellation of the current execute() call.
+            
+            CR-4: default sets the substrate-tracked `_cancel_requested` flag and
+            fires any callbacks registered via `register_cancel_callback`.
+            
+            Plugin authors who need extra teardown logic (signaling a subprocess,
+            closing a network connection) override `cancel()` and SHOULD call
+            `super().cancel()` to preserve the flag-setting + callback-fire
+            behavior. The plugin's `execute()` polls via `check_cancel()` at safe
+            interruption points and unwinds when it raises `PluginCancelledError`.
+            """
+            self._cancel_requested = True
+            for cb in list(getattr(self, "_cancel_callbacks", ()))
+        "Request cooperative cancellation of the current execute() call.
+
+CR-4: default sets the substrate-tracked `_cancel_requested` flag and
+fires any callbacks registered via `register_cancel_callback`.
+
+Plugin authors who need extra teardown logic (signaling a subprocess,
+closing a network connection) override `cancel()` and SHOULD call
+`super().cancel()` to preserve the flag-setting + callback-fire
+behavior. The plugin's `execute()` polls via `check_cancel()` at safe
+interruption points and unwinds when it raises `PluginCancelledError`."
+    
+    def check_cancel(self) -> None:
+            """Raise `PluginCancelledError` if cancellation has been requested.
+            
+            CR-4 (SG-16 polling primitive): plugin authors call this at safe
+            interruption points inside `execute()`. The substrate sets the flag via
+            `cancel()` (typically driven by an operator's "Cancel" button); the
+            next `check_cancel` call surfaces the cancellation as a typed exception
+            that unwinds execute() cleanly.
+            
+            The substrate's worker /execute wrapper resets the flag before each
+            call so cancellation doesn't leak from one job into the next.
+            """
+            if self._cancel_requested
+        "Raise `PluginCancelledError` if cancellation has been requested.
+
+CR-4 (SG-16 polling primitive): plugin authors call this at safe
+interruption points inside `execute()`. The substrate sets the flag via
+`cancel()` (typically driven by an operator's "Cancel" button); the
+next `check_cancel` call surfaces the cancellation as a typed exception
+that unwinds execute() cleanly.
+
+The substrate's worker /execute wrapper resets the flag before each
+call so cancellation doesn't leak from one job into the next."
+    
+    def register_cancel_callback(
+            self,
+            callback: Callable[[], None],  # Called when cancel() fires
+        ) -> None
+        "Register a callback that fires when cancel() is called.
+
+CR-4 (SG-16 callback primitive): for plugins that can't easily insert
+polling at strategic points (e.g., a plugin wrapping a blocking C
+extension). Callbacks should be non-blocking and idempotent. Multiple
+callbacks can be registered; all fire in registration order when
+cancel() is invoked. A misbehaving callback that raises is logged
+and skipped — the remaining callbacks still fire."
+    
+    def cancel_signal_to(
+            self,
+            callback: Callable[[], None],  # Cancellation callback scoped to the with-block
+        ) -> Generator[None, None, None]
+        "Context manager registering `callback` for the duration of the with-block.
+
+Useful for binding cancellation to a finite-scope resource (a subprocess,
+a network request, a temporary file handle) without needing to
+deregister manually. Pairs with `register_cancel_callback` for cases
+where lifetime is tied to a `try:`/`finally:` block.
+
+Example:
+
+    def execute(self, *args, **kwargs):
+        proc = subprocess.Popen(...)
+        with self.cancel_signal_to(lambda: proc.terminate()):
+            return proc.wait()"
+    
+    def on_disable(self) -> None:
+            """CR-2: signal that the substrate has marked this plugin as disabled.
+            
+            Worker stays alive; plugin can release heavy resources here (e.g., free
+            GPU memory, close model files). The substrate fires this hook AFTER any
+            in-flight job for this plugin finishes — see PluginManager.disable_plugin
+            deferred-hook semantics. Default: no-op; plugins opt in by overriding.
+            """
+            pass
+    
+        def on_enable(self) -> None
+        "CR-2: signal that the substrate has marked this plugin as disabled.
+
+Worker stays alive; plugin can release heavy resources here (e.g., free
+GPU memory, close model files). The substrate fires this hook AFTER any
+in-flight job for this plugin finishes — see PluginManager.disable_plugin
+deferred-hook semantics. Default: no-op; plugins opt in by overriding."
+    
+    def on_enable(self) -> None:
+            """CR-2: signal that the substrate has marked this plugin as re-enabled.
+            
+            Plugin can eagerly re-acquire heavy resources here, or rely on lazy
+            re-acquisition via the next execute() call (substrate doesn't prefer
+            one strategy over the other). Default: no-op; plugins opt in by overriding.
+            """
+            pass
+    
+        def report_progress(
+            self,
+            progress: float, # 0.0 to 1.0, or -1.0 for indeterminate
+            message: str = "" # Descriptive status message
+        ) -> None
+        "CR-2: signal that the substrate has marked this plugin as re-enabled.
+
+Plugin can eagerly re-acquire heavy resources here, or rely on lazy
+re-acquisition via the next execute() call (substrate doesn't prefer
+one strategy over the other). Default: no-op; plugins opt in by overriding."
+    
+    def report_progress(
+            self,
+            progress: float, # 0.0 to 1.0, or -1.0 for indeterminate
+            message: str = "" # Descriptive status message
+        ) -> None
+        "Report execution progress. Call during execute() to update status."
+    
+    def report_usage(
+            self,
+            usage: Dict[str, float],  # Measured usage for this execute, keyed by plugin-defined unit name
+        ) -> None
+        "SG-54: report measured API/service usage for the current execute() call.
+
+Unit-agnostic by design — the plugin (which holds the API response)
+supplies whatever unit names it measures: {"input_tokens": .., "output_tokens": ..}
+for an LLM, {"pages": ..} for OCR, {"characters": ..} for TTS,
+{"credits"/"requests"/"minutes": ..} for others. The substrate stores +
+accumulates per unit name WITHOUT interpreting them (summed across runs in
+the empirical store's api_usage_totals). Pricing is deliberately NOT here
+(volatile, per-service, often not API-accessible) — a consumer-side rate
+table turns raw units into cost. "Derive from behaviour": the plugin
+MEASURES actual usage from the response; the substrate aggregates.
+
+Stored on `self._last_api_usage`; the worker exposes it via /stats and the
+substrate folds it into the post-execute ResourceSample. The worker resets
+it before each execute so a failed/usage-less call can't inherit stale
+usage. Default: store-only (parallel to report_progress)."
+```
+
+``` python
+class _CR4MinimalPlugin(ToolCapability):
+    "Concrete plugin satisfying abstracts; relies on CR-4 default cleanup()."
+    
+    def name(self) -> str: return "cr4-minimal"
+        @property
+        def version(self) -> str: return "0.0.0"
+    
+    def version(self) -> str: return "0.0.0"
+        def initialize(self, config=None): self._cfg = dict(config or {})
+    
+    def initialize(self, config=None): self._cfg = dict(config or {})
+        def execute(self, *args, **kwargs): return None
+    
+    def execute(self, *args, **kwargs): return None
+        def get_config_schema(self) -> Dict[str, Any]: return {}
+    
+    def get_config_schema(self) -> Dict[str, Any]: return {}
+        def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
+    
+    def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
+```
+
+#### Variables
+
+``` python
+RELOAD_TRIGGER = 'reload_trigger'
+WORKER_ENV_TEMPLATE_PLACEHOLDERS: Set[str]
 ```
 
 ### cli (`cli.ipynb`)
@@ -1769,672 +2516,6 @@ def hash_dict_canonical(
     """
 ```
 
-### Plugin Interface (`interface.ipynb`)
-
-> Abstract base class defining the generic plugin interface
-
-#### Import
-
-``` python
-from cjm_plugin_system.core.interface import (
-    RELOAD_TRIGGER,
-    WORKER_ENV_TEMPLATE_PLACEHOLDERS,
-    FileBackedDTO,
-    ConfigOption,
-    FieldOptions,
-    EnvVarSpec,
-    expand_worker_env_template,
-    template_check_placeholders,
-    PluginInterface,
-    plugin_action,
-    collect_plugin_actions
-)
-```
-
-#### Functions
-
-``` python
-def expand_worker_env_template(
-    template: str,                       # The raw EnvVarSpec.default value (may contain ${...} placeholders)
-    placeholders: Mapping[str, Optional[str]],  # Resolved values keyed by placeholder name
-    *,
-    plugin_name: str = "",               # For error context ("template X on plugin Y references ...")
-    var_name: str = "",                  # For error context ("on EnvVarSpec(name=Z)")
-) -> str
-    """
-    Substitute `${VAR}` placeholders in `template` using `placeholders`.
-    
-    Strict mode (no `safe_substitute`): unknown placeholders raise
-    `PluginConfigError` with descriptive context. Single-pass, non-recursive —
-    substituted values are taken verbatim, never re-scanned for further
-    placeholders. Templates without any `${...}` syntax pass through unchanged
-    (so plain static defaults work as before).
-    
-    The allowed placeholder vocabulary is fixed via `WORKER_ENV_TEMPLATE_PLACEHOLDERS`.
-    A `${FOO}` whose name is in the vocabulary but whose RESOLVED value is None
-    (e.g. `CJM_MODELS_DIR` when the operator hasn't configured one) raises
-    `PluginConfigError` with the same shape — operators get a clear signal that
-    the plugin needs a value they haven't provided, rather than a silent
-    substitution of empty string into a load-bearing path.
-    """
-```
-
-``` python
-def template_check_placeholders(
-    template: str,                       # The raw EnvVarSpec.default value
-) -> Set[str]:                            # Placeholder names referenced (allowed-vocabulary-validated)
-    """
-    Return the set of placeholder names referenced by a worker-env template.
-    
-    Validates the vocabulary (unknown names raise PluginConfigError) without
-    requiring a placeholder-value mapping. Useful for `cjm-ctl validate`'s
-    dry-run check at install/release time — surface the bug BEFORE the plugin
-    tries to spawn a worker with a malformed default.
-    
-    Templates without `${...}` return an empty set.
-    """
-```
-
-``` python
-def _report_progress_threadsafe(
-    self,
-    progress: float,  # 0.0 to 1.0, or -1.0 for indeterminate
-    message: str = "",  # Descriptive status message
-) -> None
-    """
-    Thread-safe report_progress — replaces PluginInterface.report_progress.
-    
-    Writes `_progress` + `_status_message_base` + `_status_message` under the
-    plugin's `_progress_lock` if one exists (lazy-init by `heartbeat()` before
-    spawning its thread). When no lock exists yet — the single-threaded common
-    case before any heartbeat() call — the writes happen without lock overhead.
-    
-    The heartbeat thread reads `_status_message_base` (NOT `_status_message`)
-    so heartbeat-amended messages don't accumulate elapsed-time suffixes when
-    `report_progress` is called concurrently. The plugin's call overwrites both
-    fields atomically; the next heartbeat tick reads the new base.
-    """
-```
-
-``` python
-@contextmanager
-def _heartbeat(
-    self,
-    phase: str,                    # Phase label embedded in the heartbeat message
-    *,
-    interval: float = 0.5,         # Seconds between heartbeats (substrate stalls at 60s default)
-    progress: Optional[float] = None,  # Optional initial progress; None preserves current
-) -> Iterator[None]
-    """
-    Heartbeat context manager — spawn a daemon thread that advances the
-    (progress, message) tuple every `interval` seconds, defeating the
-    substrate's prefetch stall detection during silent blocking calls.
-    
-    Usage:
-    
-        def prefetch(self):
-            with self.heartbeat("loading whisper model"):
-                self._load_model()  # Blocking; HF Hub download / from_pretrained
-    
-    Behavior:
-    
-    - At entry: writes `(progress, phase)` to set the initial state. If
-      `progress` is None, preserves whatever `self._progress` already holds
-      (defaulting to 0.5 indeterminate if never set).
-    - During the block: a daemon thread emits an updated `_status_message =
-      "<base> ({elapsed:.1f}s)"` every `interval` seconds. The thread reads
-      `_status_message_base` (set by `report_progress`) for the base, so an
-      explicit `report_progress(0.3, "downloading weights")` from inside the
-      block makes the next heartbeat tick display "downloading weights (Xs)".
-    - At exit: signals the thread to stop, joins with timeout (the thread is
-      daemon so cleanup is best-effort but reliable). The plugin's final
-      `_status_message` state is left as the last heartbeat-amended value;
-      callers wanting a clean "completed" state should call
-      `report_progress(1.0, "done")` after the with-block.
-    
-    Thread safety: relies on the upgraded thread-safe `report_progress`
-    (loaded by this same cell). The lock is lazy-initialized HERE — before
-    spawning the heartbeat thread — so concurrent main-thread + heartbeat-
-    thread calls always see a lock.
-    
-    Cancellation: the heartbeat thread checks `stop_event` between sleeps
-    and exits cleanly. If the with-block raises, the `finally` clause still
-    fires `stop_event.set()`, so the thread won't leak.
-    """
-```
-
-``` python
-def plugin_action(
-    action_name: str  # Public action name the decorated method handles
-) -> Callable[[Callable], Callable]:  # Decorator
-    """
-    Marker decorator tagging a plugin method as the handler for `action_name`.
-    
-    Sets `func._plugin_action = action_name`. Plugin authors with dispatcher-style
-    `execute(action, **kwargs)` use `collect_plugin_actions(cls)` to derive their
-    `supported_actions` set from these markers rather than maintaining a separate
-    list. The decorator does not change call semantics — the wrapped function is
-    returned unchanged.
-    """
-```
-
-``` python
-def collect_plugin_actions(
-    cls: type  # Class (or subclass) to scan for @plugin_action-tagged methods
-) -> Set[str]:  # Set of action names handled by `cls` (including inherited)
-    """
-    Collect action names from `@plugin_action`-decorated methods on `cls`.
-    
-    Walks the class's MRO so subclasses inherit action handlers from base
-    classes automatically. The returned set is suitable for
-    `supported_actions: ClassVar[Set[str]] = collect_plugin_actions(MyPlugin)`
-    once the plugin class body has been defined.
-    """
-```
-
-``` python
-def _dispatch_to_action(
-    self,
-    action: str,  # Action name to dispatch (matched against @plugin_action tags)
-    **kwargs,     # Forwarded verbatim to the resolved handler
-) -> Any:         # Whatever the handler returns
-    """
-    T28: dispatch `action` to its `@plugin_action`-tagged handler.
-    
-    Walks the instance's MRO for a method tagged `_plugin_action == action`
-    (the SAME markers `collect_plugin_actions` / `supported_actions` are built
-    from) and calls it as `handler(self, **kwargs)`. Unknown actions raise the
-    typed `PluginInputError(fields_invalid=["action"])` (CR-5) — identical
-    behaviour to the hand-rolled dispatchers this replaces.
-    
-    Dispatcher-style plugins (MediaProcessing / Graph / Text) collapse their
-    `execute` to a one-liner instead of reimplementing the MRO walk in every
-    plugin (the 5x copy SG-44 + this helper retire):
-    
-        @plugin_action("separate_vocals")
-        def _separate_vocals(self, **kwargs): ...
-    
-        supported_actions = collect_plugin_actions(MyPlugin)
-    
-        def execute(self, action="separate_vocals", **kwargs):
-            return self.dispatch_to_action(action, **kwargs)
-    """
-```
-
-#### Classes
-
-``` python
-@runtime_checkable
-class FileBackedDTO(Protocol):
-    "Protocol for Data Transfer Objects that serialize to disk for zero-copy transfer."
-    
-    def to_temp_file(self) -> str: # Absolute path to the temporary file
-        "Save the data to a temporary file and return the absolute path."
-```
-
-``` python
-@dataclass
-class ConfigOption:
-    "CR-11: one live option for a dynamic config field, with optional metadata."
-    
-    value: Any  # option value (e.g. "gemini-2.5-flash")
-    label: str  # display label (e.g. "Gemini 2.5 Flash")
-    metadata: Dict[str, Any] = dataclasses.field(default_factory=dict)  # token limits, descriptions, ...
-```
-
-``` python
-@dataclass
-class FieldOptions:
-    """
-    CR-11: the live option domain for one dynamic config field.
-    
-    Kept SEPARATE from the static config_schema (which CR-8 hashes for drift
-    detection). The plugin-config UI merges these live options on top of the
-    static schema; folding them into the schema would make every API plugin
-    perpetually 'drift'.
-    """
-    
-    options: List[ConfigOption]  # current valid options
-    constraints: Dict[str, Any] = dataclasses.field(default_factory=dict)  # derived field-constraint overrides
-```
-
-``` python
-@dataclass
-class EnvVarSpec:
-    """
-    CR-12: one entry of a plugin's spawn-time worker-environment contract.
-    
-    A plugin declares the environment variables its worker subprocess reads at
-    startup via `WORKER_ENV: ClassVar[List[EnvVarSpec]]`. Worker env vars are
-    FIXED AT SPAWN — changing one requires a worker RESPAWN, so the substrate
-    routes such changes through `reload_plugin`, never `reconfigure` (the env is
-    baked into the subprocess at `Popen` and can't be mutated in-process). This
-    is the lifecycle distinction from a normal config field (reconfigurable in
-    place via `reconfigure`/`_release_<trigger>`).
-    
-    Two flavors share this one declaration:
-    
-      - `secret=True`  : value resolved from the `SecretStore` (masked; never
-                         persisted in the config store, echoed in config_schema,
-                         or logged). A secret never carries a `default` — a
-                         baked-in secret is a leak.
-      - `secret=False` : visible value resolved from the override chain
-                         (operator override > manifest `install.env_vars` >
-                         this `default`); safe to display.
-    
-    Both share one injection seam: the substrate composes the resolved
-    {name: value} overlay at load time and injects it into the worker env at
-    spawn (extending the existing CJM_PLUGIN_DATA_DIR / CJM_MODELS_DIR injection).
-    This is "derive from behaviour, not metadata" applied to the spawn env: the
-    plugin declares WHICH vars it consumes + whether each is secret/required;
-    the substrate owns resolution + injection.
-    
-    `options` is a forward seam for visible vars with a finite domain (e.g. a
-    device selector enumerating GPUs); unused today but reserved so the
-    plugin-config UI / a future `set-env` surface isn't blocked.
-    """
-    
-    name: str  # The env var the worker reads, e.g. "GEMINI_API_KEY"
-    secret: bool = False  # True -> value resolved from the SecretStore, masked
-    required: bool = False  # Worker can't do useful work until this is satisfied
-    label: str = ''  # Display label for CLI / GUI affordances
-    description: str = ''  # Help text for CLI / GUI
-    default: Optional[str]  # Visible vars only; secrets must leave this None
-    options: Optional[List[str]]  # Forward seam: finite domain for a visible var (unused today)
-```
-
-``` python
-class PluginInterface(ABC):
-    """
-    Abstract base class for all plugins (both local workers and remote proxies).
-    
-    CR-4 extended this surface with: prefetch hook (SG-19), made cleanup optional
-    (SG-43), reconfigure split + RELOAD_TRIGGER declarative-helper (lifecycle
-    hook split), and cooperative-cancellation primitives (SG-16 — flag + callback
-    + context manager).
-    
-    Abstract methods: `name`, `version`, `initialize`, `execute`, `get_config_schema`,
-    `get_current_config`. Concrete defaults (overridable): `execute_stream`,
-    `cleanup`, `prefetch`, `reconfigure`, `cancel`, `check_cancel`,
-    `register_cancel_callback`, `cancel_signal_to`, `report_progress`,
-    `fields_that_changed`, `reconfigure_with_triggers`, `on_disable`, `on_enable`.
-    """
-    
-    def name(self) -> str: # Unique identifier for this plugin
-            """Unique plugin identifier."""
-            ...
-    
-        @property
-        @abstractmethod
-        def version(self) -> str: # Semantic version string (e.g., "1.0.0")
-        "Unique plugin identifier."
-    
-    def version(self) -> str: # Semantic version string (e.g., "1.0.0")
-            """Plugin version."""
-            ...
-    
-        @abstractmethod
-        def initialize(
-            self,
-            config: Optional[Dict[str, Any]] = None # Configuration dictionary
-        ) -> None
-        "Plugin version."
-    
-    def initialize(
-            self,
-            config: Optional[Dict[str, Any]] = None # Configuration dictionary
-        ) -> None
-        "Initialize or re-configure the plugin.
-
-CR-4: this is "first-time setup" — called once after construction with
-the initial config. Substrate uses `reconfigure(old, new)` for delta
-updates afterwards. Plugins predating CR-4 see no behavior change since
-the default `reconfigure()` body delegates to `reconfigure_with_triggers`
-which is a no-op unless the plugin opts in via RELOAD_TRIGGER metadata."
-    
-    def execute(
-            self,
-            *args,
-            **kwargs
-        ) -> Any: # Plugin-specific output
-        "Execute the plugin's main functionality."
-    
-    def execute_stream(
-            self,
-            *args,
-            **kwargs
-        ) -> Generator[Any, None, None]: # Yields partial results
-        "Stream execution results chunk by chunk."
-    
-    def get_config_schema(self) -> Dict[str, Any]: # JSON Schema for configuration
-            """Return JSON Schema describing the plugin's configuration options."""
-            ...
-    
-        @abstractmethod
-        def get_current_config(self) -> Dict[str, Any]: # Current configuration values
-        "Return JSON Schema describing the plugin's configuration options."
-    
-    def get_current_config(self) -> Dict[str, Any]: # Current configuration values
-            """Return the current configuration state as a dictionary."""
-            ...
-    
-        def get_config_options(self) -> Dict[str, "FieldOptions"]
-        "Return the current configuration state as a dictionary."
-    
-    def get_config_options(self) -> Dict[str, "FieldOptions"]:
-            """CR-11: live option domains for dynamic config fields, keyed by field name.
-    
-            Optional. Default: {} (fully static plugins). For fields whose valid
-            domain is determined at runtime (e.g. an API model list), return a
-            `FieldOptions` carrying current `ConfigOption` values + per-option
-            metadata (token limits, etc.) + optional derived constraints. Runs in
-            the worker subprocess (has the plugin's deps + credentials).
-    
-            Kept SEPARATE from get_config_schema(): the schema is static + hashed for
-            CR-8 drift detection; these options are the live, un-hashed companion the
-            plugin-config UI merges on top. A fetch failure should raise a typed CR-5
-            error; the substrate's PluginManager.get_config_options accessor degrades
-            to {} so the UI can fall back to the static schema.
-            """
-            return {}
-    
-        def cleanup(self) -> None
-        "CR-11: live option domains for dynamic config fields, keyed by field name.
-
-Optional. Default: {} (fully static plugins). For fields whose valid
-domain is determined at runtime (e.g. an API model list), return a
-`FieldOptions` carrying current `ConfigOption` values + per-option
-metadata (token limits, etc.) + optional derived constraints. Runs in
-the worker subprocess (has the plugin's deps + credentials).
-
-Kept SEPARATE from get_config_schema(): the schema is static + hashed for
-CR-8 drift detection; these options are the live, un-hashed companion the
-plugin-config UI merges on top. A fetch failure should raise a typed CR-5
-error; the substrate's PluginManager.get_config_options accessor degrades
-to {} so the UI can fall back to the static schema."
-    
-    def cleanup(self) -> None:
-            """Clean up resources when plugin is unloaded.
-            
-            CR-4: made optional (SG-43 closure). Was `@abstractmethod` before; every
-            audited plugin overrode it with a near-no-op, so the default is now a
-            no-op and plugin authors override only when they have non-trivial
-            teardown (file handles, GPU memory, database connections). The
-            substrate's worker /cleanup endpoint calls this regardless.
-            """
-            pass
-    
-        def prefetch(self) -> None
-        "Clean up resources when plugin is unloaded.
-
-CR-4: made optional (SG-43 closure). Was `@abstractmethod` before; every
-audited plugin overrode it with a near-no-op, so the default is now a
-no-op and plugin authors override only when they have non-trivial
-teardown (file handles, GPU memory, database connections). The
-substrate's worker /cleanup endpoint calls this regardless."
-    
-    def prefetch(self) -> None:
-            """Acquire heavy resources eagerly without invoking execute().
-            
-            CR-4 (SG-19): default no-op. Plugin authors override when downstream
-            callers benefit from eager acquisition — typically transcription /
-            inference plugins that lazy-download models on first execute. The
-            substrate's prefetch_plugin(name) API + worker /prefetch endpoint
-            invoke this. Should be idempotent (safe to call multiple times) since
-            the substrate may pre-warm at load time AND on operator request.
-            """
-            pass
-    
-        def reconfigure(
-            self,
-            old_config: Optional[Dict[str, Any]],  # Previous configuration values
-            new_config: Optional[Dict[str, Any]],  # New configuration values to apply
-        ) -> None
-        "Acquire heavy resources eagerly without invoking execute().
-
-CR-4 (SG-19): default no-op. Plugin authors override when downstream
-callers benefit from eager acquisition — typically transcription /
-inference plugins that lazy-download models on first execute. The
-substrate's prefetch_plugin(name) API + worker /prefetch endpoint
-invoke this. Should be idempotent (safe to call multiple times) since
-the substrate may pre-warm at load time AND on operator request."
-    
-    def reconfigure(
-            self,
-            old_config: Optional[Dict[str, Any]],  # Previous configuration values
-            new_config: Optional[Dict[str, Any]],  # New configuration values to apply
-        ) -> None
-        "Apply a configuration change without re-running full initialize().
-
-CR-4 completion (2026-05-25): reconfigure is the substrate's canonical
-delta path - `PluginManager.update_plugin_config` routes here, NOT through
-a bare `initialize(new_config)`. It fires `_release_<trigger>` releases for
-changed RELOAD_TRIGGER fields, then re-applies config (see body below).
-
-Distinction from initialize(): initialize sets up persistent state once
-after construction; reconfigure applies delta updates and is the
-canonical entry point for hot-reload via the substrate's
-update_plugin_config path."
-    
-    def fields_that_changed(
-            self,
-            old: Dict[str, Any],  # Previous config snapshot
-            new: Dict[str, Any],  # Proposed new config snapshot
-        ) -> Set[str]:  # Field names whose values differ between old and new
-        "Return the set of field names whose values differ between old and new.
-
-Includes fields present in only one dict (treated as a change to/from
-the implicit None). Equality is structural via `!=`; nested dicts /
-lists compare by value, not identity. Hashable-vs-unhashable values
-compare correctly because we never put them in a set themselves."
-    
-    def reconfigure_with_triggers(
-            self,
-            old_config: Dict[str, Any],  # Previous configuration values
-            new_config: Dict[str, Any],  # New configuration values being applied
-        ) -> None
-        "CR-4 helper: walk RELOAD_TRIGGER metadata + fire `_release_<trigger>` methods.
-
-Resolution sequence:
-
-  1. Find the plugin's `config_class` attribute (a dataclass). Absent
-     means the plugin hasn't opted into the declarative pattern; the
-     helper returns silently.
-  2. Compute the diff between `old_config` and `new_config` via
-     `fields_that_changed`.
-  3. For each changed field, read its `RELOAD_TRIGGER` metadata key
-     (if any) and accumulate the trigger names into a set (de-duping
-     when multiple fields share a trigger).
-  4. For each trigger, call `self._release_<trigger>()` if it exists
-     on the instance.
-
-Plugin authors opt in by:
-
-  - Setting `config_class = MyConfigDataclass` as a class attribute.
-  - Annotating field metadata with `{RELOAD_TRIGGER: "model"}` etc.
-  - Implementing matching `_release_model(self)` instance methods.
-
-Plugins WITHOUT config_class or RELOAD_TRIGGER metadata land here as a
-no-op — safe default for the SG-T3tr migration window where the
-cascade hasn't yet adopted the declarative pattern everywhere."
-    
-    def cancel(self) -> None:
-            """Request cooperative cancellation of the current execute() call.
-            
-            CR-4: default sets the substrate-tracked `_cancel_requested` flag and
-            fires any callbacks registered via `register_cancel_callback`.
-            
-            Plugin authors who need extra teardown logic (signaling a subprocess,
-            closing a network connection) override `cancel()` and SHOULD call
-            `super().cancel()` to preserve the flag-setting + callback-fire
-            behavior. The plugin's `execute()` polls via `check_cancel()` at safe
-            interruption points and unwinds when it raises `PluginCancelledError`.
-            """
-            self._cancel_requested = True
-            for cb in list(getattr(self, "_cancel_callbacks", ()))
-        "Request cooperative cancellation of the current execute() call.
-
-CR-4: default sets the substrate-tracked `_cancel_requested` flag and
-fires any callbacks registered via `register_cancel_callback`.
-
-Plugin authors who need extra teardown logic (signaling a subprocess,
-closing a network connection) override `cancel()` and SHOULD call
-`super().cancel()` to preserve the flag-setting + callback-fire
-behavior. The plugin's `execute()` polls via `check_cancel()` at safe
-interruption points and unwinds when it raises `PluginCancelledError`."
-    
-    def check_cancel(self) -> None:
-            """Raise `PluginCancelledError` if cancellation has been requested.
-            
-            CR-4 (SG-16 polling primitive): plugin authors call this at safe
-            interruption points inside `execute()`. The substrate sets the flag via
-            `cancel()` (typically driven by an operator's "Cancel" button); the
-            next `check_cancel` call surfaces the cancellation as a typed exception
-            that unwinds execute() cleanly.
-            
-            The substrate's worker /execute wrapper resets the flag before each
-            call so cancellation doesn't leak from one job into the next.
-            """
-            if self._cancel_requested
-        "Raise `PluginCancelledError` if cancellation has been requested.
-
-CR-4 (SG-16 polling primitive): plugin authors call this at safe
-interruption points inside `execute()`. The substrate sets the flag via
-`cancel()` (typically driven by an operator's "Cancel" button); the
-next `check_cancel` call surfaces the cancellation as a typed exception
-that unwinds execute() cleanly.
-
-The substrate's worker /execute wrapper resets the flag before each
-call so cancellation doesn't leak from one job into the next."
-    
-    def register_cancel_callback(
-            self,
-            callback: Callable[[], None],  # Called when cancel() fires
-        ) -> None
-        "Register a callback that fires when cancel() is called.
-
-CR-4 (SG-16 callback primitive): for plugins that can't easily insert
-polling at strategic points (e.g., a plugin wrapping a blocking C
-extension). Callbacks should be non-blocking and idempotent. Multiple
-callbacks can be registered; all fire in registration order when
-cancel() is invoked. A misbehaving callback that raises is logged
-and skipped — the remaining callbacks still fire."
-    
-    def cancel_signal_to(
-            self,
-            callback: Callable[[], None],  # Cancellation callback scoped to the with-block
-        ) -> Generator[None, None, None]
-        "Context manager registering `callback` for the duration of the with-block.
-
-Useful for binding cancellation to a finite-scope resource (a subprocess,
-a network request, a temporary file handle) without needing to
-deregister manually. Pairs with `register_cancel_callback` for cases
-where lifetime is tied to a `try:`/`finally:` block.
-
-Example:
-
-    def execute(self, *args, **kwargs):
-        proc = subprocess.Popen(...)
-        with self.cancel_signal_to(lambda: proc.terminate()):
-            return proc.wait()"
-    
-    def on_disable(self) -> None:
-            """CR-2: signal that the substrate has marked this plugin as disabled.
-            
-            Worker stays alive; plugin can release heavy resources here (e.g., free
-            GPU memory, close model files). The substrate fires this hook AFTER any
-            in-flight job for this plugin finishes — see PluginManager.disable_plugin
-            deferred-hook semantics. Default: no-op; plugins opt in by overriding.
-            """
-            pass
-    
-        def on_enable(self) -> None
-        "CR-2: signal that the substrate has marked this plugin as disabled.
-
-Worker stays alive; plugin can release heavy resources here (e.g., free
-GPU memory, close model files). The substrate fires this hook AFTER any
-in-flight job for this plugin finishes — see PluginManager.disable_plugin
-deferred-hook semantics. Default: no-op; plugins opt in by overriding."
-    
-    def on_enable(self) -> None:
-            """CR-2: signal that the substrate has marked this plugin as re-enabled.
-            
-            Plugin can eagerly re-acquire heavy resources here, or rely on lazy
-            re-acquisition via the next execute() call (substrate doesn't prefer
-            one strategy over the other). Default: no-op; plugins opt in by overriding.
-            """
-            pass
-    
-        def report_progress(
-            self,
-            progress: float, # 0.0 to 1.0, or -1.0 for indeterminate
-            message: str = "" # Descriptive status message
-        ) -> None
-        "CR-2: signal that the substrate has marked this plugin as re-enabled.
-
-Plugin can eagerly re-acquire heavy resources here, or rely on lazy
-re-acquisition via the next execute() call (substrate doesn't prefer
-one strategy over the other). Default: no-op; plugins opt in by overriding."
-    
-    def report_progress(
-            self,
-            progress: float, # 0.0 to 1.0, or -1.0 for indeterminate
-            message: str = "" # Descriptive status message
-        ) -> None
-        "Report execution progress. Call during execute() to update status."
-    
-    def report_usage(
-            self,
-            usage: Dict[str, float],  # Measured usage for this execute, keyed by plugin-defined unit name
-        ) -> None
-        "SG-54: report measured API/service usage for the current execute() call.
-
-Unit-agnostic by design — the plugin (which holds the API response)
-supplies whatever unit names it measures: {"input_tokens": .., "output_tokens": ..}
-for an LLM, {"pages": ..} for OCR, {"characters": ..} for TTS,
-{"credits"/"requests"/"minutes": ..} for others. The substrate stores +
-accumulates per unit name WITHOUT interpreting them (summed across runs in
-the empirical store's api_usage_totals). Pricing is deliberately NOT here
-(volatile, per-service, often not API-accessible) — a consumer-side rate
-table turns raw units into cost. "Derive from behaviour": the plugin
-MEASURES actual usage from the response; the substrate aggregates.
-
-Stored on `self._last_api_usage`; the worker exposes it via /stats and the
-substrate folds it into the post-execute ResourceSample. The worker resets
-it before each execute so a failed/usage-less call can't inherit stale
-usage. Default: store-only (parallel to report_progress)."
-```
-
-``` python
-class _CR4MinimalPlugin(PluginInterface):
-    "Concrete plugin satisfying abstracts; relies on CR-4 default cleanup()."
-    
-    def name(self) -> str: return "cr4-minimal"
-        @property
-        def version(self) -> str: return "0.0.0"
-    
-    def version(self) -> str: return "0.0.0"
-        def initialize(self, config=None): self._cfg = dict(config or {})
-    
-    def initialize(self, config=None): self._cfg = dict(config or {})
-        def execute(self, *args, **kwargs): return None
-    
-    def execute(self, *args, **kwargs): return None
-        def get_config_schema(self) -> Dict[str, Any]: return {}
-    
-    def get_config_schema(self) -> Dict[str, Any]: return {}
-        def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
-    
-    def get_current_config(self) -> Dict[str, Any]: return dict(getattr(self, "_cfg", {}))
-```
-
-#### Variables
-
-``` python
-RELOAD_TRIGGER = 'reload_trigger'
-WORKER_ENV_TEMPLATE_PLACEHOLDERS: Set[str]
-```
-
 ### Plugin Manager (`manager.ipynb`)
 
 > Plugin discovery, loading, and lifecycle management system
@@ -2464,7 +2545,7 @@ def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     
     CR-3: prefer typed `get_system_status()` over magic-string dispatcher.
     Duck-types because the substrate references `system_monitor` as a
-    generic `PluginInterface` — CR-1's host-no-imports rule means substrate
+    generic `ToolCapability` — CR-1's host-no-imports rule means substrate
     does not import `cjm-infra-plugin-system` to type-narrow the reference.
     Proxies after CR-3 expose `get_system_status` as a bound method that
     POSTs to `/get_system_status` and returns `Optional[Dict[str, Any]]`.
@@ -2475,7 +2556,7 @@ def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     
     CR-3: prefer typed `get_system_status()` over magic-string dispatcher.
     Duck-types because the substrate references `system_monitor` as a
-    generic `PluginInterface` — CR-1's host-no-imports rule means substrate
+    generic `ToolCapability` — CR-1's host-no-imports rule means substrate
     does not import `cjm-infra-plugin-system` to type-narrow the reference.
     Proxies after CR-3 expose `get_system_status` as a bound method that
     POSTs to `/get_system_status` and returns `Optional[Dict[str, Any]]`.
@@ -2923,7 +3004,7 @@ def unload_all(self) -> None:
 def get_plugin(
     self,
     name_or_id:str # Plugin name (default-loaded) or instance_id (multi-instance)
-) -> Optional[PluginInterface]: # Plugin proxy instance or None
+) -> Optional[ToolCapability]: # Plugin proxy instance or None
     """
     Get a loaded plugin's proxy by name or instance_id (CR-10).
     
@@ -3409,7 +3490,7 @@ def get_compatible_for_current_platform(self) -> List[PluginMeta]:  # Plugins co
 class PluginManager:
     def __init__(
         self,
-        plugin_interface:Type[PluginInterface]=PluginInterface, # Base interface for type checking
+        plugin_interface:Type[ToolCapability]=ToolCapability, # Base interface for type checking
         search_paths:Optional[List[Path]]=None, # Custom manifest search paths
         scheduler:Optional[ResourceScheduler]=None, # Resource allocation policy
         config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
@@ -3422,7 +3503,7 @@ class PluginManager:
     
     def __init__(
             self,
-            plugin_interface:Type[PluginInterface]=PluginInterface, # Base interface for type checking
+            plugin_interface:Type[ToolCapability]=ToolCapability, # Base interface for type checking
             search_paths:Optional[List[Path]]=None, # Custom manifest search paths
             scheduler:Optional[ResourceScheduler]=None, # Resource allocation policy
             config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
@@ -4518,7 +4599,7 @@ async def get_progress_async(self) -> Dict[str, Any]: # {progress: float, messag
 def on_disable(self) -> bool:  # True if hook signal accepted by worker
     """CR-2: forward the substrate's on_disable signal to the worker process.
     
-    Plugin can opt in via PluginInterface.on_disable(); default implementation
+    Plugin can opt in via ToolCapability.on_disable(); default implementation
     is a no-op so silent-pass-through is the norm. Failures to reach the
     worker (already terminated, network blip) are logged-and-swallowed —
     the substrate-side enable/disable bookkeeping doesn't depend on the
@@ -4528,7 +4609,7 @@ def on_disable(self) -> bool:  # True if hook signal accepted by worker
     """
     CR-2: forward the substrate's on_disable signal to the worker process.
     
-    Plugin can opt in via PluginInterface.on_disable(); default implementation
+    Plugin can opt in via ToolCapability.on_disable(); default implementation
     is a no-op so silent-pass-through is the norm. Failures to reach the
     worker (already terminated, network blip) are logged-and-swallowed —
     the substrate-side enable/disable bookkeeping doesn't depend on the
@@ -6215,6 +6296,30 @@ SCHEMA_MIN_LEN = 'minLength'  # Minimum string length
 SCHEMA_MAX_LEN = 'maxLength'  # Maximum string length
 SCHEMA_PATTERN = 'pattern'  # Regex pattern for strings
 SCHEMA_FORMAT = 'format'  # String format (email, uri, date, etc.)
+```
+
+### Typed Wire Layer (`wire.ipynb`)
+
+> Typed data transfer at the worker boundary — the zero-copy
+> `FileBackedDTO`
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.wire import (
+    FileBackedDTO
+)
+```
+
+#### Classes
+
+``` python
+@runtime_checkable
+class FileBackedDTO(Protocol):
+    "Protocol for Data Transfer Objects that serialize to disk for zero-copy transfer."
+    
+    def to_temp_file(self) -> str: # Absolute path to the temporary file
+        "Save the data to a temporary file and return the absolute path."
 ```
 
 ### Universal Worker (`worker.ipynb`)

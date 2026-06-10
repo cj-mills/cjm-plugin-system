@@ -33,7 +33,8 @@ from cjm_plugin_system.core.errors import (
     ResourceShortfall,
     WorkerOOMError,
 )
-from .interface import FileBackedDTO, PluginInterface
+from .capability import ToolCapability
+from .wire import FileBackedDTO
 from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
 
 # CR-3 follow-up: module-level logger so the proxy can log close-to-wire
@@ -47,7 +48,7 @@ from fastcore.basics import patch
 
 
 # %% ../../nbs/core/proxy.ipynb #proxy-class
-class RemotePluginProxy(PluginInterface):
+class RemotePluginProxy(ToolCapability):
     """Proxy that forwards plugin calls to an isolated Worker subprocess."""
     
     def __init__(
@@ -562,7 +563,7 @@ RemotePluginProxy.get_progress_async = get_progress_async
 def on_disable(self) -> bool:  # True if hook signal accepted by worker
     """CR-2: forward the substrate's on_disable signal to the worker process.
     
-    Plugin can opt in via PluginInterface.on_disable(); default implementation
+    Plugin can opt in via ToolCapability.on_disable(); default implementation
     is a no-op so silent-pass-through is the norm. Failures to reach the
     worker (already terminated, network blip) are logged-and-swallowed —
     the substrate-side enable/disable bookkeeping doesn't depend on the

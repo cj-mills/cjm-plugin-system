@@ -1411,7 +1411,7 @@ def _validate_manifest_v2_dict(
     # resolve them when it spawns the worker. Surface the plugin-author bug at
     # validate/release time rather than first load_plugin.
     if isinstance(code, dict) and code.get("worker_env") is not None:
-        from cjm_plugin_system.core.interface import template_check_placeholders
+        from cjm_plugin_system.core.capability import template_check_placeholders
         from cjm_plugin_system.core.errors import PluginConfigError
         worker_env = code["worker_env"]
         if not isinstance(worker_env, list):

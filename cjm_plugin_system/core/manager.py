@@ -36,7 +36,7 @@ from cjm_plugin_system.core.errors import (
     PluginConfigError, PluginDisabledError, PluginResourceError,
     ResourceShortfall, WorkerOOMError,
 )
-from .interface import PluginInterface
+from .capability import ToolCapability
 from cjm_plugin_system.core.manifest_format import (
     ManifestV2, load_manifest, manifest_to_dict, compute_config_schema_hash,
 )
@@ -57,7 +57,7 @@ class PluginManager:
     """Manages plugin discovery, loading, and lifecycle via process isolation."""
     def __init__(
         self,
-        plugin_interface:Type[PluginInterface]=PluginInterface, # Base interface for type checking
+        plugin_interface:Type[ToolCapability]=ToolCapability, # Base interface for type checking
         search_paths:Optional[List[Path]]=None, # Custom manifest search paths
         scheduler:Optional[ResourceScheduler]=None, # Resource allocation policy
         config_store:Optional[PluginConfigStore]=None, # CR-2: persistence backend; lazy LocalPluginConfigStore default per OQ-4
@@ -80,7 +80,7 @@ class PluginManager:
             self.search_paths = search_paths
         
         self.scheduler = scheduler or PermissiveScheduler()
-        self.system_monitor: Optional[PluginInterface] = None
+        self.system_monitor: Optional[ToolCapability] = None
         self.discovered: List[PluginMeta] = []
         self.plugins: Dict[str, PluginMeta] = {}
         # CR-10: per-instance state keyed by instance_id. Default-loaded plugins
@@ -175,7 +175,7 @@ def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     
     CR-3: prefer typed `get_system_status()` over magic-string dispatcher.
     Duck-types because the substrate references `system_monitor` as a
-    generic `PluginInterface` — CR-1's host-no-imports rule means substrate
+    generic `ToolCapability` — CR-1's host-no-imports rule means substrate
     does not import `cjm-infra-plugin-system` to type-narrow the reference.
     Proxies after CR-3 expose `get_system_status` as a bound method that
     POSTs to `/get_system_status` and returns `Optional[Dict[str, Any]]`.
@@ -770,7 +770,7 @@ def _resolve_worker_env(
     install/release time via `cjm-ctl validate` + `template_check_placeholders`,
     not here. All values are fixed at spawn — a change requires `reload_plugin`.
     """
-    from cjm_plugin_system.core.interface import expand_worker_env_template
+    from cjm_plugin_system.core.capability import expand_worker_env_template
 
     cfg = get_config()
     # Build the placeholder context once per load. The substrate is the
@@ -1174,7 +1174,7 @@ PluginManager.unload_all = unload_all
 def get_plugin(
     self,
     name_or_id:str # Plugin name (default-loaded) or instance_id (multi-instance)
-) -> Optional[PluginInterface]: # Plugin proxy instance or None
+) -> Optional[ToolCapability]: # Plugin proxy instance or None
     """Get a loaded plugin's proxy by name or instance_id (CR-10).
     
     Lookup order: self.instances first (covers both default plugin_name and
