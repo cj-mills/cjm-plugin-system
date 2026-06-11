@@ -12,7 +12,7 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (18)
+    ├── core/ (19)
     │   ├── adapter.ipynb          # The typed-task half of the capability-unit fracture (pass-2 Thread 3) —
     │   ├── capability.ipynb       # The tool-capability interface — the manage-the-tool half of the capability-unit fracture (pass-2 Thread 3)
     │   ├── config.ipynb           # Project-level configuration for paths, runtime settings, and environment management
@@ -24,6 +24,7 @@ pip install cjm_plugin_system
     │   ├── manifest_format.ipynb  # Typed parser + writer for the nested v2.0 manifest layout per the 2026-05-19 substrate audit's CR-8. Substrate manifests transitioned from a flat top-level JSON object to a four-section nested layout: `install` (deployment-specific facts populated at install time), `code` (code-derived facts refreshed by `cjm-ctl regenerate-manifest`), `drift_tracking` (a config_schema hash that records the witness shape so live-vs-stored comparisons can detect drift), and `overrides` (an operator-supplied overlay placeholder).
     │   ├── metadata.ipynb         # Data structures for plugin metadata
     │   ├── platform.ipynb         # Cross-platform utilities for process management, path handling, and system detection
+    │   ├── ports.ipynb            # Capability compositions as DAGs of invocation nodes with typed input/output
     │   ├── proxy.ipynb            # Bridge between Host application and isolated Worker processes
     │   ├── queue.ipynb            # Resource-aware job queue for sequential plugin execution with cancellation support
     │   ├── scheduling.ipynb       # Resource scheduling policies for plugin execution
@@ -38,7 +39,7 @@ pip install cjm_plugin_system
     ├── bootstrap.ipynb  # One-call factory that assembles a PluginManager + JobQueue + plugin bindings — closes the demo-app boilerplate duplication audited across 5 substrate consumers.
     └── cli.ipynb        # CLI tool for declarative plugin management
 
-Total: 23 notebooks across 2 directories
+Total: 24 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -57,6 +58,7 @@ graph LR
     core_manifest_format["core.manifest_format<br/>Manifest Format (v2.0)"]
     core_metadata["core.metadata<br/>Plugin Metadata"]
     core_platform["core.platform<br/>Platform Utilities"]
+    core_ports["core.ports<br/>Composition Ports"]
     core_proxy["core.proxy<br/>Remote Plugin Proxy"]
     core_queue["core.queue<br/>Job Queue"]
     core_scheduling["core.scheduling<br/>Scheduling"]
@@ -69,51 +71,53 @@ graph LR
     utils_validation["utils.validation<br/>Configuration Validation"]
 
     bootstrap --> core_manager
-    bootstrap --> core_scheduling
     bootstrap --> core_queue
+    bootstrap --> core_scheduling
+    cli --> core_metadata
+    cli --> core_manifest_format
     cli --> core_platform
     cli --> core_config
-    cli --> core_manifest_format
-    cli --> core_metadata
     core_capability --> core_errors
     core_empirical_store --> utils_hashing
     core_interface --> core_capability
     core_interface --> core
-    core_interface --> core_interface
     core_interface --> core_wire
-    core_manager --> core_secret_store
-    core_manager --> core_empirical_store
-    core_manager --> core_scheduling
+    core_interface --> core_interface
     core_manager --> core_metadata
-    core_manager --> core_errors
+    core_manager --> core_secret_store
+    core_manager --> core_capability
     core_manager --> core_manifest_format
-    core_manager --> core__telemetry
-    core_manager --> core_proxy
+    core_manager --> core_empirical_store
+    core_manager --> core_errors
+    core_manager --> utils_validation
     core_manager --> core_config_store
     core_manager --> core_config
-    core_manager --> utils_validation
-    core_manager --> core_capability
+    core_manager --> core__telemetry
+    core_manager --> core_scheduling
+    core_manager --> core_proxy
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
-    core_proxy --> core_errors
+    core_ports --> core_errors
     core_proxy --> core_platform
-    core_proxy --> core_wire
-    core_proxy --> core_config
     core_proxy --> core_capability
+    core_proxy --> core_errors
+    core_proxy --> core_config
+    core_proxy --> core_wire
     core_queue --> core_errors
+    core_queue --> core_ports
     core_queue --> core__telemetry
     core_scheduling --> core_metadata
-    core_worker --> core_capability
     core_worker --> core_errors
-    core_worker --> core_wire
     core_worker --> core_platform
+    core_worker --> core_capability
+    core_worker --> core_wire
     utils_cache_paths --> core_empirical_store
     utils_cache_paths --> utils_hashing
     utils_validation --> core_errors
 ```
 
-*43 cross-module dependencies detected*
+*45 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -2612,6 +2616,55 @@ async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system tele
 ```
 
 ``` python
+async def get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
+    """
+    Public async system-telemetry accessor (stage 3 / CR-16).
+    
+    The JobQueue's multi-lane admission consumes this through the
+    `JobQueueDependencies` protocol (defensively via getattr). Thin wrapper
+    over `_get_global_stats_async` — same CR-3 duck-type semantics.
+    """
+```
+
+``` python
+def get_admission_profile(
+    self,
+    name_or_id:str # Plugin name (default instance) or instance_id (multi-instance)
+) -> Optional[Dict[str, Any]]: # {'gpu_memory_mb_peak_max','memory_mb_peak_max','sample_count'} or None
+    """
+    Empirical resource profile for a loaded instance's CURRENT config
+    (stage 3 / CR-16 multi-lane admission).
+    
+    Reads the CR-7 empirical store at the instance's live
+    `(instance_id, config_hash)` key — the SAME keying that records samples,
+    so the profile always describes the configuration actually being run
+    (a config change = a new hash = no record = the queue runs the job
+    EXCLUSIVE until its first measurement run graduates it).
+    
+    None = no evidence (instance unknown / store disabled / no record for
+    this config). The manifest's `requires_gpu` is deliberately not part of
+    this surface — GPU use is an empirical fact, not a declaration (stage-3
+    ledger G2).
+    """
+```
+
+``` python
+def get_instance_concurrency_cap(
+    self,
+    name_or_id:str # Plugin name (default instance) or instance_id (multi-instance)
+) -> Optional[int]: # The instance's SG-33 max_concurrent_requests (None = unset)
+    """
+    Per-instance concurrency cap for queue admission (stage 3 / CR-16).
+    
+    Surfaces the SG-33 `max_concurrent_requests` setting. The queue treats
+    None as 1 (same-worker concurrency is OPT-IN per capability — e.g.
+    ffmpeg raises its cap because its sync endpoints run in a threadpool
+    and concurrent converts genuinely parallelize as subprocesses; model
+    workers stay serial-per-instance).
+    """
+```
+
+``` python
 def _check_interface_fqn(
     self,
     iface_fqn:str, # Interface FQN string from the manifest
@@ -4387,6 +4440,301 @@ def ensure_runtime_available(
 MICROMAMBA_URLS: Dict[str, str]
 ```
 
+### Composition Ports (`ports.ipynb`)
+
+> Capability compositions as DAGs of invocation nodes with typed
+> input/output
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.ports import (
+    NodeState,
+    TERMINAL_NODE_STATES,
+    OutputRef,
+    CompositionNode,
+    Composition,
+    CompositionValidationError,
+    CompositionBindingError,
+    validate_composition,
+    extract_output_field,
+    resolve_node_kwargs,
+    CompositionNodeRun,
+    CompositionRun,
+    new_composition_run
+)
+```
+
+#### Functions
+
+``` python
+def _node_dependencies(
+    node: CompositionNode,  # Node whose kwargs are scanned for OutputRef markers
+) -> Set[str]:  # Producer node ids this node depends on
+    """
+    Derive a node's dependencies from the `OutputRef` markers in its kwargs.
+    
+    Top-level kwarg values only (see `CompositionNode` docstring); duplicate
+    references to the same producer collapse into one dependency edge.
+    """
+```
+
+``` python
+def validate_composition(
+    comp: Composition,  # Composition to validate
+) -> Dict[str, Set[str]]:  # node_id -> set of upstream node ids (the derived DAG)
+    """
+    Validate a composition and return its derived dependency map.
+    
+    Raises `CompositionValidationError` on duplicate node ids, `OutputRef`
+    targets that name no node in the composition, or dependency cycles.
+    An empty composition is valid (returns `{}`) — the queue completes it
+    at submit, mirroring the empty-sequence totality precedent.
+    """
+```
+
+``` python
+def extract_output_field(
+    """
+    Extract a field from an upstream result for binding into a kwarg.
+    
+    The single substrate-owned successor of the retired `field_of` helpers:
+    dicts resolve by KEY (intent for plugin-side dict results), everything
+    else by ATTRIBUTE (typed wire DTOs). Missing fields raise
+    `CompositionBindingError` loudly — silent shape-shifting is what stage 2
+    retired (F12 fail-loudly posture).
+    """
+```
+
+``` python
+def resolve_node_kwargs(
+    """
+    Materialize a node's kwargs by resolving its `OutputRef` markers.
+    
+    Called by the executor at the moment a node becomes ready (all
+    dependencies completed) — this is where execution-time binding actually
+    happens. Static kwargs pass through untouched.
+    """
+```
+
+``` python
+def new_composition_run(
+    comp: Composition,  # Composition to run (validated here)
+    run_id: str,  # Run UUID (assigned by the queue)
+) -> CompositionRun:  # Fresh run record with derived topology
+    "Validate a composition and build its run record."
+```
+
+``` python
+def ready_nodes(
+    self: CompositionRun,
+) -> List[str]:  # Node ids that are pending with all dependencies completed
+    """
+    Nodes whose member Jobs can be created right now.
+    
+    Scan order follows the composition's node order (readability +
+    deterministic dispatch among equally-ready nodes).
+    """
+```
+
+``` python
+def record_started(
+    "Mark a node running and bind it to its member Job."
+```
+
+``` python
+def record_result(
+    self: CompositionRun,
+    node_id: str,  # Node whose member Job reached terminal status
+    state: NodeState,  # completed / failed / cancelled
+    result: Any = None,  # Member job result (if completed)
+    error: Optional[JobError] = None,  # Structured failure (if failed/cancelled)
+) -> None
+    "Record a member job's terminal outcome on its node."
+```
+
+``` python
+def skip_dependents(
+    self: CompositionRun,
+    node_id: str,  # Node whose failure/cancellation poisons its downstream
+) -> List[str]:  # Node ids newly marked skipped (transitive)
+    """
+    Mark every still-pending transitive dependent of `node_id` skipped.
+    
+    Skipped nodes never get a Job — their inputs can never exist. Runs
+    regardless of fail_fast (dependents are unrunnable either way; fail_fast
+    only governs INDEPENDENT pending members, which the executor cancels).
+    """
+```
+
+``` python
+def all_terminal(
+    self: CompositionRun,
+) -> bool:  # True when every node is in a terminal state
+    "Whether the composition has nothing left to run or wait for."
+```
+
+``` python
+def derive_terminal_status(
+    self: CompositionRun,
+) -> NodeState:  # cancelled / failed / completed
+    """
+    Derive the composition-level terminal status from member outcomes.
+    
+    Precedence:
+    1. USER cancel intent (`cancel_requested`) dominates everything.
+    2. A member failure under fail_fast lands the run `failed` — the
+       executor's housekeeping cancels of independent pending members do NOT
+       flip it to cancelled (that's what `cancel_requested` distinguishes).
+    3. A directly-cancelled member (job-level cancel, no failure, no
+       composition intent) lands the run `cancelled`.
+    4. Otherwise `completed` — including best-effort (fail_fast=False) runs
+       with failed members: "we attempted everything", matching the sequence
+       semantics this replaces. Per-node outcomes stay inspectable on
+       `node_runs` either way. (`skipped` never appears without a failed or
+       cancelled member upstream of it, so it needs no clause of its own.)
+    """
+```
+
+``` python
+def results_by_node(
+    self: CompositionRun,
+) -> Dict[str, Any]:  # node_id -> result, for completed nodes only
+    """
+    Completed members' results keyed by node id (what host folds consume,
+    and what `resolve_node_kwargs` reads at advancement time).
+    """
+```
+
+#### Classes
+
+``` python
+class NodeState(str, Enum):
+    """
+    State of one composition node (and, for the terminal subset, of a
+    whole composition run).
+    
+    `skipped` is composition-specific: a node whose transitive dependencies
+    failed/cancelled can never run (its inputs will never exist) and is
+    recorded as skipped rather than getting a Job at all. Composition-level
+    status uses the running/completed/failed/cancelled subset.
+    """
+```
+
+``` python
+class OutputRef:
+    """
+    Binding marker: this kwarg's value comes from an upstream node's result.
+    
+    Placed directly in a `CompositionNode.kwargs` value position. `field=None`
+    binds the WHOLE result (fan-in folds); a field name extracts one field via
+    `extract_output_field` (dict key or typed-result attribute). Frozen so
+    markers are hashable + safely shareable across nodes.
+    """
+```
+
+``` python
+@dataclass
+class CompositionNode:
+    """
+    One capability invocation in a composition.
+    
+    `kwargs` mixes static values with `OutputRef` markers; the markers are
+    scanned (top-level values only — nested containers are not searched, by
+    design: evidence needs single-position bindings, and a nested-marker
+    grammar is seam-admitted later) to derive the node's dependencies.
+    """
+    
+    id: str  # Unique node id within the composition
+    plugin_instance_id: str  # Target capability instance
+    kwargs: Dict[str, Any] = field(...)  # Static values + OutputRef markers
+    priority: int = 0  # Per-node priority override (0 = inherit composition priority)
+```
+
+``` python
+@dataclass
+class Composition:
+    """
+    A static DAG of capability-invocation nodes, submitted as one unit.
+    
+    `fail_fast=True` (default, matching the audit-locked sequence default):
+    on a member failure, pending independent members are cancelled, in-flight
+    members run to completion, transitive dependents are skipped, and the
+    composition lands `failed`. `fail_fast=False` is best-effort: independent
+    members continue; only transitive dependents of the failure are skipped.
+    """
+    
+    nodes: List[CompositionNode]  # The invocation nodes (order = readability + ready-scan order)
+    fail_fast: bool = True  # Halt independent pending members on first failure
+    priority: int = 0  # Composition-level priority (per-node override possible)
+```
+
+``` python
+class CompositionValidationError(ValueError):
+    """
+    A composition failed submit-time validation (duplicate ids, unresolved
+    `OutputRef` targets, or a dependency cycle).
+    """
+```
+
+``` python
+class CompositionBindingError(RuntimeError):
+    """
+    An `OutputRef` could not be resolved against the producer's recorded
+    result at execution time (missing producer result, missing key/attribute).
+    """
+```
+
+``` python
+@dataclass
+class CompositionNodeRun:
+    "Live state of one node within a composition run."
+    
+    node_id: str  # The CompositionNode this tracks
+    state: NodeState = NodeState.pending  # Current node state
+    job_id: Optional[str]  # Member Job id (set when the node starts)
+    result: Any  # Member job result (if completed)
+    error: Optional[JobError]  # Structured failure summary (if failed/cancelled)
+```
+
+``` python
+@dataclass
+class CompositionRun:
+    """
+    Tracks a submitted composition through execution (lives in
+    `JobQueue._compositions`).
+    
+    Carries the validated dependency map (and its reverse) so advancement
+    decisions are O(edges) lookups for the rest of the run. Composition-level
+    `status` reuses the NodeState terminal subset: starts `running`,
+    transitions to completed / failed / cancelled via
+    `derive_terminal_status` once `all_terminal()`.
+    
+    `cancel_requested` records USER cancel intent (`cancel_composition`),
+    distinguishing it from the executor's fail-fast HOUSEKEEPING cancels of
+    independent pending members after a failure — without the flag, a
+    failure-driven run would derive `cancelled` instead of `failed` because
+    its housekeeping cancels would dominate.
+    """
+    
+    id: str  # Composition run UUID
+    composition: Composition  # The submitted spec (immutable post-submit)
+    deps: Dict[str, Set[str]]  # node_id -> upstream node ids (validated)
+    dependents: Dict[str, Set[str]]  # node_id -> downstream node ids (reverse of deps)
+    nodes_by_id: Dict[str, CompositionNode]  # Spec lookup for the executor
+    node_runs: Dict[str, CompositionNodeRun]  # Per-node live state
+    status: NodeState = NodeState.running  # Composition-level status
+    cancel_requested: bool = False  # True once cancel_composition is called (user intent)
+    submitted_at: datetime = field(...)
+    completed_at: Optional[datetime]  # Set when the run reaches terminal status
+```
+
+#### Variables
+
+``` python
+TERMINAL_NODE_STATES
+```
+
 ### Remote Plugin Proxy (`proxy.ipynb`)
 
 > Bridge between Host application and isolated Worker processes
@@ -4543,6 +4891,22 @@ def _raise_from_job_error_chunk(
     detection. Same intent: the typed exception survives the HTTP wire boundary
     so substrate / JobQueue / consumer code can branch on category without
     parsing string messages.
+    """
+```
+
+``` python
+def _raise_typed_execute_error(
+    """
+    SG-52 parity for the unary execute path (stage-3 ledger G7).
+    
+    If the worker's error body carries the `{"_job_error": <JobError dict>}`
+    sentinel (post-fix workers), raise the corresponding TYPED exception via
+    `_raise_from_job_error_chunk` — this is what lets the manager's CR-7
+    reactive-retry path see `PluginResourceError` from plain `/execute`
+    calls (the OOM-backstop stress test caught the unary channel collapsing
+    every failure to RuntimeError, leaving the retry blind). Pre-fix workers
+    return a bare-string detail → the legacy RuntimeError fallback (version-
+    skew tolerance, F12 posture).
     """
 ```
 
@@ -5011,9 +5375,6 @@ from cjm_plugin_system.core.queue import (
     Job,
     JobEvent,
     QueueStats,
-    SequenceStep,
-    StepResult,
-    JobSequence,
     ResourceSnapshot,
     JobQueueDependencies,
     JobQueue
@@ -5025,15 +5386,15 @@ from cjm_plugin_system.core.queue import (
 ``` python
 async def _enqueue_job(
     self,
-    job: Job,  # Pre-constructed Job (caller fills sequence fields if needed)
+    job: Job,  # Pre-constructed Job (caller fills composition fields if needed)
 ) -> str:  # job_id
     """
     Internal: enqueue a pre-constructed Job.
     
     Caller is responsible for validation (disabled-plugin check, etc.).
-    Used by `submit` (Stage 1) and `submit_sequence` (Stage 2) — the latter
-    needs to populate `sequence_id` + `sequence_index` on the Job before
-    enqueueing so the running job appears in sequence-tagged event streams
+    Used by `submit` and by the composition advancement path (stage 3) —
+    the latter populates `composition_id` + `node_id` on the Job before
+    enqueueing so the member job appears in composition-tagged event streams
     from its first STATE_TRANSITION.
     """
 ```
@@ -5072,15 +5433,14 @@ async def cancel(
     
     CR-6: publishes STATE_TRANSITION when a pending job moves directly to
     cancelled (no transition through running). Running-job cancellation
-    publishes CANCEL_PHASE_CHANGED events from `_execute_with_cancellation`
-    when Stage 4 wires the phase transitions; Stage 1 just records the
-    cancel-request marker.
+    publishes CANCEL_PHASE_CHANGED events from `_execute_with_cancellation`.
     
-    Stage 2: when the cancelled job is a sequence member, `_advance_sequence`
-    runs after the lock is released so the cancelled status propagates to
-    the sequence registry (marks sequence cancelled, no further submission).
-    Lock release is required because `_advance_sequence` may need to enqueue
-    a next member in some flows; asyncio.Lock is not re-entrant.
+    Stage 3: when the cancelled job is a composition member,
+    `_advance_composition` runs after the lock is released so the cancelled
+    status propagates to the composition run (dependents skip; the run
+    finalizes when all nodes are terminal). Lock release is required because
+    `_advance_composition` may need to enqueue downstream members in some
+    flows; asyncio.Lock is not re-entrant.
     """
 ```
 
@@ -5122,8 +5482,33 @@ def get_pending(self) -> List[Job]:  # Pending jobs, priority-sorted
 ```
 
 ``` python
+def get_running_jobs(self) -> List[Job]:  # All currently-executing jobs
+    """All in-flight jobs (stage 3: the queue is multi-lane)."""
+    return list(self._running.values())
+
+
 def get_running(self) -> Optional[Job]:  # Running job or None
-    "Get the currently-executing job, or None if idle."
+    "All in-flight jobs (stage 3: the queue is multi-lane)."
+```
+
+``` python
+def get_running(self) -> Optional[Job]:  # Running job or None
+    """First currently-executing job (earliest started), or None if idle.
+
+    REMOVE-AFTER-OVERHAUL: pre-stage-3 single-lane affordance kept for the
+    legacy `get_state` shim + existing single-lane consumers; multi-lane
+    callers use `get_running_jobs()`. The stage-9 consumer cascade migrates
+    the remaining call sites.
+    """
+    if not self._running
+    """
+    First currently-executing job (earliest started), or None if idle.
+    
+    REMOVE-AFTER-OVERHAUL: pre-stage-3 single-lane affordance kept for the
+    legacy `get_state` shim + existing single-lane consumers; multi-lane
+    callers use `get_running_jobs()`. The stage-9 consumer cascade migrates
+    the remaining call sites.
+    """
 ```
 
 ``` python
@@ -5205,18 +5590,18 @@ def get_job_logs(
 
 ``` python
 def _subscriber_keys_for(event: JobEvent) -> List[str]:
-    """Return the subscriber keys an event should fan out to (CR-6).
+    """Return the subscriber keys an event should fan out to (CR-6 / stage 3).
 
     Every event reaches "all" subscribers + the per-job subscribers.
-    Sequence-tagged events additionally reach per-sequence subscribers.
+    Composition-tagged events additionally reach per-composition subscribers.
     """
     keys = ["all", f"job:{event.job_id}"]
-    if event.sequence_id is not None
+    if event.composition_id is not None
     """
-    Return the subscriber keys an event should fan out to (CR-6).
+    Return the subscriber keys an event should fan out to (CR-6 / stage 3).
     
     Every event reaches "all" subscribers + the per-job subscribers.
-    Sequence-tagged events additionally reach per-sequence subscribers.
+    Composition-tagged events additionally reach per-composition subscribers.
     """
 ```
 
@@ -5237,7 +5622,7 @@ def _publish_event(
 ``` python
 async def _subscribe(
     self,
-    key: str,  # Subscriber key ("all" | "job:<id>" | "seq:<id>")
+    key: str,  # Subscriber key ("all" | "job:<id>" | "comp:<id>")
 ) -> AsyncIterator[JobEvent]
     """
     Internal: register a subscription; yield events until the consumer
@@ -5263,15 +5648,16 @@ async def events(
 ```
 
 ``` python
-async def events_for_sequence(
+async def events_for_composition(
     self,
-    sequence_id: str,  # Filter to events tagged with this sequence
+    composition_id: str,  # Filter to events tagged with this composition
 ) -> AsyncIterator[JobEvent]
     """
-    Subscribe to events for all jobs in a sequence (async generator).
+    Subscribe to events for all member jobs of a composition (async
+    generator).
     
-    Yields the unified per-sequence narrative: member-job lifecycle events
-    interleaved with `SEQUENCE_ADVANCED` aggregate signals (wired in Stage 2).
+    Yields the unified per-composition narrative: member-job lifecycle events
+    interleaved with `COMPOSITION_ADVANCED` aggregate signals (stage 3).
     """
 ```
 
@@ -5292,83 +5678,120 @@ async def all_events(self) -> AsyncIterator[JobEvent]:
 ```
 
 ``` python
-async def submit_sequence(
+async def submit_composition(
     self,
-    steps: List[SequenceStep],  # Sequence steps to run in order
-    priority: int = 0,          # Sequence-level priority (per-step override possible)
-    fail_fast: bool = True,     # Halt on first failure (audit-locked default)
-) -> str:  # sequence_id
+    comp: Composition,  # Composition to run (validated at submit)
+) -> str:  # composition run id
     """
-    Submit a multi-step job sequence (CR-6 Stage 2).
+    Submit a composition — a DAG of capability-invocation nodes with
+    execution-time-bound inputs (stage 3; replaces `submit_sequence`).
     
-    Validates all step plugins upfront (`PluginDisabledError` if any are
-    disabled) so operators get an immediate failure signal rather than
-    discovering the problem mid-sequence. The first member-job is tagged
-    with sequence fields BEFORE enqueue, so its first STATE_TRANSITION
-    already routes through sequence-tagged subscribers.
+    Validates upfront: structural validation via `new_composition_run`
+    (duplicate ids / unknown refs / cycles → `CompositionValidationError`)
+    and the disabled-plugin gate across all nodes (`PluginDisabledError`),
+    matching the sequence-era precedent. Member Jobs are created LAZILY —
+    only dependency-free nodes have Jobs at submit; downstream nodes get
+    their kwargs materialized from upstream results at advancement time.
     
-    Returns the sequence_id; consumers subscribe via
-    `queue.events_for_sequence(sequence_id)` or query state via
-    `queue.get_sequence(sequence_id)`.
+    Consumers wait via `wait_for_composition`, observe via
+    `events_for_composition`, inspect via `get_composition`.
     """
 ```
 
 ``` python
-async def submit_uniform_sequence(
+async def wait_for_composition(
     self,
-    plugin_instance_id: str,  # Plugin every step targets
-    args_list: List[Tuple[Any, ...]],  # Per-step positional args
-    kwargs_list: Optional[List[Dict[str, Any]]] = None,  # Per-step keyword args (default: empty)
-    priority: int = 0,        # Sequence-level priority
-    fail_fast: bool = True,   # Halt on first failure (audit-locked default)
-) -> str:  # sequence_id
+    composition_id: str,  # Composition to wait for
+    timeout: Optional[float] = None,  # Max seconds to wait
+) -> CompositionRun:  # Terminal run record
     """
-    Submit a sequence where every step targets the same plugin (CR-6 Stage 2).
-    
-    Sugar over `submit_sequence` for the common "same plugin, many arg sets"
-    case — multi-source transcription / batch processing / parameter sweeps.
+    Block until a composition reaches terminal status (the
+    `wait_for_job` analog for compositions).
     """
 ```
 
 ``` python
-async def cancel_sequence(
+async def cancel_composition(
     self,
-    sequence_id: str  # Sequence to cancel
+    composition_id: str  # Composition to cancel
 ) -> bool:  # True if cancellation was recorded
     """
-    Cancel an in-flight sequence (CR-6 Stage 2).
+    Cancel an in-flight composition (USER intent — the run lands
+    `cancelled`).
     
-    Marks the sequence as cancelled (no further advancement) and cancels
-    the current member job. Returns False if the sequence is unknown or
-    already terminal; True if cancellation was recorded.
-    
-    Sets `seq.status = JobStatus.cancelled` BEFORE issuing the member-job
-    cancel. This prevents a race where the member completes between the
-    intent record and the cancel call — `_advance_sequence` checks
-    `seq.status == cancelled` first and halts regardless of member outcome.
+    Records intent FIRST (`cancel_requested`) so member-cancel callbacks
+    racing through `_advance_composition` derive the right terminal status;
+    then marks never-started nodes cancelled and cancels every member whose
+    Job is still pending or running (in-flight members resolve through the
+    per-job cooperative-cancel machinery and finalize the run on the way
+    out). Returns False if the composition is unknown or already terminal.
     """
 ```
 
 ``` python
-def get_sequence(
+def get_composition(
     self,
-    sequence_id: str  # Sequence to retrieve
-) -> Optional[JobSequence]:  # JobSequence or None
-    "Get a job sequence by ID (read-only inspection)."
+    composition_id: str  # Composition to retrieve
+) -> Optional[CompositionRun]:  # CompositionRun or None
+    "Get a composition run by id (read-only inspection)."
 ```
 
 ``` python
-async def _advance_sequence(
+async def _start_ready_nodes(
     self,
-    completed_job: Job  # The member job that just reached terminal status
+    run: CompositionRun,  # Composition being advanced
+) -> List[str]:  # Node ids whose member Jobs were created + enqueued
+    """
+    Create + enqueue member Jobs for every currently-ready node (stage 3).
+    
+    This is where execution-time binding happens: each ready node's kwargs
+    are materialized from upstream results via `resolve_node_kwargs`. A
+    binding failure is recorded as that NODE's failure (dependents skip,
+    fail-fast housekeeping applies) rather than raising to the caller — by
+    the time bindings resolve, the composition is mid-flight and the failure
+    must flow through the same path as a member-job failure.
+    """
+```
+
+``` python
+async def _advance_composition(
+    self,
+    completed_job: Job  # Member job that just reached terminal status
 ) -> None
     """
-    Advance the sequence after a member job completes (CR-6 Stage 2).
+    Advance a composition after a member job completes (stage 3).
     
-    Records the member's StepResult, decides whether to advance / halt /
-    finalize, and submits the next member if applicable. Always called
+    Records the member outcome; on success enqueues newly-ready downstream
+    nodes (emitting COMPOSITION_ADVANCED); on failure/cancellation skips
+    transitive dependents and (fail_fast) cancels independent pending
+    members. Finalizes the run when every node is terminal. Always called
     OUTSIDE the queue's main lock — may take it via `_enqueue_job`.
     """
+```
+
+``` python
+async def _cancel_pending_members(
+    self,
+    run: CompositionRun,  # Composition whose pending members should stop
+) -> None
+    """
+    Fail-fast housekeeping: stop members that have not actually started
+    executing (stage 3, ratified failure semantics).
+    
+    IN-FLIGHT members run to completion — their results and caches are kept,
+    and force-killing a half-done GPU job buys nothing. Nodes that never got
+    a Job are marked cancelled directly; members whose Jobs still sit in the
+    pending heap go through the per-job cancel path (which re-enters
+    `_advance_composition` for each, transitioning them to terminal).
+    """
+```
+
+``` python
+def _maybe_finalize_composition(
+    self,
+    run: CompositionRun,  # Composition to check for terminal state
+) -> None
+    "Finalize the run once every node is terminal (idempotent; stage 3)."
 ```
 
 ``` python
@@ -5434,6 +5857,9 @@ async def start(self) -> None:
 async def stop(self) -> None:
     """Stop the queue processor gracefully.
 
+    Stage 3: in-flight job tasks are detached lanes now — drain them with
+    the same 5s budget as the processor task; leftovers are cancelled.
+
     CR-6 Stage 4: restores the previous `_on_retry` observer on deps to
     leave the manager in the state we found it (cooperative with other
     queue instances, tests, etc.).
@@ -5445,6 +5871,9 @@ async def stop(self) -> None:
     """
     Stop the queue processor gracefully.
     
+    Stage 3: in-flight job tasks are detached lanes now — drain them with
+    the same 5s budget as the processor task; leftovers are cancelled.
+    
     CR-6 Stage 4: restores the previous `_on_retry` observer on deps to
     leave the manager in the state we found it (cooperative with other
     queue instances, tests, etc.).
@@ -5454,7 +5883,7 @@ async def stop(self) -> None:
 ``` python
 def _on_manager_retry(
     """
-    Substrate-side retry observer (CR-6 Stage 4).
+    Substrate-side retry observer (CR-6 Stage 4; stage-3 multi-lane).
     
     Invoked synchronously by PluginManager's CR-7 retry loop just before
     each retry attempt. Updates `Job.retry_count` on the matching in-flight
@@ -5464,16 +5893,13 @@ def _on_manager_retry(
     `attempt` semantics: PluginManager's loop iterates
     `for attempt in range(max_retries + 1)`. The first iteration
     (`attempt=0`) is the original try and never invokes this callback —
-    it only fires when `last_resource_error is not None`, which means
-    the prior iteration raised. So the value PASSED here is already the
-    1-based retry number: `attempt=1` is the first retry, `attempt=2` is
-    the second retry, etc.
+    so the value PASSED here is already the 1-based retry number.
     
-    Match logic: find the running job whose plugin_instance_id matches.
-    Multi-instance / concurrent execution complicates this — the single
-    `self._running` field tracks one job at a time, matching the queue's
-    current single-worker-execution model. Future concurrent-execution
-    support would extend the match strategy.
+    Match logic (stage 3): scan the multi-lane `_running` dict for a job on
+    the retrying instance. With the per-instance cap defaulting to 1, at
+    most one in-flight job matches; if an instance opts into same-worker
+    concurrency (SG-33 cap > 1), the first match is attributed — a known
+    blunt edge recorded in the stage-3 ledger.
     """
 ```
 
@@ -5540,26 +5966,104 @@ def _emit_block_reason(
 ```
 
 ``` python
+async def _fetch_admission_stats(self) -> Dict[str, Any]:
+    """Fetch live system telemetry for admission decisions (stage 3).
+
+    Defensive-getattr: a deps implementation without `get_global_stats`
+    (older test doubles) yields `{}` — admission then runs GPU-profiled jobs
+    exclusive (no live headroom to verify against) and CPU-profiled jobs on
+    lanes + instance caps alone. Failures degrade the same way.
+    """
+    fn = getattr(self._deps, 'get_global_stats', None)
+    if not callable(fn)
+    """
+    Fetch live system telemetry for admission decisions (stage 3).
+    
+    Defensive-getattr: a deps implementation without `get_global_stats`
+    (older test doubles) yields `{}` — admission then runs GPU-profiled jobs
+    exclusive (no live headroom to verify against) and CPU-profiled jobs on
+    lanes + instance caps alone. Failures degrade the same way.
+    """
+```
+
+``` python
+def _pop_next_admissible(
+    self,
+    stats: Dict[str, Any],  # Live telemetry from _fetch_admission_stats (possibly {})
+) -> Optional[Job]:  # The popped job, or None when nothing is dispatchable
+    """
+    Pop the highest-priority ADMISSIBLE pending job (stage 3).
+    
+    Scans pending jobs in priority order with SKIP-AHEAD: a blocked job
+    (insufficient GPU headroom, instance cap reached) does not stall
+    admissible jobs behind it. The admission ladder (stage-3 ledger,
+    ratified 2026-06-10):
+    
+    1. **lanes** — at most `max_concurrent_lanes` in-flight jobs;
+    2. **exclusivity** — a job with NO empirical profile runs ALONE: its
+       first run IS its measurement run. The store's (instance_id,
+       config_hash) keying graduates it automatically after one run and
+       demotes it again whenever the config changes — staleness is dissolved
+       by the keying, not solved by invalidation;
+    3. **per-instance cap** — in-flight jobs per instance ≤ the instance's
+       SG-33 `max_concurrent_requests`, DEFAULT 1 when unset (same-worker
+       concurrency is opt-in per capability);
+    4. **resources** — the empirical `gpu_memory_mb_peak_max` is admitted
+       against BOTH a reservation ledger (sum of running GPU peaks ≤ total ×
+       `gpu_headroom_fraction`; covers admitted-but-not-yet-loaded models)
+       AND live free VRAM (covers resident idle models + external GPU
+       users); `memory_mb_peak_max` against live `memory_available_mb`.
+       Without sysmon stats, GPU-profiled jobs run exclusive.
+    
+    The manifest's `requires_gpu` is deliberately NOT consumed — whether a
+    config uses the GPU is an empirical fact (`gpu_memory_mb_peak_max > 0`),
+    not a declaration (ledger G2: the pre-overhaul scheduler quantity checks
+    were dead code against v2 manifests). Worst case (no profiles, no
+    sysmon) every job runs exclusive = exact pre-stage-3 single-lane
+    behavior. CR-7 reactive retry is the documented backstop for admission
+    misses.
+    """
+```
+
+``` python
 async def _process_loop(self) -> None:
-    """Main processing loop."""
+    """Main dispatch loop (stage 3: multi-lane ready-set dispatch).
+
+    `_job_available` means "dispatch state may have changed" — set on submit
+    AND on every job completion, cleared only after a scan that dispatched
+    nothing. Each pass: fetch admission telemetry (outside the lock), pop
+    the highest-priority admissible job under the lock, and launch it as an
+    independent task tracked in `_running_tasks` (awaited by `stop`). The
+    pre-stage-3 loop executed one job at a time inline.
+    """
     while self._running_flag
-    "Main processing loop."
+    """
+    Main dispatch loop (stage 3: multi-lane ready-set dispatch).
+    
+    `_job_available` means "dispatch state may have changed" — set on submit
+    AND on every job completion, cleared only after a scan that dispatched
+    nothing. Each pass: fetch admission telemetry (outside the lock), pop
+    the highest-priority admissible job under the lock, and launch it as an
+    independent task tracked in `_running_tasks` (awaited by `stop`). The
+    pre-stage-3 loop executed one job at a time inline.
+    """
 ```
 
 ``` python
 async def _execute_job(self, job: Job) -> None:
-    """Execute a single job."""
+    """Execute a single job (runs as an independent task per lane; stage 3)."""
     self.logger.info(f"Starting job {job.id[:8]} ({job.plugin_instance_id})")
 
     # Mark as running + emit transition pending → running
     prev_status = job.status
     job.status = JobStatus.running
     job.started_at = datetime.now(timezone.utc)
-    self._running = job
+    # Lane already reserved at pop time (_pop_next_admissible) — see the
+    # admission-state synchronicity note there.
     self._emit_state_transition(job, prev_status)
 
     try
-    "Execute a single job."
+    "Execute a single job (runs as an independent task per lane; stage 3)."
 ```
 
 ``` python
@@ -5644,17 +6148,16 @@ class JobStatus(str, Enum):
 ``` python
 class JobEventType(str, Enum):
     """
-    Push-based job event types (CR-6).
+    Push-based job event types (CR-6; stage-3 composition rework).
     
     Emitted by JobQueue on a multi-subscriber event bus. Consumers subscribe
-    via `queue.events(job_id)` / `queue.events_for_sequence(seq_id)` /
+    via `queue.events(job_id)` / `queue.events_for_composition(comp_id)` /
     `queue.all_events()` and receive `JobEvent` instances asynchronously.
     
-    Stage 1 wires STATE_TRANSITION + PROGRESS_CHANGED at the existing
-    execute-path lifecycle points. The remaining types are reserved for
-    Stages 2-4 (sequences / resources + logs / cancel-phase + retry +
-    block-reason). Reserving the enum values up front keeps later stages
-    additive — new event sources publish without changing the enum.
+    COMPOSITION_ADVANCED replaced the retired SEQUENCE_ADVANCED at execution
+    stage 3 (CR-16: compositions replace sequences outright): it fires when a
+    member job's completion unlocks downstream composition nodes — payload
+    carries the completed node id + the newly enqueued node ids.
     """
 ```
 
@@ -5673,16 +6176,17 @@ class CancelPhase(str, Enum):
 @runtime_checkable
 class JobQueueDependencies(Protocol):
     """
-    Substrate dependencies the JobQueue requires (CR-6).
+    Substrate dependencies the JobQueue requires (CR-6 + stage 3).
     
     PluginManager satisfies this structurally; the Protocol exists so JobQueue
     can be tested in isolation (with a lightweight test double) and so a future
     extraction into a separate library has no API constraint locked in.
     
-    Method surface chosen empirically — these are the exact 5 methods the
-    queue's execute path calls today. Adding new dependencies to the Protocol
-    (e.g., a typed system-monitor reader when Stage 3 wires resource snapshots)
-    is an additive change.
+    The first 5 methods are the CR-6 execute-path surface. The stage-3
+    additions (CR-16 multi-lane admission) are consumed DEFENSIVELY via
+    getattr — a deps implementation without them yields no admission
+    evidence, so every job runs exclusive = exact pre-stage-3 single-lane
+    behavior. Older test doubles keep working unchanged.
     """
     
     def get_plugin_meta(self, name_or_id: str) -> Optional[Any]: ...
@@ -5698,18 +6202,27 @@ class JobQueueDependencies(Protocol):
         def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str: ...
     
     def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str: ...
+        # Stage 3 (CR-16) admission surface
+    
+    def get_admission_profile(self, name_or_id: str) -> Optional[Dict[str, Any]]: ...
+        def get_instance_concurrency_cap(self, name_or_id: str) -> Optional[int]: ...
+    
+    def get_instance_concurrency_cap(self, name_or_id: str) -> Optional[int]: ...
+        async def get_global_stats(self) -> Dict[str, Any]: ...
+    
+    async def get_global_stats(self) -> Dict[str, Any]: ...
 ```
 
 ``` python
 @dataclass
 class Job:
     """
-    A queued plugin execution request (CR-6 reshape).
+    A queued plugin execution request (CR-6 reshape; stage-3 composition
+    rework renamed the sequence tags to composition tags).
     
-    Stage 1 lands the full field set so subsequent stages are purely additive
-    on the population paths. Fields tagged "Stage N" are typed but unpopulated
-    by Stage 1's execute path; their default values keep the dataclass safely
-    constructible from existing call sites.
+    `composition_id` / `node_id` are set when the job is a lazily-created
+    member of a composition (CR-16) — they ride every JobEvent so
+    `events_for_composition` subscribers see member lifecycle events.
     """
     
     id: str  # Unique job identifier (UUID)
@@ -5725,8 +6238,8 @@ class Job:
     status_message: str = ''  # Descriptive status message
     result: Any  # Execution result (if completed)
     error: Optional[JobError]  # Structured failure summary (CR-5)
-    sequence_id: Optional[str]  # Set when part of a sequence (Stage 2)
-    sequence_index: Optional[int]  # 0-based position in sequence (Stage 2)
+    composition_id: Optional[str]  # Set when part of a composition (stage 3)
+    node_id: Optional[str]  # Composition node this job executes (stage 3)
     cancel_requested_at: Optional[datetime]  # When cancel was requested (Stage 4)
     cancel_phase: Optional[CancelPhase]  # Active cancel phase (Stage 4)
     block_reason: Optional[str]  # Why the scheduler is blocking (Stage 4)
@@ -5751,20 +6264,20 @@ class Job:
 @dataclass
 class JobEvent:
     """
-    A push-based job event (CR-6).
+    A push-based job event (CR-6; stage-3 composition tags).
     
     Carries full tag context so a subscriber to `all_events()`, `events(job_id)`,
-    or `events_for_sequence(seq_id)` receives identically-shaped instances.
+    or `events_for_composition(comp_id)` receives identically-shaped instances.
     `payload` is a per-event-type structured dict (e.g., STATE_TRANSITION carries
-    `{"from": "pending", "to": "running"}`; PROGRESS_CHANGED carries
-    `{"progress": 0.42, "status_message": "..."}`).
+    `{"from": "pending", "to": "running"}`; COMPOSITION_ADVANCED carries
+    `{"completed_node": ..., "enqueued_nodes": [...]}`).
     """
     
     type: JobEventType
     job_id: str
     plugin_instance_id: str
-    sequence_id: Optional[str]
-    sequence_index: Optional[int]
+    composition_id: Optional[str]
+    node_id: Optional[str]
     timestamp: datetime = field(...)
     payload: Dict[str, Any] = field(...)
 ```
@@ -5793,67 +6306,6 @@ class _Subscription:
     
     queue: 'asyncio.Queue[JobEvent]'
     dropped_count: int = 0
-```
-
-``` python
-@dataclass
-class SequenceStep:
-    """
-    A single step in a job sequence (CR-6 Stage 2).
-    
-    User-facing — supplied to `JobQueue.submit_sequence`. The substrate
-    constructs the actual `Job` from this at advance time, tagging the
-    job with `sequence_id` + `sequence_index` so it appears in
-    `events_for_sequence` subscriptions.
-    """
-    
-    plugin_instance_id: str  # Target plugin instance for this step
-    args: Tuple[Any, ...] = ()  # Positional arguments
-    kwargs: Dict[str, Any] = field(...)  # Keyword arguments
-    priority: int = 0  # Per-step priority override (0 = inherit sequence priority)
-```
-
-``` python
-@dataclass
-class StepResult:
-    """
-    Result of one step in a job sequence (CR-6 Stage 2).
-    
-    `success=True` means the member-job completed with `JobStatus.completed`.
-    Failure modes (failed / cancelled) capture the `JobError` in `error`.
-    For best-effort sequences (`fail_fast=False`), failure rows are recorded
-    in `JobSequence.results` and the sequence continues.
-    """
-    
-    job_id: str  # Member job's UUID (empty string if sequence aborted before submit)
-    success: bool  # True if the step's job completed successfully
-    result: Any  # Job result (if success)
-    error: Optional[JobError]  # Structured failure summary (if not success)
-```
-
-``` python
-@dataclass
-class JobSequence:
-    """
-    Internal: tracks a multi-step job sequence (CR-6 Stage 2).
-    
-    Lives in `JobQueue._sequences`. State machine: starts `running`,
-    transitions to `completed` (all steps attempted) / `failed` (fail_fast
-    halted on a failed member) / `cancelled` (cancel_sequence called or
-    a member was cancelled). Once terminal, `completed_at` is set and
-    `current_job_id` is cleared.
-    """
-    
-    id: str  # Sequence UUID
-    steps: List[SequenceStep]  # The full step list (immutable post-submit)
-    fail_fast: bool = True  # Halt on first failure (audit-locked default)
-    priority: int = 0  # Sequence-level priority (per-step override possible)
-    current_index: int = 0  # 0-based index of the active member step
-    current_job_id: Optional[str]  # The active member-job's ID, if any
-    results: List[StepResult] = field(...)  # Per-step outcomes
-    status: JobStatus = JobStatus.running  # Sequence-level status (reuses JobStatus)
-    submitted_at: datetime = field(...)
-    completed_at: Optional[datetime]  # Set when sequence reaches terminal status
 ```
 
 ``` python
@@ -5894,8 +6346,14 @@ class JobQueue:
         progress_poll_interval: float = 1.0,  # Seconds between progress polls
         sysmon_plugin_name: Optional[str] = None,  # CR-3 MonitorPlugin instance for GPU stats (None = no GPU info)
         resource_snapshot_cadence_polls: int = 4,  # Sample resources every Nth progress poll
+        max_concurrent_lanes: int = 4,     # Stage 3: max in-flight jobs (admission still gates each)
+        gpu_headroom_fraction: float = 0.9,  # Stage 3: blunt GPU admission margin (budget = total * fraction)
     )
-    "Resource-aware job queue with push-based observability (CR-6)."
+    """
+    Resource-aware multi-lane job queue with push-based observability
+    (CR-6; stage-3 CR-16 rework: ready-set dispatch + resource-derived
+    admission + composition execution).
+    """
     
     def __init__(
             self,
@@ -5905,14 +6363,17 @@ class JobQueue:
             progress_poll_interval: float = 1.0,  # Seconds between progress polls
             sysmon_plugin_name: Optional[str] = None,  # CR-3 MonitorPlugin instance for GPU stats (None = no GPU info)
             resource_snapshot_cadence_polls: int = 4,  # Sample resources every Nth progress poll
+            max_concurrent_lanes: int = 4,     # Stage 3: max in-flight jobs (admission still gates each)
+            gpu_headroom_fraction: float = 0.9,  # Stage 3: blunt GPU admission margin (budget = total * fraction)
         )
         "Initialize the job queue.
 
-CR-6 Stage 3 adds `sysmon_plugin_name` and `resource_snapshot_cadence_polls`.
-Sysmon integration is optional — when set, the named plugin must satisfy
-CR-3's typed `MonitorPlugin` shape (`get_system_status` + `list_processes`).
-When unset, ResourceSnapshot still carries worker stats but all GPU
-fields stay None."
+Stage 3 (CR-16): the queue dispatches multiple admissible jobs
+concurrently (`max_concurrent_lanes` is the operator safety valve);
+per-job admission derives from empirical resource records + live
+sysmon telemetry — see `_pop_next_admissible`. Worst case (no
+records, no sysmon) every job runs exclusive, which is exactly the
+pre-stage-3 single-lane behavior."
     
     def manager(self) -> JobQueueDependencies
 ```
