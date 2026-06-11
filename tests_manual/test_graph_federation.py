@@ -28,9 +28,39 @@ from cjm_plugin_system.core.scheduling import QueueScheduler
 from cjm_graph_plugin_system.core import SourceRef
 from cjm_graph_plugin_system.utils.mermaid import context_to_mermaid
 
-# Tier 2 Domain Library (The new addition)
-from cjm_graph_domains.domains.knowledge import Person, Work, Concept, Topic, Quote
-from cjm_graph_domains.domains.relations import KnowledgeRelations
+# Local test domain types (stage 5: cjm-graph-domains DISSOLVED; its
+# knowledge-domain sketch had zero ecosystem consumers — this test carries
+# its own lean stand-ins over the generic GraphNode).
+from uuid import uuid4 as _uuid4
+from cjm_context_graph_primitives.graph import GraphNode as _GraphNode
+
+
+class _TestDomainNode:
+    LABEL = "Node"
+
+    def __init__(self, **props):
+        self.id = str(_uuid4())
+        self._props = {k: v for k, v in props.items() if v is not None}
+
+    def to_graph_node(self, sources=None):
+        return _GraphNode(id=self.id, label=self.LABEL,
+                          properties=dict(self._props), sources=list(sources or []))
+
+
+class Person(_TestDomainNode): LABEL = "Person"
+class Work(_TestDomainNode): LABEL = "Work"
+class Concept(_TestDomainNode): LABEL = "Concept"
+class Topic(_TestDomainNode): LABEL = "Topic"
+class Quote(_TestDomainNode): LABEL = "Quote"
+
+
+class KnowledgeRelations:
+    AUTHORED = "AUTHORED"
+    DISCUSSES = "DISCUSSES"
+    MENTIONS = "MENTIONS"
+    DEFINES = "DEFINES"
+    RELATED_TO = "RELATED_TO"
+    QUOTES = "QUOTES"
 
 
 async def run_graph_federation():
