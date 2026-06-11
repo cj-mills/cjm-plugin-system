@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Dict, Generator
 import psutil
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from .errors import PluginCancelledError, map_bare_exception_to_job_error
 from .platform import terminate_self
@@ -442,7 +442,20 @@ def _register_task_endpoints(
         except Exception as e:
             import traceback
             traceback.print_exc()
-            raise HTTPException(status_code=500, detail=str(e))
+            # SG-52 parity for the UNARY path (stage-3 stress-test finding,
+            # ledger G7): the 500 body carries the SAME `{"_job_error":
+            # <JobError dict>}` sentinel shape as the stream's terminal
+            # chunk, so the proxy raises the typed exception client-side
+            # (PluginResourceError et al) and CR-7's reactive retry can
+            # actually see resource errors from plain /execute calls. The
+            # old bare-string detail collapsed every failure to RuntimeError
+            # host-side, leaving the retry path blind on this channel.
+            job_error = map_bare_exception_to_job_error(
+                e, plugin_name=getattr(plugin_instance, "name", "unknown"),
+            )
+            body = json.loads(json.dumps({"_job_error": job_error},
+                                         cls=EnhancedJSONEncoder))
+            return JSONResponse(status_code=500, content=body)
 
     @app.post("/execute_stream")
     async def execute_stream(request: Request) -> StreamingResponse:

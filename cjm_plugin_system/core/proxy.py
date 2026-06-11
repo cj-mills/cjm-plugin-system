@@ -123,7 +123,7 @@ class RemotePluginProxy(ToolCapability):
             # rendering can both see it.
             raise PluginCancelledError(self.name)
         if resp.status_code != 200:
-            raise RuntimeError(f"Execute failed: {resp.text}")
+            _raise_typed_execute_error(resp, self.name)
         return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
     
     def get_config_schema(self) -> Dict[str, Any]: # JSON Schema
@@ -327,7 +327,7 @@ async def execute_async(
         # CR-4: see sync variant
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
-        raise RuntimeError(f"Execute failed: {resp.text}")
+        _raise_typed_execute_error(resp, self.name)
     return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
 
 RemotePluginProxy.execute_async = execute_async
@@ -373,6 +373,30 @@ def _raise_from_job_error_chunk(
         raise PluginFatalError(message)
     # Unknown category — surface as RuntimeError with the structured payload
     raise RuntimeError(f"Plugin stream error (unknown category {category!r}): {job_error}")
+
+# %% ../../nbs/core/proxy.ipynb #fn-raise-typed-execute-error
+def _raise_typed_execute_error(
+    resp,              # The worker's non-200 httpx response
+    plugin_name: str,  # Plugin name for exception context
+) -> None:             # Never returns — always raises
+    """SG-52 parity for the unary execute path (stage-3 ledger G7).
+
+    If the worker's error body carries the `{"_job_error": <JobError dict>}`
+    sentinel (post-fix workers), raise the corresponding TYPED exception via
+    `_raise_from_job_error_chunk` — this is what lets the manager's CR-7
+    reactive-retry path see `PluginResourceError` from plain `/execute`
+    calls (the OOM-backstop stress test caught the unary channel collapsing
+    every failure to RuntimeError, leaving the retry blind). Pre-fix workers
+    return a bare-string detail → the legacy RuntimeError fallback (version-
+    skew tolerance, F12 posture).
+    """
+    try:
+        body = resp.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict) and "_job_error" in body:
+        _raise_from_job_error_chunk(body["_job_error"], plugin_name)
+    raise RuntimeError(f"Execute failed: {resp.text}")
 
 # %% ../../nbs/core/proxy.ipynb #fn-execute-stream-sync
 def execute_stream_sync(self, *args, **kwargs) -> Generator[Any, None, None]:
@@ -468,7 +492,7 @@ def execute_with_oom_check(self, *args, **kwargs) -> Any:
         # CR-4: cooperative cancellation surfaced by worker
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
-        raise RuntimeError(f"Execute failed: {resp.text}")
+        _raise_typed_execute_error(resp, self.name)  # G7: typed unary error channel
     return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
 
 
@@ -486,7 +510,7 @@ async def execute_async_with_oom_check(self, *args, **kwargs) -> Any:
     if resp.status_code == 409:
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
-        raise RuntimeError(f"Execute failed: {resp.text}")
+        _raise_typed_execute_error(resp, self.name)  # G7: typed unary error channel
     return wire_decode(resp.json())  # stage 2: registered DTOs arrive typed; others stay dicts
 
 
