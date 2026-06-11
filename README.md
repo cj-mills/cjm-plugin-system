@@ -12,26 +12,27 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (19)
-    │   ├── adapter.ipynb          # The typed-task half of the capability-unit fracture (pass-2 Thread 3) —
-    │   ├── capability.ipynb       # The tool-capability interface — the manage-the-tool half of the capability-unit fracture (pass-2 Thread 3)
-    │   ├── config.ipynb           # Project-level configuration for paths, runtime settings, and environment management
-    │   ├── config_store.ipynb     # Persistent storage for per-plugin configuration (with enabled flag)
-    │   ├── empirical_store.ipynb  # Persistent store for empirically-observed resource usage per (instance_id, config_hash) pair. CR-7's data foundation — `record_sample` is called from `PluginManager.execute_plugin*` finally blocks; aggregates feed eviction-candidate selection + future UI hints + cost-aware retry decisions.
-    │   ├── errors.ipynb           # Typed exception hierarchy + JobError dataclass + default classification of bare Python exceptions. The substrate's CR-5 implementation per the 2026-05-19 substrate audit.
-    │   ├── interface.ipynb        # REMOVE-AFTER-OVERHAUL(option-c-cascade): class-identical legacy import
-    │   ├── manager.ipynb          # Plugin discovery, loading, and lifecycle management system
-    │   ├── manifest_format.ipynb  # Typed parser + writer for the nested v2.0 manifest layout per the 2026-05-19 substrate audit's CR-8. Substrate manifests transitioned from a flat top-level JSON object to a four-section nested layout: `install` (deployment-specific facts populated at install time), `code` (code-derived facts refreshed by `cjm-ctl regenerate-manifest`), `drift_tracking` (a config_schema hash that records the witness shape so live-vs-stored comparisons can detect drift), and `overrides` (an operator-supplied overlay placeholder).
-    │   ├── metadata.ipynb         # Data structures for plugin metadata
-    │   ├── platform.ipynb         # Cross-platform utilities for process management, path handling, and system detection
-    │   ├── ports.ipynb            # Capability compositions as DAGs of invocation nodes with typed input/output
-    │   ├── proxy.ipynb            # Bridge between Host application and isolated Worker processes
-    │   ├── queue.ipynb            # Resource-aware job queue for sequential plugin execution with cancellation support
-    │   ├── scheduling.ipynb       # Resource scheduling policies for plugin execution
-    │   ├── secret_store.ipynb     # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
-    │   ├── telemetry.ipynb        # Shared GPU/CPU attribution helpers used by both `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and `PluginManager._record_sample_safe` (CR-7).
-    │   ├── wire.ipynb             # Typed data transfer at the worker boundary — the zero-copy `FileBackedDTO`
-    │   └── worker.ipynb           # FastAPI server that runs inside isolated plugin environments
+    ├── core/ (20)
+    │   ├── adapter.ipynb           # The typed-task half of the capability-unit fracture (pass-2 Thread 3) —
+    │   ├── adapter_manifest.ipynb  # The ADAPTER unit's registration manifest + the surface-based compatibility matcher (CR-17 pt 2, stage 4). Pass-2 Thread 3: registration/discovery = per-unit manifests generated in-env and found by `discover_manifests()`; compatibility is DERIVED, not declared — the capability records only its structural surface, the adapter declares its protocol (recorded here as member names + parameter lists), and the substrate matches manifest-vs-manifest. Works against UNLOADED capabilities with zero protocol imports host-side.
+    │   ├── capability.ipynb        # The tool-capability interface — the manage-the-tool half of the capability-unit fracture (pass-2 Thread 3)
+    │   ├── config.ipynb            # Project-level configuration for paths, runtime settings, and environment management
+    │   ├── config_store.ipynb      # Persistent storage for per-plugin configuration (with enabled flag)
+    │   ├── empirical_store.ipynb   # Persistent store for empirically-observed resource usage per (instance_id, config_hash) pair. CR-7's data foundation — `record_sample` is called from `PluginManager.execute_plugin*` finally blocks; aggregates feed eviction-candidate selection + future UI hints + cost-aware retry decisions.
+    │   ├── errors.ipynb            # Typed exception hierarchy + JobError dataclass + default classification of bare Python exceptions. The substrate's CR-5 implementation per the 2026-05-19 substrate audit.
+    │   ├── interface.ipynb         # REMOVE-AFTER-OVERHAUL(option-c-cascade): class-identical legacy import
+    │   ├── manager.ipynb           # Plugin discovery, loading, and lifecycle management system
+    │   ├── manifest_format.ipynb   # Typed parser + writer for the nested v2.0 manifest layout per the 2026-05-19 substrate audit's CR-8. Substrate manifests transitioned from a flat top-level JSON object to a four-section nested layout: `install` (deployment-specific facts populated at install time), `code` (code-derived facts refreshed by `cjm-ctl regenerate-manifest`), `drift_tracking` (a config_schema hash that records the witness shape so live-vs-stored comparisons can detect drift), and `overrides` (an operator-supplied overlay placeholder).
+    │   ├── metadata.ipynb          # Data structures for plugin metadata
+    │   ├── platform.ipynb          # Cross-platform utilities for process management, path handling, and system detection
+    │   ├── ports.ipynb             # Capability compositions as DAGs of invocation nodes with typed input/output
+    │   ├── proxy.ipynb             # Bridge between Host application and isolated Worker processes
+    │   ├── queue.ipynb             # Resource-aware job queue for sequential plugin execution with cancellation support
+    │   ├── scheduling.ipynb        # Resource scheduling policies for plugin execution
+    │   ├── secret_store.ipynb      # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
+    │   ├── telemetry.ipynb         # Shared GPU/CPU attribution helpers used by both `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and `PluginManager._record_sample_safe` (CR-7).
+    │   ├── wire.ipynb              # Typed data transfer at the worker boundary — the zero-copy `FileBackedDTO`
+    │   └── worker.ipynb            # FastAPI server that runs inside isolated plugin environments
     ├── utils/ (3)
     │   ├── cache_paths.ipynb  # Per-(input-content, config) deterministic cache directories for plugin outputs
     │   ├── hashing.ipynb      # Shared cryptographic hashing primitives for content integrity verification
@@ -39,7 +40,7 @@ pip install cjm_plugin_system
     ├── bootstrap.ipynb  # One-call factory that assembles a PluginManager + JobQueue + plugin bindings — closes the demo-app boilerplate duplication audited across 5 substrate consumers.
     └── cli.ipynb        # CLI tool for declarative plugin management
 
-Total: 24 notebooks across 2 directories
+Total: 25 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -48,6 +49,7 @@ graph LR
     bootstrap["bootstrap<br/>Bootstrap"]
     cli["cli<br/>cli"]
     core_adapter["core.adapter<br/>Task Adapter"]
+    core_adapter_manifest["core.adapter_manifest<br/>core.adapter_manifest"]
     core_capability["core.capability<br/>Tool Capability"]
     core_config["core.config<br/>Configuration"]
     core_config_store["core.config_store<br/>Plugin Config Store"]
@@ -71,53 +73,54 @@ graph LR
     utils_validation["utils.validation<br/>Configuration Validation"]
 
     bootstrap --> core_scheduling
-    bootstrap --> core_manager
     bootstrap --> core_queue
-    cli --> core_config
+    bootstrap --> core_manager
     cli --> core_platform
-    cli --> core_manifest_format
     cli --> core_metadata
+    cli --> core_manifest_format
+    cli --> core_config
     core_capability --> core_errors
     core_empirical_store --> utils_hashing
-    core_interface --> core_interface
     core_interface --> core_capability
-    core_interface --> core_wire
     core_interface --> core
-    core_manager --> core_empirical_store
-    core_manager --> core_config_store
-    core_manager --> core_scheduling
+    core_interface --> core_wire
+    core_interface --> core_interface
     core_manager --> core_metadata
-    core_manager --> core_errors
-    core_manager --> utils_validation
     core_manager --> core_manifest_format
+    core_manager --> core_empirical_store
+    core_manager --> core_errors
+    core_manager --> core_scheduling
     core_manager --> core_proxy
-    core_manager --> core_capability
     core_manager --> core_secret_store
+    core_manager --> core_config_store
+    core_manager --> core_adapter_manifest
     core_manager --> core_config
     core_manager --> core__telemetry
-    core_manifest_format --> core_metadata
+    core_manager --> core_capability
+    core_manager --> utils_validation
     core_manifest_format --> utils_hashing
+    core_manifest_format --> core_metadata
     core_platform --> core_config
     core_ports --> core_errors
-    core_proxy --> core_wire
     core_proxy --> core_errors
-    core_proxy --> core_capability
-    core_proxy --> core_config
     core_proxy --> core_platform
-    core_queue --> core_ports
+    core_proxy --> core_config
+    core_proxy --> core_wire
+    core_proxy --> core_capability
     core_queue --> core_errors
+    core_queue --> core_ports
     core_queue --> core__telemetry
     core_scheduling --> core_metadata
-    core_worker --> core_platform
-    core_worker --> core_wire
     core_worker --> core_errors
     core_worker --> core_capability
-    utils_cache_paths --> core_empirical_store
+    core_worker --> core_wire
+    core_worker --> core_platform
     utils_cache_paths --> utils_hashing
+    utils_cache_paths --> core_empirical_store
     utils_validation --> core_errors
 ```
 
-*45 cross-module dependencies detected*
+*46 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -140,23 +143,26 @@ graph LR
     │ --help                            Show this message and exit.                │
     ╰──────────────────────────────────────────────────────────────────────────────╯
     ╭─ Commands ───────────────────────────────────────────────────────────────────╮
-    │ setup-runtime        Download and setup micromamba runtime for project-local │
-    │                      mode.                                                   │
-    │ regenerate-manifest  Re-run introspection for an installed plugin and        │
-    │                      rewrite its manifest.                                   │
-    │ install-all          Install and register all plugins defined in             │
-    │                      plugins.yaml.                                           │
-    │ setup-host           Install interface libraries in the current Python       │
-    │                      environment.                                            │
-    │ estimate-size        Estimate disk space required for plugin environments.   │
-    │ list                 List installed plugins from manifest directory.         │
-    │ remove               Remove a plugin's manifest and conda environment.       │
-    │ validate             SG-6: validate a manifest JSON or plugins.yaml file's   │
-    │                      structure.                                              │
-    │ set-secret           Store a plugin secret in the project-local SecretStore  │
-    │                      (CR-12).                                                │
-    │ list-secrets         List the secret KEY NAMES stored for a plugin — never   │
-    │                      the values (CR-12).                                     │
+    │ setup-runtime              Download and setup micromamba runtime for         │
+    │                            project-local mode.                               │
+    │ regenerate-manifest        Re-run introspection for an installed plugin and  │
+    │                            rewrite its manifest.                             │
+    │ generate-adapter-manifest  CR-17 pt 2 (stage 4): introspect a task-adapter   │
+    │                            impl in-env and write its adapter manifest.       │
+    │ install-all                Install and register all plugins defined in       │
+    │                            plugins.yaml.                                     │
+    │ setup-host                 Install interface libraries in the current Python │
+    │                            environment.                                      │
+    │ estimate-size              Estimate disk space required for plugin           │
+    │                            environments.                                     │
+    │ list                       List installed plugins from manifest directory.   │
+    │ remove                     Remove a plugin's manifest and conda environment. │
+    │ validate                   SG-6: validate a manifest JSON or plugins.yaml    │
+    │                            file's structure.                                 │
+    │ set-secret                 Store a plugin secret in the project-local        │
+    │                            SecretStore (CR-12).                              │
+    │ list-secrets               List the secret KEY NAMES stored for a plugin —   │
+    │                            never the values (CR-12).                         │
     ╰──────────────────────────────────────────────────────────────────────────────╯
 
 For detailed help on any command, use `cjm-ctl <command> --help`.
@@ -202,6 +208,95 @@ class TaskAdapter(ABC):
     Implementations run in-worker beside their tool capability. The base is
     deliberately mechanism-light: registry/routing is CR-17 pt 2 (stage 4).
     """
+```
+
+### core.adapter_manifest (`adapter_manifest.ipynb`)
+
+> The ADAPTER unit’s registration manifest + the surface-based
+> compatibility matcher (CR-17 pt 2, stage 4). Pass-2 Thread 3:
+> registration/discovery = per-unit manifests generated in-env and found
+> by `discover_manifests()`; compatibility is DERIVED, not declared —
+> the capability records only its structural surface, the adapter
+> declares its protocol (recorded here as member names + parameter
+> lists), and the substrate matches manifest-vs-manifest. Works against
+> UNLOADED capabilities with zero protocol imports host-side.
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.adapter_manifest import (
+    AdapterManifest,
+    adapter_manifest_from_dict,
+    is_adapter_manifest,
+    match_protocol_against_surface
+)
+```
+
+#### Functions
+
+``` python
+def adapter_manifest_from_dict(
+    d: Dict[str, Any],  # On-disk JSON dict (the "class" key maps to class_name)
+) -> AdapterManifest:  # Typed adapter manifest
+    "Reconstruct an `AdapterManifest` from its on-disk JSON shape."
+```
+
+``` python
+def is_adapter_manifest(
+    data: Any,  # Raw JSON-decoded manifest content
+) -> bool:  # True when the payload declares the adapter unit kind
+    """
+    Route a manifest file by the `unit` discriminator (capability manifests
+    carry no `unit` key; checked BEFORE `load_manifest` parsing).
+    """
+```
+
+``` python
+def match_protocol_against_surface(
+    protocol_members: Dict[str, Any],  # {"methods": [...], "properties": [...]} from the adapter manifest
+    structural_surface: Optional[Dict[str, Any]],  # Capability manifest code.structural_surface (None = pre-fracture)
+) -> Dict[str, Any]:  # {"compatible", "missing_methods", "missing_properties", "param_mismatches", "reason"}
+    """
+    Surface-based compatibility (pass-2 Thread 3) — host-side, manifest-vs-
+    manifest, safe against UNLOADED capabilities.
+    
+    Method rule: same name present + (when both sides record params) the
+    surface params must START WITH the protocol params (prefix rule).
+    Property rule: name present in the surface's properties.
+    No surface recorded -> NOT compatible, with the reason spelled out.
+    """
+```
+
+#### Classes
+
+``` python
+@dataclass
+class AdapterManifest:
+    """
+    A discovered ADAPTER unit (CR-17 pt 2) — the registration record for one
+    task-adapter implementation installed in some tool's worker env.
+    
+    Generated in-env by `cjm-ctl generate-adapter-manifest` (the protocol
+    members are introspected where the protocol is importable); discovered
+    host-side beside capability manifests via the `unit` discriminator.
+    """
+    
+    name: str  # Unique unit name ("module.ClassName")
+    version: str  # Interface-lib version at generation
+    task_name: str  # The task this adapter serves (e.g. "graph-storage")
+    module: str  # Impl module (importable in the tool's worker env)
+    class_name: str  # Impl class name
+    required_tool_protocol: str  # Protocol FQN (semantic contract; host never imports it)
+    protocol_members: Dict[str, Any] = field(...)  # {"methods": [{"name","signature","params"}], "properties": [...]}
+    conda_env: str = ''  # Env the manifest was generated from
+    generated_at: str = ''  # ISO timestamp
+    unit: str = 'adapter'  # Manifest-kind discriminator
+    
+    def to_dict(self) -> Dict[str, Any]:  # JSON-ready dict ("class" key on disk)
+            """Serialize to the on-disk JSON shape."""
+            return {
+                "unit": self.unit,
+        "Serialize to the on-disk JSON shape."
 ```
 
 ### Bootstrap (`bootstrap.ipynb`)
@@ -660,7 +755,9 @@ def derive_structural_surface(
     the canonical-JSON witness hash is stable across runs.
     
     Classification: `property` → properties (names only); functions
-    (static/class methods unwrapped) → methods with `str(inspect.signature)`;
+    (static/class methods unwrapped) → methods with `str(inspect.signature)`
+    + the parameter NAME list `params` (self excluded — the CR-17 pt 2
+    surface matcher's input; stage 4);
     everything else public → attributes with the value's type name
     (config_class, supported_actions, WORKER_ENV, ...).
     """
@@ -1154,6 +1251,7 @@ from cjm_plugin_system.cli import (
     setup_runtime,
     run_cmd,
     regenerate_manifest,
+    generate_adapter_manifest,
     install_all,
     setup_host,
     estimate_size,
@@ -1281,6 +1379,23 @@ def regenerate_manifest(
     then post-writes to preserve the original `installed_at` so the regenerate
     only updates `regenerated_at` semantically. Always emits v2.0 layout —
     regenerating a v1.0 manifest transparently upgrades it.
+    """
+```
+
+``` python
+def generate_adapter_manifest(
+    env_name: str = typer.Argument(..., help="Conda env containing the adapter impl (the tool's worker env)"),
+    target: str = typer.Argument(..., help="Adapter impl spec 'module:ClassName'"),
+)
+    """
+    CR-17 pt 2 (stage 4): introspect a task-adapter impl in-env and write its adapter manifest.
+    
+    The adapter manifest is the REGISTRATION unit (pass-2 Thread 3): task_name
+    + required_tool_protocol members (names + parameter lists + signatures)
+    recorded IN-ENV where the protocol is importable, so host-side
+    compatibility matching works against UNLOADED capabilities with zero
+    protocol imports host-side. Written to the same manifests dir capability
+    manifests live in; `discover_manifests()` routes by the `unit` key.
     """
 ```
 
@@ -2751,9 +2866,7 @@ def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin me
     without re-parsing.
     """
     self.discovered = []
-    seen_plugins = set()
-
-    for base_path in self.search_paths
+    self.adapter_manifests = []  # CR-17 pt 2: adapter units discovered beside capabilities
     """
     Discover plugins via JSON manifests in search paths.
     
@@ -2764,6 +2877,61 @@ def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin me
     `ManifestV2` is also attached as `meta.manifest_v2` so drift detection
     + future typed callers can read `drift_tracking.config_schema_hash`
     without re-parsing.
+    """
+```
+
+``` python
+def get_adapters_for_task(
+    self,
+    task_name: str,  # Task name, e.g. "graph-storage"
+) -> List[AdapterManifest]:  # Discovered adapter units serving the task
+    "CR-17 pt 2: the adapter-registry view — discovered adapter manifests for a task."
+```
+
+``` python
+def check_adapter_compatibility(
+    self,
+    adapter: Union[str, AdapterManifest],  # Adapter unit name or manifest
+    capability_name: str,  # Discovered capability (plugin) name
+) -> Dict[str, Any]:  # Match verdict (see match_protocol_against_surface)
+    """
+    CR-17 pt 2: surface-based compatibility verdict (host-side; works against
+    UNLOADED capabilities — manifest-vs-manifest, no protocol imports host-side).
+    
+    Matches the adapter's recorded protocol members against the capability
+    manifest's recorded `structural_surface` (pass-2 Thread 3: the capability
+    records only itself; the adapter declares the protocol; the substrate
+    matches). A capability without a recorded surface (pre-fracture manifest)
+    is NOT compatible until its manifest regenerates — staleness stays visible
+    instead of silently mis-answering.
+    """
+```
+
+``` python
+def get_capabilities_compatible_with(
+    self,
+    adapter: Union[str, AdapterManifest],  # Adapter unit name or manifest
+) -> List[str]:  # Discovered capability names whose surface satisfies the protocol
+    "CR-17 pt 2: the pass-2 compatibility query, manifest-surface-based."
+```
+
+``` python
+def _resolve_adapter_specs(
+    self,
+    plugin_meta,  # Capability PluginMeta being loaded
+    adapters=None,  # Explicit adapter unit names (loud refusal on mismatch); None = auto-bind compatibles
+) -> List[str]:  # Worker specs "module:ClassName"
+    """
+    CR-17 pt 2: resolve which adapter impls bind in-worker at spawn.
+    
+    AUTO (adapters=None): every discovered adapter whose protocol members match
+    the capability's recorded surface binds silently — binding rides
+    `load_plugin` with no separate manual call (the G11 lesson: a manual
+    registration step no CLI makes is silently inert).
+    
+    EXPLICIT (adapters=[names]): each named unit is verified; an incompatible
+    pairing REFUSES LOUDLY with the missing members in the message (the CR-17
+    negative check).
     """
 ```
 
@@ -3055,7 +3223,8 @@ def load_plugin(
     strict:bool=True, # SG-5: reject unknown keys against manifest config_schema (default)
     instance_id:Optional[str]=None, # CR-10: explicit instance_id; None defaults to plugin_name
     new_instance:bool=False, # CR-10: auto-generate `{name}-{hex}` instance_id (with instance_id=None)
-    max_concurrent_requests:Optional[int]=None # SG-33 (CR-7): per-instance async concurrency cap; None = unbounded
+    max_concurrent_requests:Optional[int]=None, # SG-33 (CR-7): per-instance async concurrency cap; None = unbounded
+    adapters:Optional[List[str]]=None # CR-17 pt 2: explicit adapter unit names (loud refusal on mismatch); None = auto-bind discovered compatibles
 ) -> bool: # True if successfully loaded
     """
     Load a plugin by spawning a Worker subprocess.
@@ -3271,6 +3440,8 @@ def execute_plugin(
     self,
     name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
     *args,
+    _task_name:Optional[str]=None, # CR-17 pt 2: route via the task channel (adapter task) instead of execute
+    _method:Optional[str]=None, # CR-17 pt 2: adapter method (set with _task_name)
     **kwargs
 ) -> Any: # Plugin result
     """
@@ -3300,6 +3471,8 @@ async def execute_plugin_async(
     self,
     name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
     *args,
+    _task_name:Optional[str]=None, # CR-17 pt 2: route via the task channel (adapter task) instead of execute
+    _method:Optional[str]=None, # CR-17 pt 2: adapter method (set with _task_name)
     **kwargs
 ) -> Any: # Plugin result
     """
@@ -3313,6 +3486,39 @@ async def execute_plugin_async(
     sync variant docstring for the rationale). Per-instance asyncio.Semaphore
     enforces the `max_concurrent_requests` cap (None = unbounded). Empirical
     sample recorded in the finally block.
+    """
+```
+
+``` python
+def execute_plugin_task(
+    self,
+    name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
+    task_name:str, # Adapter task, e.g. "graph-storage"
+    method:str, # Adapter method, e.g. "query_nodes"
+    **kwargs
+) -> Any: # Typed task result
+    """
+    CR-17 pt 2: execute a typed task-adapter method (explicit task channel; sync).
+    
+    Thin wrapper over `execute_plugin` — the whole CR-7 retry / scheduler /
+    empirical-sampling machinery applies identically to task-channel calls.
+    """
+```
+
+``` python
+async def execute_plugin_task_async(
+    self,
+    name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
+    task_name:str, # Adapter task, e.g. "graph-storage"
+    method:str, # Adapter method, e.g. "query_nodes"
+    **kwargs
+) -> Any: # Typed task result
+    """
+    CR-17 pt 2: execute a typed task-adapter method (explicit task channel; async).
+    
+    Thin wrapper over `execute_plugin_async` — CR-7 retry, SG-33 semaphore,
+    admission and empirical sampling apply identically; this is the method
+    the JobQueue's task-addressed jobs invoke.
     """
 ```
 
@@ -4668,6 +4874,8 @@ class CompositionNode:
     plugin_instance_id: str  # Target capability instance
     kwargs: Dict[str, Any] = field(...)  # Static values + OutputRef markers
     priority: int = 0  # Per-node priority override (0 = inherit composition priority)
+    task_name: Optional[str]  # Task-channel address: adapter task (stage 4; None = execute channel)
+    method: Optional[str]  # Task-channel address: adapter method (set with task_name)
 ```
 
 ``` python
@@ -4768,6 +4976,8 @@ from cjm_plugin_system.core.proxy import (
     execute_stream,
     execute_with_oom_check,
     execute_async_with_oom_check,
+    execute_task,
+    execute_task_async,
     get_stats,
     is_alive,
     get_structural_surface,
@@ -5006,6 +5216,35 @@ async def execute_async_with_oom_check(self, *args, **kwargs) -> Any:
     payload = self._prepare_payload(args, kwargs)
     try
     "CR-7 Track A wrapper around the async execute path. Same semantics."
+```
+
+``` python
+def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
+    """Invoke a typed task-adapter method in-worker (CR-17 pt 2; sync).
+
+    The explicit task channel: `action=` stays the tool's native in-worker
+    dispatch; this addresses the TASK contract (adapter + method). Kwargs-only
+    by design. Built ONCE with the CR-7 Track-A worker-death check inside —
+    no later wrapper supersedes it (the G7a last-assignment-wins lesson).
+    """
+    payload = {
+        "task": task_name,
+    """
+    Invoke a typed task-adapter method in-worker (CR-17 pt 2; sync).
+    
+    The explicit task channel: `action=` stays the tool's native in-worker
+    dispatch; this addresses the TASK contract (adapter + method). Kwargs-only
+    by design. Built ONCE with the CR-7 Track-A worker-death check inside —
+    no later wrapper supersedes it (the G7a last-assignment-wins lesson).
+    """
+```
+
+``` python
+async def execute_task_async(self, task_name: str, method: str, **kwargs) -> Any:
+    """Invoke a typed task-adapter method in-worker (CR-17 pt 2; async). Same semantics."""
+    payload = {
+        "task": task_name,
+    "Invoke a typed task-adapter method in-worker (CR-17 pt 2; async). Same semantics."
 ```
 
 ``` python
@@ -5317,14 +5556,16 @@ class RemotePluginProxy:
     def __init__(
         self,
         manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
-        extra_env:Optional[Dict[str, str]]=None # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
+        extra_env:Optional[Dict[str, str]]=None, # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
+        adapter_specs:Optional[List[str]]=None # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
     )
     "Proxy that forwards plugin calls to an isolated Worker subprocess."
     
     def __init__(
             self,
             manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
-            extra_env:Optional[Dict[str, str]]=None # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
+            extra_env:Optional[Dict[str, str]]=None, # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
+            adapter_specs:Optional[List[str]]=None # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
         )
         "Initialize proxy and start the worker process."
     
@@ -5424,6 +5665,8 @@ async def submit(
     plugin_instance_id: str,  # Target plugin instance (per CR-10)
     *args,
     priority: int = 0,  # Higher = more urgent
+    task: Optional[str] = None,  # Task-channel address: adapter task name (stage 4)
+    method: Optional[str] = None,  # Task-channel address: adapter method (set with task)
     **kwargs
 ) -> str:  # Returns job_id
     """
@@ -6230,6 +6473,12 @@ class JobQueueDependencies(Protocol):
         async def get_global_stats(self) -> Dict[str, Any]: ...
     
     async def get_global_stats(self) -> Dict[str, Any]: ...
+        # Stage 4 (CR-17 pt 2) task channel — invoked only for task-addressed jobs
+        # (Job.task_name set); execute-channel jobs never touch it, so older test
+        # doubles keep working unchanged.
+        async def execute_plugin_task_async(self, name_or_id: str, task_name: str, method: str, **kwargs: Any) -> Any: ...
+    
+    async def execute_plugin_task_async(self, name_or_id: str, task_name: str, method: str, **kwargs: Any) -> Any: ...
 ```
 
 ``` python
@@ -6259,6 +6508,8 @@ class Job:
     error: Optional[JobError]  # Structured failure summary (CR-5)
     composition_id: Optional[str]  # Set when part of a composition (stage 3)
     node_id: Optional[str]  # Composition node this job executes (stage 3)
+    task_name: Optional[str]  # Task-channel address: adapter task (stage 4, CR-17 pt 2)
+    method: Optional[str]  # Task-channel address: adapter method (stage 4)
     cancel_requested_at: Optional[datetime]  # When cancel was requested (Stage 4)
     cancel_phase: Optional[CancelPhase]  # Active cancel phase (Stage 4)
     block_reason: Optional[str]  # Why the scheduler is blocking (Stage 4)
@@ -7051,12 +7302,30 @@ def _register_config_endpoints(
 ```
 
 ``` python
+def _load_adapters(
+    plugin_instance,  # The loaded tool-capability instance
+    adapter_specs,    # List of "module:ClassName" impl specs (host-matched)
+) -> Dict[str, Any]:  # task_name -> bound adapter instance
+    """
+    Instantiate task-adapter impls bound to this worker's tool (CR-17 pt 2).
+    
+    Each spec was matched HOST-side (adapter-manifest protocol members vs the
+    capability's recorded structural surface) before reaching the worker, so a
+    spec failing HERE is an INSTALL gap (interface lib missing from this env),
+    not a compatibility miss — log loudly, skip, keep serving /execute.
+    Binding convention: `AdapterClass(plugin_instance)`; keyed by the class's
+    `task_name` ClassVar.
+    """
+```
+
+``` python
 def _register_task_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
+    adapters=None,   # task_name -> bound adapter instance (CR-17 pt 2; stage 4)
 ) -> None
     """
-    /execute /execute_stream /cancel /progress: the task channel.
+    /execute /execute_stream /cancel /progress /task: the task channel.
     
     Stage 2 (typed wire layer): both result-serialization sites pass
     through `wire_encode`, so results whose DTO classes are registered
@@ -7077,7 +7346,8 @@ def _register_monitor_endpoints(
 ``` python
 def create_app(
     module_name: str, # Python module path (e.g., "my_plugin.plugin")
-    class_name: str   # Plugin class name (e.g., "WhisperPlugin")
+    class_name: str,  # Plugin class name (e.g., "WhisperPlugin")
+    adapter_specs=None # CR-17 pt 2: "module:ClassName" adapter impl specs to bind in-worker
 ) -> FastAPI: # Configured FastAPI application
     """
     Create FastAPI app that hosts the specified plugin.
@@ -7094,6 +7364,8 @@ def run_worker() -> None:
     parser = argparse.ArgumentParser(description="Universal Plugin Worker")
     parser.add_argument("--module", required=True, help="Plugin module path")
     parser.add_argument("--class", dest="class_name", required=True, help="Plugin class name")
+    parser.add_argument("--adapters", required=False, default="",
+                        help="Comma-separated adapter impl specs 'module:ClassName' (CR-17 pt 2)")
     # SG-4: parent-bound listening-socket FD inheritance closes the
     "CLI entry point for running the worker."
 ```
