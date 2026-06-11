@@ -113,6 +113,10 @@ class JobQueueDependencies(Protocol):
     def get_admission_profile(self, name_or_id: str) -> Optional[Dict[str, Any]]: ...
     def get_instance_concurrency_cap(self, name_or_id: str) -> Optional[int]: ...
     async def get_global_stats(self) -> Dict[str, Any]: ...
+    # Stage 4 (CR-17 pt 2) task channel — invoked only for task-addressed jobs
+    # (Job.task_name set); execute-channel jobs never touch it, so older test
+    # doubles keep working unchanged.
+    async def execute_plugin_task_async(self, name_or_id: str, task_name: str, method: str, **kwargs: Any) -> Any: ...
 
 # %% ../../nbs/core/queue.ipynb #job-dataclass
 @dataclass
@@ -139,6 +143,8 @@ class Job:
     error: Optional[JobError] = None  # Structured failure summary (CR-5)
     composition_id: Optional[str] = None  # Set when part of a composition (stage 3)
     node_id: Optional[str] = None  # Composition node this job executes (stage 3)
+    task_name: Optional[str] = None  # Task-channel address: adapter task (stage 4, CR-17 pt 2)
+    method: Optional[str] = None  # Task-channel address: adapter method (stage 4)
     cancel_requested_at: Optional[datetime] = None  # When cancel was requested (Stage 4)
     cancel_phase: Optional[CancelPhase] = None  # Active cancel phase (Stage 4)
     block_reason: Optional[str] = None  # Why the scheduler is blocking (Stage 4)
@@ -349,6 +355,8 @@ async def submit(
     plugin_instance_id: str,  # Target plugin instance (per CR-10)
     *args,
     priority: int = 0,  # Higher = more urgent
+    task: Optional[str] = None,  # Task-channel address: adapter task name (stage 4)
+    method: Optional[str] = None,  # Task-channel address: adapter method (set with task)
     **kwargs
 ) -> str:  # Returns job_id
     """Submit a job to the queue.
@@ -367,7 +375,15 @@ async def submit(
     # CR-2: late import to avoid pulling errors module into queue's import
     # path during library load (keeps the worker.py-via-queue.py import
     # chain minimal).
-    from cjm_plugin_system.core.errors import PluginDisabledError
+    from cjm_plugin_system.core.errors import PluginDisabledError, PluginInputError
+
+    # Stage 4: the task channel addresses adapter+method as a pair.
+    if (task is None) != (method is None):
+        raise PluginInputError(
+            f"Task-channel submits require BOTH task and method "
+            f"(got task={task!r}, method={method!r})",
+            fields_invalid=["task", "method"],
+        )
 
     meta = self._deps.get_plugin_meta(plugin_instance_id)
     if meta is not None and not meta.enabled:
@@ -379,6 +395,8 @@ async def submit(
         args=args,
         kwargs=kwargs,
         priority=priority,
+        task_name=task,
+        method=method,
     )
     return await self._enqueue_job(job)
 
@@ -935,6 +953,8 @@ async def _start_ready_nodes(
             priority=node.priority if node.priority else run.composition.priority,
             composition_id=run.id,
             node_id=nid,
+            task_name=node.task_name,
+            method=node.method,
         )
         run.record_started(nid, member.id)
         await self._enqueue_job(member)
@@ -1643,10 +1663,17 @@ async def _execute_with_cancellation(
     Force-kill path (cooperative timeout):
         COOPERATIVE → FORCE → RELOADING → COMPLETED
     """
-    # Start execution
-    exec_task = asyncio.create_task(
-        self._deps.execute_plugin_async(job.plugin_instance_id, *job.args, **job.kwargs)
-    )
+    # Start execution. Task-addressed jobs (stage 4, CR-17 pt 2) route via
+    # the explicit task channel; execute-channel jobs are unchanged.
+    if job.task_name is not None:
+        exec_task = asyncio.create_task(
+            self._deps.execute_plugin_task_async(
+                job.plugin_instance_id, job.task_name, job.method, **job.kwargs)
+        )
+    else:
+        exec_task = asyncio.create_task(
+            self._deps.execute_plugin_async(job.plugin_instance_id, *job.args, **job.kwargs)
+        )
 
     # Monitor for cancellation
     while not exec_task.done():

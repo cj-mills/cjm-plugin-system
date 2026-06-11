@@ -851,7 +851,9 @@ def derive_structural_surface(
     the canonical-JSON witness hash is stable across runs.
 
     Classification: `property` → properties (names only); functions
-    (static/class methods unwrapped) → methods with `str(inspect.signature)`;
+    (static/class methods unwrapped) → methods with `str(inspect.signature)`
+    + the parameter NAME list `params` (self excluded — the CR-17 pt 2
+    surface matcher's input; stage 4);
     everything else public → attributes with the value's type name
     (config_class, supported_actions, WORKER_ENV, ...).
     """
@@ -869,10 +871,12 @@ def derive_structural_surface(
             attr = attr.__func__
         if inspect.isfunction(attr):
             try:
-                sig = str(inspect.signature(attr))
+                signature = inspect.signature(attr)
+                sig = str(signature)
+                params = [p for p in signature.parameters if p != "self"]
             except (ValueError, TypeError):
-                sig = "(...)"
-            methods.append({"name": name, "signature": sig})
+                sig, params = "(...)", []
+            methods.append({"name": name, "signature": sig, "params": params})
         else:
             attributes.append({"name": name, "type": type(attr).__name__})
     return {"methods": methods, "properties": properties, "attributes": attributes}

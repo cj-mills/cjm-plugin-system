@@ -381,12 +381,49 @@ def _register_config_endpoints(
 
 
 
+# %% ../../nbs/core/worker.ipynb #747f2011
+def _load_adapters(
+    plugin_instance,  # The loaded tool-capability instance
+    adapter_specs,    # List of "module:ClassName" impl specs (host-matched)
+) -> Dict[str, Any]:  # task_name -> bound adapter instance
+    """Instantiate task-adapter impls bound to this worker's tool (CR-17 pt 2).
+
+    Each spec was matched HOST-side (adapter-manifest protocol members vs the
+    capability's recorded structural surface) before reaching the worker, so a
+    spec failing HERE is an INSTALL gap (interface lib missing from this env),
+    not a compatibility miss — log loudly, skip, keep serving /execute.
+    Binding convention: `AdapterClass(plugin_instance)`; keyed by the class's
+    `task_name` ClassVar.
+    """
+    adapters: Dict[str, Any] = {}
+    for spec in adapter_specs or []:
+        try:
+            module_name, class_name = spec.rsplit(":", 1)
+            mod = importlib.import_module(module_name)
+            cls = getattr(mod, class_name)
+            task_name = getattr(cls, "task_name", "") or ""
+            if not task_name:
+                logging.error(f"Adapter {spec!r} has no task_name; skipping")
+                continue
+            if task_name in adapters:
+                logging.error(
+                    f"Task {task_name!r} already bound to "
+                    f"{type(adapters[task_name]).__name__}; skipping {spec!r}")
+                continue
+            adapters[task_name] = cls(plugin_instance)
+            logging.info(f"Bound adapter {class_name} for task {task_name!r}")
+        except Exception as e:
+            logging.error(f"Failed to load adapter {spec!r}: {e}")
+    return adapters
+
+
 # %% ../../nbs/core/worker.ipynb #0a62d840
 def _register_task_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
+    adapters=None,   # task_name -> bound adapter instance (CR-17 pt 2; stage 4)
 ) -> None:
-    """/execute /execute_stream /cancel /progress: the task channel.
+    """/execute /execute_stream /cancel /progress /task: the task channel.
 
     Stage 2 (typed wire layer): both result-serialization sites pass
     through `wire_encode`, so results whose DTO classes are registered
@@ -450,6 +487,62 @@ def _register_task_endpoints(
             # actually see resource errors from plain /execute calls. The
             # old bare-string detail collapsed every failure to RuntimeError
             # host-side, leaving the retry path blind on this channel.
+            job_error = map_bare_exception_to_job_error(
+                e, plugin_name=getattr(plugin_instance, "name", "unknown"),
+            )
+            body = json.loads(json.dumps({"_job_error": job_error},
+                                         cls=EnhancedJSONEncoder))
+            return JSONResponse(status_code=500, content=body)
+
+    _adapters = adapters or {}
+
+    @app.post("/task")
+    async def task_call(request: Request) -> Any:
+        """Typed task-adapter dispatch (CR-17 pt 2; stage 4).
+
+        Body: {"task": <task_name>, "method": <adapter method>, "kwargs": {...}}.
+        Kwargs-only by design — typed task methods have named parameters; the
+        explicit task channel never overloads `action=` (that stays the tool's
+        native in-worker dispatch). Results pass through `wire_encode` (typed
+        DTOs cross the boundary in the tagged envelope); failures carry the
+        same `{"_job_error": ...}` 500 body as /execute (G7 typed unary error
+        channel) so CR-7 retry sees typed categories from day one.
+        """
+        data = await request.json()
+        task = data.get("task")
+        method_name = data.get("method") or ""
+        kwargs = data.get("kwargs", {})
+        adapter = _adapters.get(task)
+        if adapter is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No adapter bound for task {task!r} (bound: {sorted(_adapters)})")
+        if not method_name or method_name.startswith("_"):
+            raise HTTPException(
+                status_code=404, detail=f"Invalid task method {method_name!r}")
+        fn = getattr(adapter, method_name, None)
+        if not callable(fn):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task {task!r} adapter has no method {method_name!r}")
+
+        # Cancel-flag + usage reset parity with /execute (the adapter drives
+        # the same tool instance underneath).
+        if hasattr(plugin_instance, "_cancel_requested"):
+            plugin_instance._cancel_requested = False
+        plugin_instance._last_api_usage = None
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, lambda: fn(**kwargs))
+            json_str = json.dumps(wire_encode(result), cls=EnhancedJSONEncoder)
+            return json.loads(json_str)
+        except PluginCancelledError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        except HTTPException:
+            raise
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
             job_error = map_bare_exception_to_job_error(
                 e, plugin_name=getattr(plugin_instance, "name", "unknown"),
             )
@@ -595,7 +688,8 @@ def _register_monitor_endpoints(
 # %% ../../nbs/core/worker.ipynb #82f0d516
 def create_app(
     module_name: str, # Python module path (e.g., "my_plugin.plugin")
-    class_name: str   # Plugin class name (e.g., "WhisperPlugin")
+    class_name: str,  # Plugin class name (e.g., "WhisperPlugin")
+    adapter_specs=None # CR-17 pt 2: "module:ClassName" adapter impl specs to bind in-worker
 ) -> FastAPI: # Configured FastAPI application
     """Create FastAPI app that hosts the specified plugin.
 
@@ -604,11 +698,12 @@ def create_app(
     module-level `_register_*` helpers above.
     """
     plugin_instance = _load_plugin_instance(module_name, class_name)
+    adapters = _load_adapters(plugin_instance, adapter_specs)
     app = FastAPI(title="Plugin Worker", lifespan=_make_lifespan(plugin_instance))
     _register_identity_endpoints(app, plugin_instance)
     _register_lifecycle_endpoints(app, plugin_instance)
     _register_config_endpoints(app, plugin_instance)
-    _register_task_endpoints(app, plugin_instance)
+    _register_task_endpoints(app, plugin_instance, adapters)
     _register_monitor_endpoints(app, plugin_instance, class_name)
     return app
 
@@ -618,6 +713,8 @@ def run_worker() -> None:
     parser = argparse.ArgumentParser(description="Universal Plugin Worker")
     parser.add_argument("--module", required=True, help="Plugin module path")
     parser.add_argument("--class", dest="class_name", required=True, help="Plugin class name")
+    parser.add_argument("--adapters", required=False, default="",
+                        help="Comma-separated adapter impl specs 'module:ClassName' (CR-17 pt 2)")
     # SG-4: parent-bound listening-socket FD inheritance closes the
     # bind-then-close-then-reopen TOCTOU race. --fd is preferred on Unix;
     # --port stays as the Windows fallback (pass_fds is Unix-only) and as a
@@ -641,7 +738,8 @@ def run_worker() -> None:
         )
         watchdog.start()
 
-    app = create_app(args.module, args.class_name)
+    adapter_specs = [s.strip() for s in (args.adapters or "").split(",") if s.strip()]
+    app = create_app(args.module, args.class_name, adapter_specs=adapter_specs)
     if args.fd is not None:
         uvicorn.run(app, fd=args.fd, log_level="warning")
     else:

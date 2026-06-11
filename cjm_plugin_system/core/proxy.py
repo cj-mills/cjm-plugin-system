@@ -6,10 +6,10 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/proxy.html.md"""
 
 # %% auto #0
 __all__ = ['RemotePluginProxy', 'execute_async', 'execute_stream_sync', 'execute_stream', 'execute_with_oom_check',
-           'execute_async_with_oom_check', 'get_stats', 'is_alive', 'get_structural_surface', 'cancel', 'cancel_async',
-           'get_progress', 'get_progress_async', 'on_disable', 'on_enable', 'get_system_status',
-           'get_system_status_async', 'list_processes', 'list_processes_async', 'prefetch', 'prefetch_async',
-           'reconfigure', 'reconfigure_async']
+           'execute_async_with_oom_check', 'execute_task', 'execute_task_async', 'get_stats', 'is_alive',
+           'get_structural_surface', 'cancel', 'cancel_async', 'get_progress', 'get_progress_async', 'on_disable',
+           'on_enable', 'get_system_status', 'get_system_status_async', 'list_processes', 'list_processes_async',
+           'prefetch', 'prefetch_async', 'reconfigure', 'reconfigure_async']
 
 # %% ../../nbs/core/proxy.ipynb #exports
 import json
@@ -55,10 +55,12 @@ class RemotePluginProxy(ToolCapability):
     def __init__(
         self,
         manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
-        extra_env:Optional[Dict[str, str]]=None # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
+        extra_env:Optional[Dict[str, str]]=None, # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
+        adapter_specs:Optional[List[str]]=None # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
     ):
         """Initialize proxy and start the worker process."""
         self.manifest = manifest
+        self.adapter_specs = list(adapter_specs or [])
         # CR-12: substrate-composed worker-env overlay — resolved secrets (from
         # the SecretStore) + any visible env overrides. Merged into the worker
         # subprocess env at spawn, AFTER the manifest's static env_vars but
@@ -189,6 +191,9 @@ def _start_process(self:RemotePluginProxy) -> None:
         *port_args,
         "--ppid", str(os.getpid())  # Enable suicide pact
     ]
+    # CR-17 pt 2: bind host-matched adapter impls in-worker at spawn.
+    if getattr(self, 'adapter_specs', None):
+        cmd += ["--adapters", ",".join(self.adapter_specs)]
 
     # Merge environment variables from manifest
     env = dict(os.environ)
@@ -517,6 +522,59 @@ async def execute_async_with_oom_check(self, *args, **kwargs) -> Any:
 RemotePluginProxy._check_worker_death = _check_worker_death
 RemotePluginProxy.execute = execute_with_oom_check
 RemotePluginProxy.execute_async = execute_async_with_oom_check
+
+# %% ../../nbs/core/proxy.ipynb #1a3bb3f7
+def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
+    """Invoke a typed task-adapter method in-worker (CR-17 pt 2; sync).
+
+    The explicit task channel: `action=` stays the tool's native in-worker
+    dispatch; this addresses the TASK contract (adapter + method). Kwargs-only
+    by design. Built ONCE with the CR-7 Track-A worker-death check inside —
+    no later wrapper supersedes it (the G7a last-assignment-wins lesson).
+    """
+    payload = {
+        "task": task_name,
+        "method": method,
+        "kwargs": {k: self._maybe_serialize_input(v) for k, v in kwargs.items()},
+    }
+    try:
+        with httpx.Client(timeout=None) as client:
+            resp = client.post(f"{self.base_url}/task", json=payload)
+    except (httpx.ConnectError, httpx.RemoteProtocolError,
+            httpx.ReadError, httpx.WriteError):
+        self._check_worker_death()
+        raise
+    if resp.status_code == 409:
+        raise PluginCancelledError(self.name)
+    if resp.status_code != 200:
+        _raise_typed_execute_error(resp, self.name)  # G7 typed channel from day one
+    return wire_decode(resp.json())
+
+
+async def execute_task_async(self, task_name: str, method: str, **kwargs) -> Any:
+    """Invoke a typed task-adapter method in-worker (CR-17 pt 2; async). Same semantics."""
+    payload = {
+        "task": task_name,
+        "method": method,
+        "kwargs": {k: self._maybe_serialize_input(v) for k, v in kwargs.items()},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            resp = await client.post(f"{self.base_url}/task", json=payload)
+    except (httpx.ConnectError, httpx.RemoteProtocolError,
+            httpx.ReadError, httpx.WriteError):
+        self._check_worker_death()
+        raise
+    if resp.status_code == 409:
+        raise PluginCancelledError(self.name)
+    if resp.status_code != 200:
+        _raise_typed_execute_error(resp, self.name)
+    return wire_decode(resp.json())
+
+
+RemotePluginProxy.execute_task = execute_task
+RemotePluginProxy.execute_task_async = execute_task_async
+
 
 # %% ../../nbs/core/proxy.ipynb #lifecycle
 def get_stats(self) -> Dict[str, Any]: # Process telemetry

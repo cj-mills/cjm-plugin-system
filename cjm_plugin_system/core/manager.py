@@ -6,15 +6,17 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/manager.html.md"""
 
 # %% auto #0
 __all__ = ['PluginManager', 'register_system_monitor', 'get_global_stats', 'get_admission_profile',
-           'get_instance_concurrency_cap', 'discover_manifests', 'get_discovered_by_category',
-           'get_plugins_by_category', 'get_discovered_categories', 'get_loaded_categories', 'get_plugin_meta',
-           'get_discovered_meta', 'get_instance', 'list_instances', 'get_worker_env_status', 'missing_required_env',
-           'set_plugin_secret', 'load_plugin', 'load_all', 'unload_plugin', 'unload_all', 'get_plugin', 'list_plugins',
-           'execute_plugin', 'execute_plugin_async', 'enable_plugin', 'disable_plugin', 'get_plugin_logs',
-           'get_plugin_config', 'get_plugin_config_schema', 'get_config_options', 'get_all_plugin_configs',
-           'update_plugin_config', 'reload_plugin', 'get_plugin_stats', 'execute_plugin_stream', 'load_plugin_async',
-           'unload_plugin_async', 'load_plugins_concurrent', 'unload_plugins_concurrent', 'PluginBinding', 'bind',
-           'get_by_role', 'get_by_domain', 'get_canonical', 'get_compatible_for_current_platform']
+           'get_instance_concurrency_cap', 'discover_manifests', 'get_adapters_for_task', 'check_adapter_compatibility',
+           'get_capabilities_compatible_with', 'get_discovered_by_category', 'get_plugins_by_category',
+           'get_discovered_categories', 'get_loaded_categories', 'get_plugin_meta', 'get_discovered_meta',
+           'get_instance', 'list_instances', 'get_worker_env_status', 'missing_required_env', 'set_plugin_secret',
+           'load_plugin', 'load_all', 'unload_plugin', 'unload_all', 'get_plugin', 'list_plugins', 'execute_plugin',
+           'execute_plugin_async', 'execute_plugin_task', 'execute_plugin_task_async', 'enable_plugin',
+           'disable_plugin', 'get_plugin_logs', 'get_plugin_config', 'get_plugin_config_schema', 'get_config_options',
+           'get_all_plugin_configs', 'update_plugin_config', 'reload_plugin', 'get_plugin_stats',
+           'execute_plugin_stream', 'load_plugin_async', 'unload_plugin_async', 'load_plugins_concurrent',
+           'unload_plugins_concurrent', 'PluginBinding', 'bind', 'get_by_role', 'get_by_domain', 'get_canonical',
+           'get_compatible_for_current_platform']
 
 # %% ../../nbs/core/manager.ipynb #31a5a9f1
 import asyncio
@@ -43,6 +45,10 @@ from cjm_plugin_system.core.manifest_format import (
 )
 from .metadata import PluginInstance, PluginLoadSpec, PluginMeta, PluginTaxonomy, ResourceRequirements
 from .proxy import RemotePluginProxy
+from cjm_plugin_system.core.adapter_manifest import (
+    AdapterManifest, adapter_manifest_from_dict, is_adapter_manifest,
+    match_protocol_against_surface,
+)
 from .scheduling import ResourceScheduler, PermissiveScheduler
 from ._telemetry import attribute_gpu_to_worker_subtree
 
@@ -453,7 +459,9 @@ def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin me
     without re-parsing.
     """
     self.discovered = []
+    self.adapter_manifests = []  # CR-17 pt 2: adapter units discovered beside capabilities
     seen_plugins = set()
+    seen_adapters = set()
 
     for base_path in self.search_paths:
         if not base_path.exists():
@@ -461,6 +469,20 @@ def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin me
         
         for manifest_file in base_path.glob("*.json"):
             try:
+                # CR-17 pt 2 (stage 4): adapter manifests are separate
+                # registered units in the same search paths — route by the
+                # "unit" discriminator before capability parsing.
+                with open(manifest_file) as _f:
+                    _raw = json.load(_f)
+                if is_adapter_manifest(_raw):
+                    am = adapter_manifest_from_dict(_raw)
+                    if am.name not in seen_adapters:
+                        self.adapter_manifests.append(am)
+                        seen_adapters.add(am.name)
+                        self.logger.info(
+                            f"Discovered adapter manifest: {am.name} "
+                            f"(task {am.task_name!r}) from {manifest_file}")
+                    continue
                 # CR-8: parse via load_manifest. Returns typed ManifestV2
                 # regardless of on-disk format (nested v2.0 or legacy flat).
                 v2 = load_manifest(manifest_file)
@@ -516,6 +538,107 @@ def discover_manifests(self) -> List[PluginMeta]: # List of discovered plugin me
     return self.discovered
 
 PluginManager.discover_manifests = discover_manifests
+
+# %% ../../nbs/core/manager.ipynb #d7d0119b
+def get_adapters_for_task(
+    self,
+    task_name: str,  # Task name, e.g. "graph-storage"
+) -> List[AdapterManifest]:  # Discovered adapter units serving the task
+    """CR-17 pt 2: the adapter-registry view — discovered adapter manifests for a task."""
+    return [a for a in getattr(self, 'adapter_manifests', []) if a.task_name == task_name]
+
+
+def check_adapter_compatibility(
+    self,
+    adapter: Union[str, AdapterManifest],  # Adapter unit name or manifest
+    capability_name: str,  # Discovered capability (plugin) name
+) -> Dict[str, Any]:  # Match verdict (see match_protocol_against_surface)
+    """CR-17 pt 2: surface-based compatibility verdict (host-side; works against
+    UNLOADED capabilities — manifest-vs-manifest, no protocol imports host-side).
+
+    Matches the adapter's recorded protocol members against the capability
+    manifest's recorded `structural_surface` (pass-2 Thread 3: the capability
+    records only itself; the adapter declares the protocol; the substrate
+    matches). A capability without a recorded surface (pre-fracture manifest)
+    is NOT compatible until its manifest regenerates — staleness stays visible
+    instead of silently mis-answering.
+    """
+    am = adapter if isinstance(adapter, AdapterManifest) else next(
+        (a for a in getattr(self, 'adapter_manifests', []) if a.name == adapter), None)
+    if am is None:
+        raise ValueError(f"Unknown adapter unit {adapter!r}")
+    meta = next((m for m in self.discovered if m.name == capability_name), None)
+    if meta is None:
+        raise ValueError(
+            f"Unknown capability {capability_name!r} (run discover_manifests first)")
+    surface = (getattr(meta, 'manifest', None) or {}).get('structural_surface')
+    return match_protocol_against_surface(am.protocol_members, surface)
+
+
+def get_capabilities_compatible_with(
+    self,
+    adapter: Union[str, AdapterManifest],  # Adapter unit name or manifest
+) -> List[str]:  # Discovered capability names whose surface satisfies the protocol
+    """CR-17 pt 2: the pass-2 compatibility query, manifest-surface-based."""
+    return [m.name for m in self.discovered
+            if self.check_adapter_compatibility(adapter, m.name)["compatible"]]
+
+
+def _resolve_adapter_specs(
+    self,
+    plugin_meta,  # Capability PluginMeta being loaded
+    adapters=None,  # Explicit adapter unit names (loud refusal on mismatch); None = auto-bind compatibles
+) -> List[str]:  # Worker specs "module:ClassName"
+    """CR-17 pt 2: resolve which adapter impls bind in-worker at spawn.
+
+    AUTO (adapters=None): every discovered adapter whose protocol members match
+    the capability's recorded surface binds silently — binding rides
+    `load_plugin` with no separate manual call (the G11 lesson: a manual
+    registration step no CLI makes is silently inert).
+
+    EXPLICIT (adapters=[names]): each named unit is verified; an incompatible
+    pairing REFUSES LOUDLY with the missing members in the message (the CR-17
+    negative check).
+    """
+    from cjm_plugin_system.core.errors import PluginInputError
+    discovered = getattr(self, 'adapter_manifests', [])
+    surface = (getattr(plugin_meta, 'manifest', None) or {}).get('structural_surface')
+    if adapters is None:
+        specs = []
+        for am in discovered:
+            verdict = match_protocol_against_surface(am.protocol_members, surface)
+            if verdict["compatible"]:
+                specs.append(f"{am.module}:{am.class_name}")
+                self.logger.info(
+                    f"Auto-binding adapter {am.name} (task {am.task_name!r}) "
+                    f"to {plugin_meta.name}")
+        return specs
+    specs = []
+    for name in adapters:
+        am = next((a for a in discovered if a.name == name), None)
+        if am is None:
+            raise PluginInputError(
+                f"Unknown adapter unit {name!r} (discovered: "
+                f"{[a.name for a in discovered]})", fields_invalid=["adapters"])
+        verdict = match_protocol_against_surface(am.protocol_members, surface)
+        if not verdict["compatible"]:
+            raise PluginInputError(
+                f"Adapter {name!r} (task {am.task_name!r}) is NOT compatible with "
+                f"capability {plugin_meta.name!r}: "
+                f"missing methods {verdict['missing_methods']}, "
+                f"missing properties {verdict['missing_properties']}, "
+                f"parameter mismatches {verdict['param_mismatches']}"
+                + (f", reason: {verdict['reason']}" if verdict.get('reason') else ""),
+                fields_invalid=["adapters"])
+        specs.append(f"{am.module}:{am.class_name}")
+    return specs
+
+
+PluginManager.get_adapters_for_task = get_adapters_for_task
+PluginManager.check_adapter_compatibility = check_adapter_compatibility
+PluginManager.get_capabilities_compatible_with = get_capabilities_compatible_with
+PluginManager._resolve_adapter_specs = _resolve_adapter_specs
+
 
 # %% ../../nbs/core/manager.ipynb #pm-fn-get_discovered_by_category
 def get_discovered_by_category(
@@ -1074,7 +1197,8 @@ def load_plugin(
     strict:bool=True, # SG-5: reject unknown keys against manifest config_schema (default)
     instance_id:Optional[str]=None, # CR-10: explicit instance_id; None defaults to plugin_name
     new_instance:bool=False, # CR-10: auto-generate `{name}-{hex}` instance_id (with instance_id=None)
-    max_concurrent_requests:Optional[int]=None # SG-33 (CR-7): per-instance async concurrency cap; None = unbounded
+    max_concurrent_requests:Optional[int]=None, # SG-33 (CR-7): per-instance async concurrency cap; None = unbounded
+    adapters:Optional[List[str]]=None # CR-17 pt 2: explicit adapter unit names (loud refusal on mismatch); None = auto-bind discovered compatibles
 ) -> bool: # True if successfully loaded
     """Load a plugin by spawning a Worker subprocess.
     
@@ -1145,7 +1269,11 @@ def load_plugin(
                 f"plugin loads but can't do useful work until set "
                 f"(e.g. `cjm-ctl set-secret {plugin_meta.name} <KEY>`)."
             )
-        proxy = RemotePluginProxy(plugin_meta.manifest, extra_env=extra_env)
+        # CR-17 pt 2: resolve adapter impls (auto-bind compatibles, or verify
+        # the explicit list with loud refusal) and bind them in-worker at spawn.
+        adapter_specs = self._resolve_adapter_specs(plugin_meta, adapters)
+        proxy = RemotePluginProxy(plugin_meta.manifest, extra_env=extra_env,
+                                  adapter_specs=adapter_specs)
 
         config_schema = plugin_meta.manifest.get("config_schema")
         
@@ -1575,6 +1703,8 @@ def execute_plugin(
     self,
     name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
     *args,
+    _task_name:Optional[str]=None, # CR-17 pt 2: route via the task channel (adapter task) instead of execute
+    _method:Optional[str]=None, # CR-17 pt 2: adapter method (set with _task_name)
     **kwargs
 ) -> Any: # Plugin result
     """Execute a plugin instance's main functionality (sync).
@@ -1669,7 +1799,10 @@ def execute_plugin(
         self.scheduler.on_execution_start(inst.instance_id)
         success = False
         try:
-            result = inst.proxy.execute(*args, **kwargs)
+            if _task_name is not None:
+                result = inst.proxy.execute_task(_task_name, _method, **kwargs)
+            else:
+                result = inst.proxy.execute(*args, **kwargs)
             success = True
             return result
         except PluginResourceError as e:
@@ -1691,6 +1824,8 @@ async def execute_plugin_async(
     self,
     name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
     *args,
+    _task_name:Optional[str]=None, # CR-17 pt 2: route via the task channel (adapter task) instead of execute
+    _method:Optional[str]=None, # CR-17 pt 2: adapter method (set with _task_name)
     **kwargs
 ) -> Any: # Plugin result
     """Execute a plugin instance's main functionality (async).
@@ -1780,7 +1915,12 @@ async def execute_plugin_async(
             if limiter is not None:
                 # SG-33: gate concurrent executes behind the per-instance semaphore.
                 async with limiter:
-                    result = await inst.proxy.execute_async(*args, **kwargs)
+                    if _task_name is not None:
+                        result = await inst.proxy.execute_task_async(_task_name, _method, **kwargs)
+                    else:
+                        result = await inst.proxy.execute_async(*args, **kwargs)
+            elif _task_name is not None:
+                result = await inst.proxy.execute_task_async(_task_name, _method, **kwargs)
             else:
                 result = await inst.proxy.execute_async(*args, **kwargs)
             success = True
@@ -1797,6 +1937,43 @@ async def execute_plugin_async(
             self._record_sample_safe(inst, start_time, success)
 
 PluginManager.execute_plugin_async = execute_plugin_async
+
+# %% ../../nbs/core/manager.ipynb #7793a81f
+def execute_plugin_task(
+    self,
+    name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
+    task_name:str, # Adapter task, e.g. "graph-storage"
+    method:str, # Adapter method, e.g. "query_nodes"
+    **kwargs
+) -> Any: # Typed task result
+    """CR-17 pt 2: execute a typed task-adapter method (explicit task channel; sync).
+
+    Thin wrapper over `execute_plugin` — the whole CR-7 retry / scheduler /
+    empirical-sampling machinery applies identically to task-channel calls.
+    """
+    return self.execute_plugin(name_or_id, _task_name=task_name, _method=method, **kwargs)
+
+
+async def execute_plugin_task_async(
+    self,
+    name_or_id:str, # Plugin name (default-loaded) or instance_id (multi-instance)
+    task_name:str, # Adapter task, e.g. "graph-storage"
+    method:str, # Adapter method, e.g. "query_nodes"
+    **kwargs
+) -> Any: # Typed task result
+    """CR-17 pt 2: execute a typed task-adapter method (explicit task channel; async).
+
+    Thin wrapper over `execute_plugin_async` — CR-7 retry, SG-33 semaphore,
+    admission and empirical sampling apply identically; this is the method
+    the JobQueue's task-addressed jobs invoke.
+    """
+    return await self.execute_plugin_async(
+        name_or_id, _task_name=task_name, _method=method, **kwargs)
+
+
+PluginManager.execute_plugin_task = execute_plugin_task
+PluginManager.execute_plugin_task_async = execute_plugin_task_async
+
 
 # %% ../../nbs/core/manager.ipynb #pm-fn-enable_plugin
 def enable_plugin(

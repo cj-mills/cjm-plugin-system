@@ -79,6 +79,8 @@ class CompositionNode:
     plugin_instance_id: str  # Target capability instance
     kwargs: Dict[str, Any] = field(default_factory=dict)  # Static values + OutputRef markers
     priority: int = 0  # Per-node priority override (0 = inherit composition priority)
+    task_name: Optional[str] = None  # Task-channel address: adapter task (stage 4; None = execute channel)
+    method: Optional[str] = None  # Task-channel address: adapter method (set with task_name)
 
 # %% ../../nbs/core/ports.ipynb #ports-composition
 @dataclass
