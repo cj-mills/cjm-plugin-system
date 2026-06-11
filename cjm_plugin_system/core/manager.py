@@ -170,6 +170,33 @@ def register_system_monitor(
 
 PluginManager.register_system_monitor = register_system_monitor
 
+# %% ../../nbs/core/manager.ipynb #pm-fn-_resolve_system_monitor
+def _resolve_system_monitor(
+    self,
+) -> Optional[Any]: # The bound system-monitor proxy, or None
+    """Return the system monitor, lazily binding from the constructor's
+    `sysmon_plugin_name` when `register_system_monitor` was never called.
+
+    Stage-3 G11: requiring a SEPARATE `register_system_monitor()` call after
+    load was a trap every core CLI fell into — GPU subtree ATTRIBUTION worked
+    (the JobQueue queries its own `sysmon_plugin_name` directly) while the
+    stats path silently returned `{}`, so the scheduler quantity checks AND
+    the stage-3 admission ladder saw no telemetry and every GPU-profiled job
+    ran exclusive. The constructor parameter now expresses the full intent.
+    """
+    if self.system_monitor:
+        return self.system_monitor
+    name = getattr(self, "_sysmon_plugin_name", None)
+    if name:
+        monitor = self.get_plugin(name)
+        if monitor:
+            self.system_monitor = monitor
+            self.logger.info(f"System monitor lazily bound from sysmon_plugin_name: {name}")
+            return monitor
+    return None
+
+PluginManager._resolve_system_monitor = _resolve_system_monitor
+
 # %% ../../nbs/core/manager.ipynb #pm-fn-_get_global_stats
 def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     """Fetch real-time stats from the system monitor plugin (sync).
@@ -181,10 +208,11 @@ def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     Proxies after CR-3 expose `get_system_status` as a bound method that
     POSTs to `/get_system_status` and returns `Optional[Dict[str, Any]]`.
     """
-    if not self.system_monitor:
+    monitor = self._resolve_system_monitor()
+    if not monitor:
         return {}
     # CR-3: prefer typed call
-    get_status = getattr(self.system_monitor, "get_system_status", None)
+    get_status = getattr(monitor, "get_system_status", None)
     if callable(get_status):
         try:
             result = get_status()
@@ -207,7 +235,7 @@ def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     # SG-47 cascade ensures all real monitors expose the typed surface;
     # SG-48 sweep drops this branch entirely.
     try:
-        return self.system_monitor.execute("get_system_status")
+        return monitor.execute("get_system_status")
     except Exception as e:
         self.logger.warning(f"Failed to fetch system stats (dispatcher fallback): {e}")
     return {}
@@ -222,10 +250,11 @@ async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system tele
     because the substrate's `execute_plugin_async` path (CR-2 + CR-10) needs
     a non-blocking stats fetch when scheduling under an asyncio event loop.
     """
-    if not self.system_monitor:
+    monitor = self._resolve_system_monitor()
+    if not monitor:
         return {}
     # CR-3: prefer typed call
-    get_status_async = getattr(self.system_monitor, "get_system_status_async", None)
+    get_status_async = getattr(monitor, "get_system_status_async", None)
     if callable(get_status_async):
         try:
             result = await get_status_async()
@@ -244,7 +273,7 @@ async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system tele
             return {}
     # REMOVE-AFTER-OVERHAUL: pre-CR-3 dispatcher fallback (see sync variant)
     try:
-        return await self.system_monitor.execute_async("get_system_status")
+        return await monitor.execute_async("get_system_status")
     except Exception as e:
         self.logger.warning(f"Failed to fetch system stats (dispatcher fallback): {e}")
     return {}
