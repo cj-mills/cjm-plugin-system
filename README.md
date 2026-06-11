@@ -70,48 +70,48 @@ graph LR
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
 
+    bootstrap --> core_scheduling
     bootstrap --> core_manager
     bootstrap --> core_queue
-    bootstrap --> core_scheduling
-    cli --> core_metadata
-    cli --> core_manifest_format
-    cli --> core_platform
     cli --> core_config
+    cli --> core_platform
+    cli --> core_manifest_format
+    cli --> core_metadata
     core_capability --> core_errors
     core_empirical_store --> utils_hashing
-    core_interface --> core_capability
-    core_interface --> core
-    core_interface --> core_wire
     core_interface --> core_interface
-    core_manager --> core_metadata
-    core_manager --> core_secret_store
-    core_manager --> core_capability
-    core_manager --> core_manifest_format
+    core_interface --> core_capability
+    core_interface --> core_wire
+    core_interface --> core
     core_manager --> core_empirical_store
+    core_manager --> core_config_store
+    core_manager --> core_scheduling
+    core_manager --> core_metadata
     core_manager --> core_errors
     core_manager --> utils_validation
-    core_manager --> core_config_store
+    core_manager --> core_manifest_format
+    core_manager --> core_proxy
+    core_manager --> core_capability
+    core_manager --> core_secret_store
     core_manager --> core_config
     core_manager --> core__telemetry
-    core_manager --> core_scheduling
-    core_manager --> core_proxy
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
     core_ports --> core_errors
-    core_proxy --> core_platform
-    core_proxy --> core_capability
-    core_proxy --> core_errors
-    core_proxy --> core_config
     core_proxy --> core_wire
-    core_queue --> core_errors
+    core_proxy --> core_errors
+    core_proxy --> core_capability
+    core_proxy --> core_config
+    core_proxy --> core_platform
     core_queue --> core_ports
+    core_queue --> core_errors
     core_queue --> core__telemetry
     core_scheduling --> core_metadata
-    core_worker --> core_errors
     core_worker --> core_platform
-    core_worker --> core_capability
     core_worker --> core_wire
+    core_worker --> core_errors
+    core_worker --> core_capability
     utils_cache_paths --> core_empirical_store
     utils_cache_paths --> utils_hashing
     utils_validation --> core_errors
@@ -2574,6 +2574,23 @@ def register_system_monitor(
 ```
 
 ``` python
+def _resolve_system_monitor(
+    self,
+) -> Optional[Any]: # The bound system-monitor proxy, or None
+    """
+    Return the system monitor, lazily binding from the constructor's
+    `sysmon_plugin_name` when `register_system_monitor` was never called.
+    
+    Stage-3 G11: requiring a SEPARATE `register_system_monitor()` call after
+    load was a trap every core CLI fell into — GPU subtree ATTRIBUTION worked
+    (the JobQueue queries its own `sysmon_plugin_name` directly) while the
+    stats path silently returned `{}`, so the scheduler quantity checks AND
+    the stage-3 admission ladder saw no telemetry and every GPU-profiled job
+    ran exclusive. The constructor parameter now expresses the full intent.
+    """
+```
+
+``` python
 def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     """Fetch real-time stats from the system monitor plugin (sync).
     
@@ -2584,7 +2601,8 @@ def _get_global_stats(self) -> Dict[str, Any]: # Current system telemetry
     Proxies after CR-3 expose `get_system_status` as a bound method that
     POSTs to `/get_system_status` and returns `Optional[Dict[str, Any]]`.
     """
-    if not self.system_monitor
+    monitor = self._resolve_system_monitor()
+    if not monitor
     """
     Fetch real-time stats from the system monitor plugin (sync).
     
@@ -2605,7 +2623,8 @@ async def _get_global_stats_async(self) -> Dict[str, Any]: # Current system tele
     because the substrate's `execute_plugin_async` path (CR-2 + CR-10) needs
     a non-blocking stats fetch when scheduling under an asyncio event loop.
     """
-    if not self.system_monitor
+    monitor = self._resolve_system_monitor()
+    if not monitor
     """
     Fetch real-time stats from the system monitor plugin (async).
     
