@@ -7,9 +7,10 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcore/queue.html.md"""
 # %% auto #0
 __all__ = ['JobStatus', 'JobEventType', 'CancelPhase', 'JobQueueDependencies', 'Job', 'JobEvent', 'QueueStats',
            'ResourceSnapshot', 'JobQueue', 'submit', 'cancel', 'reorder', 'get_job', 'wait_for_job', 'get_pending',
-           'get_running_jobs', 'get_running', 'get_history', 'get_stats', 'get_job_logs', 'events',
-           'events_for_composition', 'all_events', 'submit_composition', 'wait_for_composition', 'cancel_composition',
-           'get_composition', 'get_resource_snapshot', 'start', 'stop', 'get_state']
+           'get_running_jobs', 'get_running', 'get_history', 'get_stats', 'get_job_diagnostics',
+           'get_history_from_journal', 'events', 'events_for_composition', 'all_events', 'submit_composition',
+           'wait_for_composition', 'cancel_composition', 'get_composition', 'get_resource_snapshot', 'start', 'stop',
+           'get_state']
 
 # %% ../../nbs/core/queue.ipynb #exports
 import asyncio
@@ -32,6 +33,11 @@ from cjm_plugin_system.core.ports import (
     Composition, CompositionBindingError, CompositionRun, NodeState,
     new_composition_run, resolve_node_kwargs,
 )
+from cjm_plugin_system.core.journal_store import (
+    JournalEvent, JournalStore, LIVENESS_EVENT_TYPES,
+)
+from .diagnostics_store import DiagnosticRecord, DiagnosticsStore
+from .wire import CallEnvelope, reset_call_envelope, set_call_envelope
 from ._telemetry import attribute_gpu_to_worker_subtree
 
 # CR-6: PluginManager continues to satisfy JobQueueDependencies structurally.
@@ -56,22 +62,32 @@ class JobStatus(str, Enum):
 
 
 class JobEventType(str, Enum):
-    """Push-based job event types (CR-6; stage-3 composition rework).
+    """Push-based job event types (CR-6; stage-3 composition rework; CR-14
+    journal-primary emission).
 
-    Emitted by JobQueue on a multi-subscriber event bus. Consumers subscribe
-    via `queue.events(job_id)` / `queue.events_for_composition(comp_id)` /
+    Emitted by JobQueue through the single emission path (`_publish_event`):
+    journal-class events become durable journal rows AND fan out to live
+    subscribers; liveness-class events (`LIVENESS_EVENT_TYPES` in
+    `core.journal_store`) fan out only — their final values ride the
+    terminal STATE_TRANSITION row. Consumers subscribe via
+    `queue.events(job_id)` / `queue.events_for_composition(comp_id)` /
     `queue.all_events()` and receive `JobEvent` instances asynchronously.
 
     COMPOSITION_ADVANCED replaced the retired SEQUENCE_ADVANCED at execution
     stage 3 (CR-16: compositions replace sequences outright): it fires when a
     member job's completion unlocks downstream composition nodes — payload
     carries the completed node id + the newly enqueued node ids.
+
+    The reserved-never-emitted LOG_APPENDED was RETIRED at stage 7 (CR-14):
+    log-follow is a diagnostics-store cursor read (`get_job_diagnostics`),
+    not a push event — there are no log files or byte offsets anymore.
+    Non-job substrate events (worker lifecycle, config, runs) live in
+    `core.journal_store.SubstrateEventType`.
     """
-    STATE_TRANSITION = "state_transition"          # JobStatus changed (Stage 1)
-    PROGRESS_CHANGED = "progress_changed"          # progress / status_message updated (Stage 1)
+    STATE_TRANSITION = "state_transition"          # JobStatus changed (Stage 1); terminal transitions carry the job snapshot (CR-14)
+    PROGRESS_CHANGED = "progress_changed"          # progress / status_message updated (Stage 1; liveness — never journaled)
     COMPOSITION_ADVANCED = "composition_advanced"  # Composition enqueued downstream nodes (stage 3)
-    RESOURCE_SNAPSHOT = "resource_snapshot"        # Periodic worker + sysmon stats (Stage 3)
-    LOG_APPENDED = "log_appended"                  # New log lines for this job (Stage 3)
+    RESOURCE_SNAPSHOT = "resource_snapshot"        # Periodic worker + sysmon stats (Stage 3; liveness — never journaled)
     BLOCK_REASON_CHANGED = "block_reason_changed"  # Scheduler block reason changed (Stage 4)
     CANCEL_PHASE_CHANGED = "cancel_phase_changed"  # Cancel state machine progressed (Stage 4)
     RETRY_STARTED = "retry_started"                # Reactive retry beginning (CR-7 + Stage 4)
@@ -98,17 +114,20 @@ class JobQueueDependencies(Protocol):
     can be tested in isolation (with a lightweight test double) and so a future
     extraction into a separate library has no API constraint locked in.
 
-    The first 5 methods are the CR-6 execute-path surface. The stage-3
-    additions (CR-16 multi-lane admission) are consumed DEFENSIVELY via
-    getattr — a deps implementation without them yields no admission
+    The first 4 methods are the CR-6 execute-path surface (CR-14 retired
+    `get_plugin_logs` — log retrieval is a diagnostics-store query now). The
+    stage-3 additions (CR-16 multi-lane admission) are consumed DEFENSIVELY
+    via getattr — a deps implementation without them yields no admission
     evidence, so every job runs exclusive = exact pre-stage-3 single-lane
-    behavior. Older test doubles keep working unchanged.
+    behavior. Older test doubles keep working unchanged. CR-14 also reads
+    `journal_store` / `diagnostics_store` ATTRIBUTES via getattr when the
+    queue isn't constructed with explicit stores — a deps without them
+    (test doubles) simply yields no journaling.
     """
     def get_plugin_meta(self, name_or_id: str) -> Optional[Any]: ...
     def get_plugin(self, name_or_id: str) -> Optional[Any]: ...
     async def execute_plugin_async(self, name_or_id: str, *args: Any, **kwargs: Any) -> Any: ...
     def reload_plugin(self, name_or_id: str) -> Any: ...
-    def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str: ...
     # Stage 3 (CR-16) admission surface:
     def get_admission_profile(self, name_or_id: str) -> Optional[Dict[str, Any]]: ...
     def get_instance_concurrency_cap(self, name_or_id: str) -> Optional[int]: ...
@@ -238,8 +257,8 @@ class ResourceSnapshot:
 
 # %% ../../nbs/core/queue.ipynb #queue-class
 class JobQueue:
-    """Resource-aware multi-lane job queue with push-based observability
-    (CR-6; stage-3 CR-16 rework: ready-set dispatch + resource-derived
+    """Resource-aware multi-lane job queue with journal-primary observability
+    (CR-6 + CR-14; stage-3 CR-16 rework: ready-set dispatch + resource-derived
     admission + composition execution)."""
 
     # CR-6: per-subscriber bounded queue size. Slow subscribers backpressure
@@ -259,6 +278,8 @@ class JobQueue:
         resource_snapshot_cadence_polls: int = 4,  # Sample resources every Nth progress poll
         max_concurrent_lanes: int = 4,     # Stage 3: max in-flight jobs (admission still gates each)
         gpu_headroom_fraction: float = 0.9,  # Stage 3: blunt GPU admission margin (budget = total * fraction)
+        journal: Optional[JournalStore] = None,  # CR-14: journal sink; defaults to deps.journal_store (the manager's)
+        diagnostics: Optional[DiagnosticsStore] = None,  # CR-14: diagnostics sink for get_job_diagnostics; defaults to deps.diagnostics_store
     ):
         """Initialize the job queue.
 
@@ -268,6 +289,12 @@ class JobQueue:
         sysmon telemetry — see `_pop_next_admissible`. Worst case (no
         records, no sysmon) every job runs exclusive, which is exactly the
         pre-stage-3 single-lane behavior.
+
+        CR-14 (stage 7): emission is journal-primary — `_publish_event`
+        writes journal-class events as durable rows before fanning out to
+        live subscribers. The stores default to the deps' (PluginManager's)
+        stores via getattr, so the cores gain journaling with zero host
+        changes; a deps without them (test doubles) yields no journaling.
         """
         self._deps = deps
         self.max_history = max_history
@@ -278,6 +305,17 @@ class JobQueue:
         self.max_concurrent_lanes = max(1, max_concurrent_lanes)
         self.gpu_headroom_fraction = gpu_headroom_fraction
         self.logger = logging.getLogger(f"{__name__}.{type(self).__name__}")
+
+        # CR-14: observability stores (journal-primary emission). The wedge
+        # flag is the named-tension resolution: an in-flight journal-append
+        # failure logs at ERROR and wedges the queue — the NEXT submit
+        # refuses loudly (never silently drop the audit trail; never corrupt
+        # in-flight lane state by raising mid-finalization).
+        self._journal: Optional[JournalStore] = (
+            journal if journal is not None else getattr(deps, 'journal_store', None))
+        self._diagnostics: Optional[DiagnosticsStore] = (
+            diagnostics if diagnostics is not None else getattr(deps, 'diagnostics_store', None))
+        self._journal_wedged = False
 
         # State
         self._pending: List[Job] = []  # Priority heap
@@ -350,6 +388,22 @@ async def _enqueue_job(
     return job.id
 
 
+def _check_journal_wedge(self) -> None:
+    """CR-14 wedge gate: refuse new work after a journal-append failure.
+
+    The loud half of the named-tension resolution — a wedged journal must
+    never silently drop the audit trail, and the refusal happens at the
+    operational boundary (new submissions) rather than mid-finalization
+    (which would leak lanes). Clears only by constructing a new queue /
+    fixing the journal and resetting `_journal_wedged` deliberately.
+    """
+    if self._journal_wedged:
+        raise RuntimeError(
+            "Observability journal is WEDGED (an append failed — see ERROR "
+            "logs); refusing new submissions. Fix the journal store and "
+            "reset `_journal_wedged` to resume.")
+
+
 async def submit(
     self,
     plugin_instance_id: str,  # Target plugin instance (per CR-10)
@@ -371,11 +425,16 @@ async def submit(
     already in `pending` state at construction — there's no transition
     to publish. The first STATE_TRANSITION fires when the processor loop
     moves the job pending → running.
+
+    CR-14: refuses loudly when the journal is wedged (see
+    `_check_journal_wedge`).
     """
     # CR-2: late import to avoid pulling errors module into queue's import
     # path during library load (keeps the worker.py-via-queue.py import
     # chain minimal).
     from cjm_plugin_system.core.errors import PluginDisabledError, PluginInputError
+
+    self._check_journal_wedge()
 
     # Stage 4: the task channel addresses adapter+method as a pair.
     if (task is None) != (method is None):
@@ -401,6 +460,7 @@ async def submit(
     return await self._enqueue_job(job)
 
 JobQueue._enqueue_job = _enqueue_job
+JobQueue._check_journal_wedge = _check_journal_wedge
 JobQueue.submit = submit
 
 # %% ../../nbs/core/queue.ipynb #control
@@ -438,14 +498,10 @@ async def cancel(
             # event is set before any eviction could pop it from the dict.
             self._signal_job_completed(job_id)
             self._move_to_history(job)
-            self._publish_event(JobEvent(
-                type=JobEventType.STATE_TRANSITION,
-                job_id=job.id,
-                plugin_instance_id=job.plugin_instance_id,
-                composition_id=job.composition_id,
-                node_id=job.node_id,
-                payload={"from": prev_status.value, "to": job.status.value},
-            ))
+            # CR-14: route through the centralized emitter so the terminal
+            # transition carries the job snapshot (durable history row) —
+            # the pre-stage-7 inline publish skipped the snapshot.
+            self._emit_state_transition(job, prev_status)
             self.logger.info(f"Cancelled pending job {job_id[:8]}")
             if job.composition_id is not None:
                 advance_target = job
@@ -488,10 +544,6 @@ def reorder(
 
 JobQueue.cancel = cancel
 JobQueue.reorder = reorder
-
-# %% ../../nbs/core/queue.ipynb #observation
-import re as _re_logslice
-_LOG_TS_PATTERN = _re_logslice.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})\s')
 
 # %% ../../nbs/core/queue.ipynb #fn-get-job
 def get_job(
@@ -588,103 +640,55 @@ def get_stats(self) -> QueueStats:  # Aggregate counts
 
 JobQueue.get_stats = get_stats
 
-# %% ../../nbs/core/queue.ipynb #fn-parse-log-timestamp
-def _parse_log_timestamp(line: str) -> Optional[datetime]:
-    """Parse the leading timestamp from a worker log line.
-
-    Returns naive datetime (no tzinfo) in local time — caller is responsible
-    for tz alignment with the job's UTC timestamps. Returns None for
-    continuation lines (no parseable leading timestamp), blank lines, etc.
-    """
-    m = _LOG_TS_PATTERN.match(line)
-    if not m:
-        return None
-    try:
-        dt = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")
-        return dt.replace(microsecond=int(m.group(2)) * 1000)
-    except ValueError:
-        return None
-
-# %% ../../nbs/core/queue.ipynb #fn-slice-log-by-job-window
-def _slice_log_by_job_window(
-    raw: str,  # Full log content
-    started_at: datetime,  # Job's UTC start time
-    completed_at: Optional[datetime],  # Job's UTC end time (None if still running)
-    max_lines: int,  # Max lines to return
-) -> str:  # Sliced log content
-    """Slice log content by a job's execution window.
-
-    Worker logs are local-time naive; job timestamps are UTC. We convert
-    the job's UTC times to local-time-naive for comparison. Continuation
-    lines (no parseable timestamp) are associated with the most recent
-    timestamped line — included if that timestamp was in the window.
-
-    Best-effort: if `started_at` is None (job never ran) or no lines have
-    parseable timestamps, returns the raw tail unchanged.
-    """
-    if started_at is None:
-        return '\n'.join(raw.split('\n')[-max_lines:])
-
-    start_naive = started_at.astimezone().replace(tzinfo=None)
-    end_naive = (
-        completed_at.astimezone().replace(tzinfo=None)
-        if completed_at is not None else None
-    )
-
-    in_window = False
-    selected: List[str] = []
-    saw_timestamp = False
-    for line in raw.split('\n'):
-        ts = _parse_log_timestamp(line)
-        if ts is not None:
-            saw_timestamp = True
-            if ts < start_naive:
-                in_window = False
-            elif end_naive is not None and ts > end_naive:
-                in_window = False
-            else:
-                in_window = True
-        if in_window:
-            selected.append(line)
-
-    # If no timestamps were parseable in the raw log, fall back to the raw tail
-    # rather than returning empty (heuristic preservation of useful content).
-    if not saw_timestamp:
-        return '\n'.join(raw.split('\n')[-max_lines:])
-
-    return '\n'.join(selected[-max_lines:])
-
 # %% ../../nbs/core/queue.ipynb #fn-get-job-logs
-def get_job_logs(
+def get_job_diagnostics(
     self,
-    job_id: str,  # Job to get logs for
-    lines: int = 100  # Max lines to return
-) -> str:  # Log content scoped to this job's execution window
-    """Get logs for a job, scoped to its (started_at, completed_at) window.
+    job_id: str,  # Job whose diagnostic records to read
+    limit: Optional[int] = 200,  # Max records (None = all)
+    after_seq: Optional[int] = None,  # Tail cursor for follow-style reads
+) -> List[DiagnosticRecord]:  # Job-stamped records, oldest first
+    """EXACT per-job diagnostics (CR-14; replaces `get_job_logs`).
 
-    CR-6 Stage 3: replaces the legacy whole-plugin-log behavior. The
-    substrate over-fetches the plugin log (lines * 5) and slices by the
-    job's execution window — the job-monitor library's `--- Starting` marker
-    heuristic in `_filter_current_session` becomes obsolete in cascade.
+    Records were stamped with the job id IN THE WORKER via the call-envelope
+    contextvar — no timestamp windows, no over-fetch, correct under stage-3
+    same-worker concurrency and across multi-instance plugins (both of which
+    the deleted `_slice_log_by_job_window` heuristic got wrong). Follow-style
+    consumers poll with `after_seq` (the LOG_APPENDED replacement).
 
-    Falls back gracefully when timestamps are unparseable or the job's
-    window isn't known: returns the raw tail.
+    Returns [] when no diagnostics store is configured.
     """
-    job = self._jobs.get(job_id)
-    if not job:
-        return ""
+    if self._diagnostics is None:
+        return []
+    return self._diagnostics.query_records(
+        job_id=job_id, limit=limit, after_seq=after_seq)
 
-    # Over-fetch: continuation lines + lines outside the window get filtered,
-    # so we need enough raw content to populate `lines` results post-slice.
-    raw = self._deps.get_plugin_logs(job.plugin_instance_id, lines=lines * 5)
 
-    if job.started_at is None:
-        # Job hasn't run yet — no useful slice. Return raw tail.
-        return '\n'.join(raw.split('\n')[-lines:])
+def get_history_from_journal(
+    self,
+    limit: Optional[int] = None,  # Most recent N terminal jobs (None = all)
+) -> List[Job]:  # Rehydrated job records, most recent first
+    """Durable job history (the CR-14 `_history` migration rider).
 
-    return _slice_log_by_job_window(raw, job.started_at, job.completed_at, lines)
+    Rehydrates Job records from terminal STATE_TRANSITION journal rows —
+    restart-surviving and unbounded, unlike the in-memory `get_history`
+    working set (`max_history` eviction). Rehydrated Jobs are RECORDS:
+    args/kwargs/result are not journaled (results live in capability DBs;
+    parameters in run manifests) — identity, timing, status, error,
+    composition/task fields are present.
 
-JobQueue.get_job_logs = get_job_logs
+    Falls back to the in-memory history when no journal is configured.
+    """
+    if self._journal is None:
+        return self.get_history(limit)
+    out: List[Job] = []
+    for ev in self._journal.terminal_state_events(limit=limit):
+        snap = ev.payload.get("job_snapshot")
+        if snap:
+            out.append(_job_from_snapshot(snap))
+    return out
+
+JobQueue.get_job_diagnostics = get_job_diagnostics
+JobQueue.get_history_from_journal = get_history_from_journal
 
 # %% ../../nbs/core/queue.ipynb #b4fe9d38
 def _subscriber_keys_for(event: JobEvent) -> List[str]:
@@ -701,14 +705,45 @@ def _subscriber_keys_for(event: JobEvent) -> List[str]:
 
 def _publish_event(
     self,
-    event: JobEvent,  # Event to fan out
+    event: JobEvent,  # Event to emit
 ) -> None:
-    """Fan out an event to all matching subscribers (CR-6).
+    """The SINGLE emission path (CR-14: journal-primary).
 
-    Slow subscribers backpressure themselves via `asyncio.QueueFull` drop —
-    publisher never blocks. Each subscriber tracks `dropped_count` so
+    Class routing at the one place every event passes through:
+    - journal-class events (everything except `LIVENESS_EVENT_TYPES`)
+      become durable journal rows FIRST, then fan out to live subscribers —
+      emitting IS writing the record; the bus is a live tail of the journal.
+    - liveness-class events (PROGRESS_CHANGED / RESOURCE_SNAPSHOT) fan out
+      only; their final values ride the terminal STATE_TRANSITION row.
+
+    The named-tension resolution (stage-7 ratified design #13): a journal
+    append failure here logs at ERROR and WEDGES the queue (`submit` /
+    `submit_composition` refuse loudly) instead of raising — raising inside
+    `_execute_job`'s finalization would leak lanes and corrupt in-flight
+    state, while continuing silently would drop the audit trail.
+
+    Fan-out: slow subscribers backpressure themselves via `asyncio.QueueFull`
+    drop — publisher never blocks. Each subscriber tracks `dropped_count` so
     operators / future telemetry can surface backpressure visibility.
     """
+    if self._journal is not None and event.type.value not in LIVENESS_EVENT_TYPES:
+        try:
+            self._journal.append(JournalEvent(
+                event_type=event.type.value,
+                ts=event.timestamp,
+                job_id=event.job_id,
+                composition_id=event.composition_id,
+                node_id=event.node_id,
+                plugin_instance_id=event.plugin_instance_id,
+                payload=event.payload,
+            ))
+        except Exception:
+            self._journal_wedged = True
+            self.logger.error(
+                "JOURNAL APPEND FAILED for %s on job %s — queue WEDGED: new "
+                "submissions will refuse until the journal is writable again.",
+                event.type.value, event.job_id, exc_info=True)
+
     for key in _subscriber_keys_for(event):
         # `self._subscribers` is a defaultdict but we use `.get` to avoid
         # accidentally creating empty lists for unused keys (which would
@@ -760,6 +795,9 @@ async def events(
 
     Yields events as they fire. Multiple concurrent subscribers to the same
     job_id each get their own independent stream — useful for multi-tab UIs.
+    Late subscribers catch up exactly via the journal: query
+    `journal.query(job_id=..., after_seq=cursor)` then follow live — the
+    bus is a tail of the journal, not the record itself (CR-14).
     """
     async for evt in self._subscribe(f"job:{job_id}"):
         yield evt
@@ -810,10 +848,15 @@ async def submit_composition(
     only dependency-free nodes have Jobs at submit; downstream nodes get
     their kwargs materialized from upstream results at advancement time.
 
+    CR-14: refuses loudly when the journal is wedged (the same gate as
+    `submit`).
+
     Consumers wait via `wait_for_composition`, observe via
     `events_for_composition`, inspect via `get_composition`.
     """
     from cjm_plugin_system.core.errors import PluginDisabledError
+
+    self._check_journal_wedge()
 
     for n in comp.nodes:
         meta = self._deps.get_plugin_meta(n.plugin_instance_id)
@@ -1305,6 +1348,77 @@ def _signal_job_completed(self, job_id: str) -> None:
 
 JobQueue._signal_job_completed = _signal_job_completed
 
+# %% ../../nbs/core/queue.ipynb #c2876422
+def _job_snapshot(job: Job) -> Dict[str, Any]:
+    """Serialize a job's RECORD fields for the terminal journal row (CR-14).
+
+    Deliberately excludes args/kwargs/result: results live in capability DBs,
+    parameters in run manifests — the journal never duplicates what better
+    homes already record (the attempted-vs-happened rule). The error rides as
+    the JobError dict (failures are exactly what the journal exists to keep).
+    """
+    return {
+        "id": job.id,
+        "plugin_instance_id": job.plugin_instance_id,
+        "status": job.status.value,
+        "priority": job.priority,
+        "submitted_at": job.submitted_at.isoformat() if job.submitted_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "retry_count": job.retry_count,
+        "composition_id": job.composition_id,
+        "node_id": job.node_id,
+        "task_name": job.task_name,
+        "method": job.method,
+        "error": asdict(job.error) if job.error is not None else None,
+    }
+
+
+def _job_from_snapshot(snap: Dict[str, Any]) -> Job:
+    """Rehydrate a Job RECORD from a terminal-row snapshot (CR-14).
+
+    Tolerant on both directions: unknown snapshot keys are ignored; a
+    JobError dict that no longer matches the current JobError fields
+    degrades to None rather than failing the history read.
+    """
+    def _dt(v):
+        try:
+            return datetime.fromisoformat(v) if v else None
+        except (TypeError, ValueError):
+            return None
+
+    error = None
+    err_d = snap.get("error")
+    if isinstance(err_d, dict):
+        try:
+            import dataclasses as _dc
+            names = {f.name for f in _dc.fields(JobError)}
+            error = JobError(**{k: v for k, v in err_d.items() if k in names})
+        except Exception:
+            error = None
+
+    try:
+        status = JobStatus(snap.get("status", "completed"))
+    except ValueError:
+        status = JobStatus.completed
+    return Job(
+        id=snap.get("id", ""),
+        plugin_instance_id=snap.get("plugin_instance_id", ""),
+        args=(),
+        kwargs={},
+        status=status,
+        priority=int(snap.get("priority") or 0),
+        submitted_at=_dt(snap.get("submitted_at")) or datetime.now(timezone.utc),
+        started_at=_dt(snap.get("started_at")),
+        completed_at=_dt(snap.get("completed_at")),
+        retry_count=int(snap.get("retry_count") or 0),
+        composition_id=snap.get("composition_id"),
+        node_id=snap.get("node_id"),
+        task_name=snap.get("task_name"),
+        method=snap.get("method"),
+        error=error,
+    )
+
 # %% ../../nbs/core/queue.ipynb #fn-emit-state-transition
 def _emit_state_transition(
     self,
@@ -1315,14 +1429,26 @@ def _emit_state_transition(
 
     Centralized so every transition site (start, completed, failed, cancelled,
     or future cancel-phase-driven transitions) carries identical tag context.
+
+    CR-14: TERMINAL transitions carry the job snapshot in the payload — the
+    durable journal row becomes the job's record of existence (the `_history`
+    migration rider: `get_history_from_journal` rehydrates from these).
     """
+    payload: Dict[str, Any] = {"from": prev_status.value, "to": job.status.value}
+    if job.status in (JobStatus.completed, JobStatus.failed, JobStatus.cancelled):
+        # The durable record must carry the full timing — terminal emits fire
+        # before _execute_job's finalize section, so stamp completed_at HERE
+        # (finalize only fills it when still unset).
+        if job.completed_at is None:
+            job.completed_at = datetime.now(timezone.utc)
+        payload["job_snapshot"] = _job_snapshot(job)
     self._publish_event(JobEvent(
         type=JobEventType.STATE_TRANSITION,
         job_id=job.id,
         plugin_instance_id=job.plugin_instance_id,
         composition_id=job.composition_id,
         node_id=job.node_id,
-        payload={"from": prev_status.value, "to": job.status.value},
+        payload=payload,
     ))
 
 JobQueue._emit_state_transition = _emit_state_transition
@@ -1622,7 +1748,8 @@ async def _execute_job(self, job: Job) -> None:
 
     # Finalize: release the lane + admission ledgers, then wake the
     # dispatcher (a lane freed / resources released = dispatch state changed).
-    job.completed_at = datetime.now(timezone.utc)
+    if job.completed_at is None:  # terminal emit usually stamped it (CR-14 snapshot)
+        job.completed_at = datetime.now(timezone.utc)
     job.progress = 1.0 if job.status == JobStatus.completed else job.progress
     self._running.pop(job.id, None)
     self._running_exclusive.discard(job.id)
@@ -1663,17 +1790,30 @@ async def _execute_with_cancellation(
     Force-kill path (cooperative timeout):
         COOPERATIVE → FORCE → RELOADING → COMPLETED
     """
-    # Start execution. Task-addressed jobs (stage 4, CR-17 pt 2) route via
-    # the explicit task channel; execute-channel jobs are unchanged.
-    if job.task_name is not None:
-        exec_task = asyncio.create_task(
-            self._deps.execute_plugin_task_async(
-                job.plugin_instance_id, job.task_name, job.method, **job.kwargs)
-        )
-    else:
-        exec_task = asyncio.create_task(
-            self._deps.execute_plugin_async(job.plugin_instance_id, *job.args, **job.kwargs)
-        )
+    # CR-14: set the per-call envelope around exec-task creation —
+    # asyncio.create_task copies the CURRENT context, so the identity flows
+    # through deps (manager) into the proxy's payload construction and onto
+    # the wire, with the reset landing immediately after creation (no other
+    # code in THIS task sees it).
+    token = set_call_envelope(CallEnvelope(
+        job_id=job.id,
+        composition_id=job.composition_id,
+        node_id=job.node_id,
+    ))
+    try:
+        # Start execution. Task-addressed jobs (stage 4, CR-17 pt 2) route via
+        # the explicit task channel; execute-channel jobs are unchanged.
+        if job.task_name is not None:
+            exec_task = asyncio.create_task(
+                self._deps.execute_plugin_task_async(
+                    job.plugin_instance_id, job.task_name, job.method, **job.kwargs)
+            )
+        else:
+            exec_task = asyncio.create_task(
+                self._deps.execute_plugin_async(job.plugin_instance_id, *job.args, **job.kwargs)
+            )
+    finally:
+        reset_call_envelope(token)
 
     # Monitor for cancellation
     while not exec_task.done():

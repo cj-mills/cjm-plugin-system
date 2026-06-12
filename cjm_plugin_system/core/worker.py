@@ -10,6 +10,7 @@ __all__ = ['EnhancedJSONEncoder', 'parent_monitor', 'create_app', 'run_worker']
 # %% ../../nbs/core/worker.ipynb #50487ea2
 import argparse
 import asyncio
+import contextvars
 import dataclasses
 import importlib
 import json
@@ -30,14 +31,19 @@ from .errors import PluginCancelledError, map_bare_exception_to_job_error
 from .platform import terminate_self
 
 import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    force=True
-)
+# CR-14: worker-process logging goes to the diagnostics STORE (structured
+# records, contextvars-stamped job identity) when the proxy injected the
+# env contract (CJM_DIAGNOSTICS_DB / CJM_WORKER_SESSION_ID / CJM_LOG_LEVEL);
+# standalone/dev imports fall back to the pre-CR-14 stdout basicConfig.
+# This module is a process entrypoint (SG-39 ownership note) — host code
+# never imports it.
+from .diagnostics_store import install_worker_diagnostics
+install_worker_diagnostics()
 
 from .capability import derive_structural_surface
-from .wire import wire_encode
+from cjm_plugin_system.core.wire import (
+    CallEnvelope, ENVELOPE_BODY_KEY, set_call_envelope, wire_encode,
+)
 
 # %% ../../nbs/core/worker.ipynb #encoder
 class EnhancedJSONEncoder(json.JSONEncoder):
@@ -418,6 +424,24 @@ def _load_adapters(
 
 
 # %% ../../nbs/core/worker.ipynb #0a62d840
+def _apply_call_envelope(
+    data: Dict[str, Any],  # The decoded request body
+) -> None:
+    """CR-14: decode the wire envelope into the worker-side contextvar.
+
+    Set WITHOUT reset: ASGI handles each request in its own asyncio task, so
+    the context (and the var) dies with the request — and for
+    /execute_stream the response iteration runs in the SAME request task
+    AFTER the endpoint returns, which is exactly why a reset-before-return
+    would lose the identity (Starlette's iterate_in_threadpool copies the
+    request task's context per chunk). An absent envelope leaves the var
+    None — records stay honestly unattributed.
+    """
+    env_wire = data.get(ENVELOPE_BODY_KEY)
+    if env_wire:
+        set_call_envelope(CallEnvelope.from_wire(env_wire))
+
+
 def _register_task_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
@@ -429,6 +453,12 @@ def _register_task_endpoints(
     through `wire_encode`, so results whose DTO classes are registered
     via `@wire_type` cross the boundary in the tagged envelope and arrive
     typed at the proxy; unregistered results serialize exactly as before.
+
+    CR-14 (stage 7): each call decodes the per-call envelope into the
+    contextvar and carries it into the executor thread via
+    `contextvars.copy_context()` (run_in_executor does NOT copy context by
+    itself) — the diagnostics handler stamps every plugin log record with
+    exact job identity, replacing the timestamp-window heuristic.
     """
     @app.post("/execute")
     async def execute(request: Request) -> Any:
@@ -451,6 +481,7 @@ def _register_task_endpoints(
         data = await request.json()
         args = data.get("args", [])
         kwargs = data.get("kwargs", {})
+        _apply_call_envelope(data)  # CR-14: job identity for this call span
         
         # CR-4: reset cancellation flag before invoking execute() so stale
         # state from a previous job doesn't immediately raise.
@@ -462,8 +493,11 @@ def _register_task_endpoints(
         
         try:
             loop = asyncio.get_event_loop()
+            # CR-14: copy_context AFTER the envelope set, so the executor
+            # thread's plugin code (and its logger calls) sees the identity.
+            ctx = contextvars.copy_context()
             result = await loop.run_in_executor(
-                None, lambda: plugin_instance.execute(*args, **kwargs)
+                None, lambda: ctx.run(plugin_instance.execute, *args, **kwargs)
             )
             # Typed wire envelope for registered result DTOs (stage 2);
             # EnhancedJSONEncoder still flattens unregistered dataclasses
@@ -512,6 +546,7 @@ def _register_task_endpoints(
         task = data.get("task")
         method_name = data.get("method") or ""
         kwargs = data.get("kwargs", {})
+        _apply_call_envelope(data)  # CR-14: job identity for this call span
         adapter = _adapters.get(task)
         if adapter is None:
             raise HTTPException(
@@ -533,7 +568,8 @@ def _register_task_endpoints(
         plugin_instance._last_api_usage = None
         try:
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(None, lambda: fn(**kwargs))
+            ctx = contextvars.copy_context()  # CR-14: carry identity into the executor
+            result = await loop.run_in_executor(None, lambda: ctx.run(lambda: fn(**kwargs)))
             json_str = json.dumps(wire_encode(result), cls=EnhancedJSONEncoder)
             return json.loads(json_str)
         except PluginCancelledError as e:
@@ -567,10 +603,16 @@ def _register_task_endpoints(
         downstream) can detect terminal errors with a single dict membership
         check. The proxy's execute_stream then raises a typed exception
         client-side, mirroring /execute's HTTP 409 → PluginCancelledError flow.
+
+        CR-14: `_apply_call_envelope`'s no-reset semantics matter HERE — the
+        response iteration runs in this request task after the endpoint
+        returns, and each chunk's threadpool hop copies the task context,
+        so the plugin's in-stream logger calls stay job-stamped.
         """
         data = await request.json()
         args = data.get("args", [])
         kwargs = data.get("kwargs", {})
+        _apply_call_envelope(data)  # CR-14: identity persists through iteration
 
         def iter_response() -> Generator[str, None, None]:
             # SG-51: reset cancel flag so stale state from a previous job doesn't
@@ -617,7 +659,6 @@ def _register_task_endpoints(
             "progress": getattr(plugin_instance, '_progress', 0.0),
             "message": getattr(plugin_instance, '_status_message', "")
         }
-
 
 
 # %% ../../nbs/core/worker.ipynb #580f8d04

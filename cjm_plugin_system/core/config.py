@@ -89,9 +89,14 @@ class CJMConfig:
         return self.data_dir / "data"
 
     @property
-    def logs_dir(self) -> Path: # Directory containing plugin logs
-        """Directory containing plugin logs."""
-        return self.data_dir / "logs"
+    def journal_db_path(self) -> Path: # Journal store (CR-14: durable account-of-action)
+        """Journal store path — the precious, host-written observability record."""
+        return self.data_dir / "journal.db"
+
+    @property
+    def diagnostics_db_path(self) -> Path: # Diagnostics store (CR-14: disposable narrative)
+        """Diagnostics store path — worker records + raw stream chunks; retention-managed."""
+        return self.data_dir / "diagnostics.db"
 
     @property
     def conda_binary_path(self) -> Optional[Path]: # Path to conda/micromamba binary or None

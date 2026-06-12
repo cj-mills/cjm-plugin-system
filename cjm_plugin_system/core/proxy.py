@@ -18,7 +18,9 @@ import os
 import signal
 import socket
 import subprocess
+import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Generator, List, Optional, Tuple
 
@@ -35,7 +37,15 @@ from cjm_plugin_system.core.errors import (
     WorkerOOMError,
 )
 from .capability import ToolCapability
-from .wire import FileBackedDTO, wire_decode
+from cjm_plugin_system.core.wire import (
+    ENVELOPE_BODY_KEY, FileBackedDTO, get_call_envelope, wire_decode,
+)
+from cjm_plugin_system.core.journal_store import (
+    JournalEvent, JournalStore, LocalJournalStore, SubstrateEventType,
+)
+from cjm_plugin_system.core.diagnostics_store import (
+    DiagnosticsStore, LocalDiagnosticsStore, StreamChunk, normalize_stream_line,
+)
 from .platform import get_popen_isolation_kwargs, is_windows, terminate_process
 
 # CR-3 follow-up: module-level logger so the proxy can log close-to-wire
@@ -56,7 +66,9 @@ class RemotePluginProxy(ToolCapability):
         self,
         manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
         extra_env:Optional[Dict[str, str]]=None, # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
-        adapter_specs:Optional[List[str]]=None # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
+        adapter_specs:Optional[List[str]]=None, # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
+        journal:Optional[JournalStore]=None, # CR-14: journal sink for worker-lifecycle events; lazy LocalJournalStore at cfg.journal_db_path when None
+        diagnostics:Optional[DiagnosticsStore]=None # CR-14: diagnostics sink (raw-stream pump + worker env contract); lazy LocalDiagnosticsStore when None
     ):
         """Initialize proxy and start the worker process."""
         self.manifest = manifest
@@ -69,6 +81,16 @@ class RemotePluginProxy(ToolCapability):
         # changing any of them requires a worker RESPAWN (reload_plugin).
         self.extra_env = dict(extra_env or {})
         self.process: Optional[subprocess.Popen] = None
+        # CR-14: observability sinks. The journal is the host-written
+        # account-of-action (worker spawn/ready/death derive from THIS
+        # boundary — no plugin cooperation involved); diagnostics receives
+        # the raw-stream pump's chunks and its path rides the worker env.
+        # Lazy defaults share the manager's DB files via get_config().
+        cfg = get_config()
+        self.journal: JournalStore = journal if journal is not None else LocalJournalStore(cfg.journal_db_path)
+        self.diagnostics: DiagnosticsStore = diagnostics if diagnostics is not None else LocalDiagnosticsStore(cfg.diagnostics_db_path)
+        self.worker_session_id: Optional[str] = None  # Set per spawn in _start_process
+        self._pump_thread: Optional[threading.Thread] = None
         # SG-4: bind the listening socket in the parent and (on Unix) pass the
         # FD to the worker via subprocess inheritance, closing the
         # bind-then-close-then-reopen TOCTOU race that would otherwise let
@@ -87,9 +109,18 @@ class RemotePluginProxy(ToolCapability):
         """Plugin version."""
         return self.manifest.get('version', '0.0.0')
 
-
-
-
+    def _journal_event(
+        self,
+        event_type:str, # SubstrateEventType value
+        payload:Optional[Dict[str, Any]]=None # Per-event structured detail
+    ) -> None:
+        """Append a worker-lifecycle journal event with this proxy's identity."""
+        self.journal.append(JournalEvent(
+            event_type=event_type,
+            plugin_name=self.name,
+            worker_session_id=self.worker_session_id,
+            payload=payload or {},
+        ))
 
     def initialize(
         self,
@@ -149,25 +180,61 @@ def _bind_listen_socket(self:RemotePluginProxy) -> Tuple[socket.socket, int]:
     sock.listen(128)
     return sock, sock.getsockname()[1]
 
+# %% ../../nbs/core/proxy.ipynb #9d381dd3
+def _pump_stream(
+    stream,  # The worker's merged stdout/stderr pipe (binary)
+    diagnostics: DiagnosticsStore,  # Sink for stream chunks
+    worker_session_id: str,  # Session attribution for every chunk
+) -> None:
+    """Pump a worker's raw output to the diagnostics store (CR-14).
+
+    The zero-cooperation death-rattle floor: captures everything the worker
+    process writes outside the structured handler — bare prints, native-lib
+    output, tqdm, argparse/startup failures BEFORE logging exists, and the
+    final traceback of a hard crash. Runs as a daemon thread; ends at EOF
+    (worker exit). Attribution is the worker SESSION, never a job — raw
+    streams cannot be job-attributed honestly under same-worker concurrency
+    (the stage-3 lesson that killed the timestamp-window heuristic).
+
+    tqdm CR-frames collapse to their final frame via `normalize_stream_line`
+    (liveness telemetry is not durable). Failures degrade to dropping chunks
+    (diagnostics are the disposable class) — never to breaking the worker.
+    """
+    try:
+        for raw in iter(stream.readline, b""):
+            try:
+                line = normalize_stream_line(raw.decode("utf-8", errors="replace"))
+                if line is None:
+                    continue
+                diagnostics.append_chunk(StreamChunk(
+                    content=line, worker_session_id=worker_session_id))
+            except Exception:
+                continue  # disposable class: drop, never break the pump
+    except Exception:
+        pass  # pipe closed mid-read (worker kill) — EOF semantics
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
 # %% ../../nbs/core/proxy.ipynb #m-start-process
 @patch
 def _start_process(self:RemotePluginProxy) -> None:
-    """Launch the worker subprocess."""
+    """Launch the worker subprocess (CR-14: PIPE-captured + journaled).
+
+    Replaces the pre-CR-14 fd-inherited flat log file (`.cjm/logs/<name>.log`
+    + ctime session markers): raw output goes through `_pump_stream` into the
+    diagnostics store; structured worker logging writes the diagnostics store
+    DIRECTLY via the env contract below; the spawn itself is a journal event.
+    """
     python_path = self.manifest['python_path']
-
-    # 1. Setup Log Directory using config
     cfg = get_config()
-    log_dir = cfg.logs_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Open Log File (Append mode)
-    # We keep the file handle open as long as the process runs
-    self.log_path = log_dir / f"{self.name}.log"
-    self.log_file = open(self.log_path, "a") # Close this in cleanup()
-
-    # Write a header so we know a new session started
-    self.log_file.write(f"\n--- Starting {self.name} at {time.ctime()} ---\n")
-    self.log_file.flush()
+    # CR-14: spawn-scoped worker session id — ties WORKER_SPAWNED/READY/DIED
+    # journal events and every diagnostics row from this worker lifetime
+    # together (the durable replacement for "--- Starting ---" markers).
+    self.worker_session_id = str(uuid.uuid4())
 
     # SG-4: prefer FD inheritance over bind-then-close. `pass_fds` is
     # Unix-only; Windows falls back to the legacy port-handoff (TOCTOU
@@ -206,23 +273,54 @@ def _start_process(self:RemotePluginProxy) -> None:
     env["CJM_PLUGIN_DATA_DIR"] = str(cfg.plugin_data_dir)
     if cfg.models_dir:
         env["CJM_MODELS_DIR"] = str(cfg.models_dir)
+    # CR-14: worker-side diagnostics contract (install_worker_diagnostics):
+    # the worker's root logger writes structured records straight to the
+    # diagnostics store, stamped with this session id + (via the call
+    # envelope) exact job identity. Only injectable for path-backed sinks;
+    # a custom sink without db_path leaves the worker on its stdout
+    # fallback, which the pump still captures as chunks.
+    diag_db = getattr(self.diagnostics, 'db_path', None)
+    if diag_db is not None:
+        env["CJM_DIAGNOSTICS_DB"] = str(diag_db)
+    env["CJM_WORKER_SESSION_ID"] = self.worker_session_id
 
     print(f"[{self.name}] Starting worker on port {self.port}...")
-    # 3. Redirect Output to File
-    # We merge stderr into stdout for a single timeline
-    print(f"[{self.name}] Logs: {self.log_path}")
+    print(f"[{self.name}] Diagnostics: {diag_db or self.diagnostics} (session {self.worker_session_id[:8]})")
 
     # Get cross-platform process isolation kwargs
     isolation_kwargs = get_popen_isolation_kwargs()
 
+    # CR-14: raw stdout/stderr -> PIPE -> pump thread -> diagnostics chunks.
     self.process = subprocess.Popen(
         cmd,
-        stdout=self.log_file,
+        stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT, # Merge stderr into stdout
         env=env,
         **isolation_kwargs,
         **popen_kwargs,
     )
+    self._pump_thread = threading.Thread(
+        target=_pump_stream,
+        args=(self.process.stdout, self.diagnostics, self.worker_session_id),
+        name=f"cjm-pump-{self.name}",
+        daemon=True,
+    )
+    self._pump_thread.start()
+
+    # CR-14: the spawn is a journal event — derived at the host boundary,
+    # zero plugin cooperation. Secrets stay out: overlay KEY NAMES only.
+    self._journal_event(SubstrateEventType.WORKER_SPAWNED.value, {
+        "pid": self.process.pid,
+        "port": self.port,
+        "module": self.manifest.get('module'),
+        "version": self.version,
+        "env_overlay_keys": sorted(self.extra_env),
+    })
+    if self.adapter_specs:
+        self._journal_event(SubstrateEventType.ADAPTER_BOUND.value, {
+            "specs": list(self.adapter_specs),
+        })
+
     # Parent releases its copy of the listening socket once the worker has
     # inherited the FD; the worker now owns it via uvicorn's --fd path.
     if self._listen_sock is not None:
@@ -243,15 +341,34 @@ def _wait_for_ready(
             with httpx.Client() as client:
                 client.get(f"{self.base_url}/health")
             print(f"[{self.name}] Worker ready.")
+            # CR-14: readiness is a journal event (startup latency rides along).
+            self._journal_event(SubstrateEventType.WORKER_READY.value, {
+                "wait_seconds": round(time.time() - start, 3),
+            })
             return
         except httpx.ConnectError:
             time.sleep(0.5)
 
-    # Timeout - get stderr for debugging
-    _, stderr = self.process.communicate(timeout=1)
+    # Timeout. The death rattle (argparse/import/startup failures) was pumped
+    # into the diagnostics stream chunks — point the operator at the session.
+    # (Pre-CR-14 this called process.communicate(), which now would race the
+    # pump thread for the pipe.)
+    self._journal_event(SubstrateEventType.WORKER_DIED.value, {
+        "phase": "startup_timeout",
+        "timeout_seconds": timeout,
+        "returncode": self.process.poll() if self.process else None,
+    })
+    rattle = ""
+    try:
+        chunks = self.diagnostics.query_chunks(
+            worker_session_id=self.worker_session_id, limit=5, descending=True)
+        rattle = " | ".join(c.content for c in reversed(chunks))
+    except Exception:
+        pass
     raise TimeoutError(
-        f"Plugin '{self.name}' failed to start within {timeout}s: "
-        f"{stderr.decode() if stderr else 'Unknown error'}"
+        f"Plugin '{self.name}' failed to start within {timeout}s "
+        f"(worker_session_id={self.worker_session_id}). "
+        f"Last output: {rattle or '<no output captured>'}"
     )
 
 # %% ../../nbs/core/proxy.ipynb #m-config-options
@@ -278,12 +395,30 @@ def cleanup(self:RemotePluginProxy) -> None:
         pass  # Worker may already be gone
 
     # Terminate the subprocess using cross-platform utility
-    terminate_process(self.process, timeout=2.0)
+    proc = self.process
+    terminate_process(proc, timeout=2.0)
     self.process = None
 
-    # Close file handle
-    if hasattr(self, 'log_file') and self.log_file:
-        self.log_file.close()
+    # CR-14: journal the death. Documented exception to the journal's loud
+    # rule: cleanup runs in teardown paths (context-manager __exit__,
+    # interpreter shutdown) where a raise would mask the work that ran —
+    # so a failed death-record logs at ERROR (visible, not silent) instead
+    # of raising. Every other journal append stays loud.
+    try:
+        self._journal_event(SubstrateEventType.WORKER_DIED.value, {
+            "phase": "cleanup",
+            "returncode": proc.returncode if proc is not None else None,
+        })
+    except Exception:
+        _logger.error(
+            "journal append failed recording WORKER_DIED for %s (session %s)",
+            self.name, self.worker_session_id, exc_info=True)
+
+    # The pump thread ends at pipe EOF (worker exit); give it a moment to
+    # flush the final chunks. Daemon thread — never blocks shutdown long.
+    if self._pump_thread is not None:
+        self._pump_thread.join(timeout=2.0)
+        self._pump_thread = None
 
 # %% ../../nbs/core/proxy.ipynb #serialization
 def _maybe_serialize_input(
@@ -305,10 +440,21 @@ def _prepare_payload(
     args: tuple, # Positional arguments
     kwargs: dict # Keyword arguments
 ) -> Dict[str, Any]: # JSON-serializable payload
-    """Prepare arguments for HTTP transmission."""
+    """Prepare arguments for HTTP transmission.
+
+    CR-14: attaches the current call envelope (set by the JobQueue around
+    each job's execution via the `wire` contextvar) as a TOP-LEVEL body key.
+    Never inside kwargs — plugin signatures never see it; old workers ignore
+    unknown top-level keys. Envelope-less calls (direct proxy use) simply
+    produce unattributed worker records.
+    """
     safe_args = [self._maybe_serialize_input(a) for a in args]
     safe_kwargs = {k: self._maybe_serialize_input(v) for k, v in kwargs.items()}
-    return {"args": safe_args, "kwargs": safe_kwargs}
+    payload: Dict[str, Any] = {"args": safe_args, "kwargs": safe_kwargs}
+    env = get_call_envelope()
+    if env is not None:
+        payload[ENVELOPE_BODY_KEY] = env.to_wire()
+    return payload
 
 RemotePluginProxy._maybe_serialize_input = _maybe_serialize_input
 RemotePluginProxy._prepare_payload = _prepare_payload
@@ -524,6 +670,28 @@ RemotePluginProxy.execute = execute_with_oom_check
 RemotePluginProxy.execute_async = execute_async_with_oom_check
 
 # %% ../../nbs/core/proxy.ipynb #1a3bb3f7
+def _prepare_task_payload(
+    self,
+    task_name: str,  # Adapter task address
+    method: str,  # Adapter method name
+    kwargs: dict,  # Task method kwargs
+) -> Dict[str, Any]:  # JSON-serializable /task body
+    """Build the /task body (CR-17 pt 2) + the CR-14 call envelope rider.
+
+    Same envelope semantics as `_prepare_payload`: top-level key, never
+    inside kwargs.
+    """
+    payload: Dict[str, Any] = {
+        "task": task_name,
+        "method": method,
+        "kwargs": {k: self._maybe_serialize_input(v) for k, v in kwargs.items()},
+    }
+    env = get_call_envelope()
+    if env is not None:
+        payload[ENVELOPE_BODY_KEY] = env.to_wire()
+    return payload
+
+
 def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
     """Invoke a typed task-adapter method in-worker (CR-17 pt 2; sync).
 
@@ -532,11 +700,7 @@ def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
     by design. Built ONCE with the CR-7 Track-A worker-death check inside —
     no later wrapper supersedes it (the G7a last-assignment-wins lesson).
     """
-    payload = {
-        "task": task_name,
-        "method": method,
-        "kwargs": {k: self._maybe_serialize_input(v) for k, v in kwargs.items()},
-    }
+    payload = self._prepare_task_payload(task_name, method, kwargs)
     try:
         with httpx.Client(timeout=None) as client:
             resp = client.post(f"{self.base_url}/task", json=payload)
@@ -553,11 +717,7 @@ def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
 
 async def execute_task_async(self, task_name: str, method: str, **kwargs) -> Any:
     """Invoke a typed task-adapter method in-worker (CR-17 pt 2; async). Same semantics."""
-    payload = {
-        "task": task_name,
-        "method": method,
-        "kwargs": {k: self._maybe_serialize_input(v) for k, v in kwargs.items()},
-    }
+    payload = self._prepare_task_payload(task_name, method, kwargs)
     try:
         async with httpx.AsyncClient(timeout=None) as client:
             resp = await client.post(f"{self.base_url}/task", json=payload)
@@ -572,9 +732,9 @@ async def execute_task_async(self, task_name: str, method: str, **kwargs) -> Any
     return wire_decode(resp.json())
 
 
+RemotePluginProxy._prepare_task_payload = _prepare_task_payload
 RemotePluginProxy.execute_task = execute_task
 RemotePluginProxy.execute_task_async = execute_task_async
-
 
 # %% ../../nbs/core/proxy.ipynb #lifecycle
 def get_stats(self) -> Dict[str, Any]: # Process telemetry

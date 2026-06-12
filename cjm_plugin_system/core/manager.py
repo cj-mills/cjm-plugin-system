@@ -12,8 +12,8 @@ __all__ = ['PluginManager', 'register_system_monitor', 'get_global_stats', 'get_
            'get_instance', 'list_instances', 'get_worker_env_status', 'missing_required_env', 'set_plugin_secret',
            'load_plugin', 'load_all', 'unload_plugin', 'unload_all', 'get_plugin', 'list_plugins', 'execute_plugin',
            'execute_plugin_async', 'execute_plugin_task', 'execute_plugin_task_async', 'enable_plugin',
-           'disable_plugin', 'get_plugin_logs', 'get_plugin_config', 'get_plugin_config_schema', 'get_config_options',
-           'get_all_plugin_configs', 'update_plugin_config', 'reload_plugin', 'get_plugin_stats',
+           'disable_plugin', 'get_plugin_diagnostics', 'get_plugin_config', 'get_plugin_config_schema',
+           'get_config_options', 'get_all_plugin_configs', 'update_plugin_config', 'reload_plugin', 'get_plugin_stats',
            'execute_plugin_stream', 'load_plugin_async', 'unload_plugin_async', 'load_plugins_concurrent',
            'unload_plugins_concurrent', 'PluginBinding', 'bind', 'get_by_role', 'get_by_domain', 'get_canonical',
            'get_compatible_for_current_platform']
@@ -49,6 +49,12 @@ from cjm_plugin_system.core.adapter_manifest import (
     AdapterManifest, adapter_manifest_from_dict, is_adapter_manifest,
     match_protocol_against_surface,
 )
+from cjm_plugin_system.core.journal_store import (
+    JournalEvent, JournalStore, LocalJournalStore, SubstrateEventType,
+)
+from cjm_plugin_system.core.diagnostics_store import (
+    DiagnosticRecord, DiagnosticsStore, LocalDiagnosticsStore,
+)
 from .scheduling import ResourceScheduler, PermissiveScheduler
 from ._telemetry import attribute_gpu_to_worker_subtree
 
@@ -71,7 +77,9 @@ class PluginManager:
         empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
         secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
         max_retries:int=1, # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
-        sysmon_plugin_name:Optional[str]=None # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
+        sysmon_plugin_name:Optional[str]=None, # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
+        journal_store:Optional[JournalStore]=None, # CR-14: durable account-of-action; lazy LocalJournalStore at <data_dir>/journal.db
+        diagnostics_store:Optional[DiagnosticsStore]=None # CR-14: disposable diagnostic narrative; lazy LocalDiagnosticsStore at <data_dir>/diagnostics.db
     ):
         """Initialize the plugin manager."""
         self.plugin_interface = plugin_interface
@@ -122,6 +130,20 @@ class PluginManager:
             (_data_dir / "secrets") if _data_dir is not None else None
         )
         
+        # CR-14: observability stores. The journal is the substrate-derived,
+        # host-written, never-auto-deleted account-of-action (SG-57's audit
+        # trail); diagnostics is the disposable worker-narrative store. Both
+        # default to the project-local data dir beside the sibling stores.
+        # The JobQueue + proxies adopt these via getattr/constructor pass-
+        # through, so host + queue + workers share ONE journal + ONE
+        # diagnostics DB per runtime.
+        self.journal_store: JournalStore = journal_store or LocalJournalStore(
+            (_data_dir / "journal.db") if _data_dir is not None else None
+        )
+        self.diagnostics_store: DiagnosticsStore = diagnostics_store or LocalDiagnosticsStore(
+            (_data_dir / "diagnostics.db") if _data_dir is not None else None
+        )
+
         # CR-7: empirical resource tracking. The store is lazy-init'd only when
         # cfg.substrate.empirical_tracking is True (default). Hosts that want
         # the substrate to skip recording entirely set empirical_tracking=False
@@ -1273,7 +1295,9 @@ def load_plugin(
         # the explicit list with loud refusal) and bind them in-worker at spawn.
         adapter_specs = self._resolve_adapter_specs(plugin_meta, adapters)
         proxy = RemotePluginProxy(plugin_meta.manifest, extra_env=extra_env,
-                                  adapter_specs=adapter_specs)
+                                  adapter_specs=adapter_specs,
+                                  journal=self.journal_store,
+                                  diagnostics=self.diagnostics_store)
 
         config_schema = plugin_meta.manifest.get("config_schema")
         
@@ -1349,6 +1373,23 @@ def load_plugin(
             f"Loaded plugin: {plugin_meta.name} "
             f"(instance_id={resolved_id}, enabled={effective_enabled})"
         )
+
+        # CR-14: the effective config at load is a journal event — derived at
+        # the substrate boundary (config KEY NAMES only + the hash; readable
+        # config lives in run manifests per the I8 rider — never duplicate).
+        # Defensive getattr: test fixtures construct via __new__ without the
+        # observability stores (the CR-7 fixture pattern).
+        _journal = getattr(self, 'journal_store', None)
+        if _journal is not None:
+            _journal.append(JournalEvent(
+                event_type=SubstrateEventType.CONFIG_APPLIED.value,
+                plugin_instance_id=resolved_id,
+                plugin_name=plugin_meta.name,
+                config_hash=instance_config_hash,
+                worker_session_id=getattr(proxy, 'worker_session_id', None),
+                payload={"phase": "load", "config_keys": sorted(effective_config),
+                         "enabled": effective_enabled},
+            ))
         return True
 
     except Exception as e:
@@ -2047,27 +2088,56 @@ def disable_plugin(
 PluginManager.disable_plugin = disable_plugin
 
 # %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin_logs
-def get_plugin_logs(
+def get_plugin_diagnostics(
     self,
-    plugin_name:str, # Name of the plugin
-    lines:int=50 # Number of lines to return
-) -> str: # Log content
-    """Read the last N lines of the plugin's log file."""
-    cfg = get_config()
-    log_path = cfg.logs_dir / f"{plugin_name}.log"
-    
-    if not log_path.exists():
-        return "No logs found."
-        
-    try:
-        from collections import deque
-        with open(log_path, 'r') as f:
-            tail = deque(f, maxlen=lines)
-            return "".join(tail)
-    except Exception as e:
-        return f"Error reading logs: {e}"
+    name_or_id:str, # Plugin name or instance_id
+    limit:int=50, # Max records to return (most recent)
+    include_stream:bool=True # Include raw stream chunks for the plugin's worker sessions
+) -> str: # Rendered diagnostic text (most recent last)
+    """Render a plugin's recent diagnostics as text (CR-14; replaces
+    `get_plugin_logs` — the flat `.cjm/logs/*.log` files no longer exist).
 
-PluginManager.get_plugin_logs = get_plugin_logs
+    A convenience TEXT projection over the diagnostics store for operator /
+    UI display: structured records (level + logger name + exact job id when
+    stamped) merged with the raw stream chunks (prints / tqdm final frames /
+    death rattles) from this plugin's worker sessions, ordered by time.
+    Programmatic consumers query the stores directly
+    (`manager.diagnostics_store` / `JobQueue.get_job_diagnostics`).
+    """
+    inst = self.instances.get(name_or_id)
+    plugin_name = inst.plugin_name if inst is not None else name_or_id
+
+    # Worker sessions for this plugin come from the journal (spawn events).
+    sessions = []
+    try:
+        for ev in self.journal_store.query(event_type="worker_spawned",
+                                           descending=True, limit=20):
+            if ev.plugin_name == plugin_name and ev.worker_session_id:
+                sessions.append(ev.worker_session_id)
+    except Exception as e:
+        self.logger.warning(f"get_plugin_diagnostics journal read failed: {e}")
+
+    entries = []  # (ts, rendered line)
+    try:
+        for ws in sessions:
+            for r in self.diagnostics_store.query_records(
+                    worker_session_id=ws, limit=limit, descending=True):
+                job = f" job={r.job_id}" if r.job_id else ""
+                entries.append((r.ts, f"{r.ts.isoformat()} [{r.level}] {r.logger_name}{job} :: {r.message}"
+                                + (f"\n{r.exc_text}" if r.exc_text else "")))
+            if include_stream:
+                for c in self.diagnostics_store.query_chunks(
+                        worker_session_id=ws, limit=limit, descending=True):
+                    entries.append((c.ts, f"{c.ts.isoformat()} [stream] {c.content}"))
+    except Exception as e:
+        return f"Error reading diagnostics: {e}"
+
+    if not entries:
+        return "No diagnostics found."
+    entries.sort(key=lambda t: t[0])
+    return "\n".join(line for _, line in entries[-limit:])
+
+PluginManager.get_plugin_diagnostics = get_plugin_diagnostics
 
 # %% ../../nbs/core/manager.ipynb #pm-fn-get_plugin_config
 def get_plugin_config(
@@ -2169,7 +2239,25 @@ def update_plugin_config(
         if not inst.proxy.reconfigure(old_config, validated_config):
             inst.proxy.initialize(validated_config)
         inst.config = dict(validated_config)
+        # CR-14 (stage-7 found bug, ledger K-entry): the hash MUST follow the
+        # config — it was set only at load, so post-reconfigure empirical
+        # samples were recorded under the OLD config's hash, polluting its
+        # profile and defeating the stage-3 "config change = new hash =
+        # auto-demotion" admission self-correction.
+        inst.config_hash = compute_config_hash(dict(validated_config))
         self.logger.info(f"Updated configuration for instance: {inst.instance_id}")
+        # CR-14: reconfigure is a journal event (the substrate boundary sees
+        # it). Defensive getattr for __new__-style test fixtures.
+        _journal = getattr(self, 'journal_store', None)
+        if _journal is not None:
+            _journal.append(JournalEvent(
+                event_type=SubstrateEventType.CONFIG_APPLIED.value,
+                plugin_instance_id=inst.instance_id,
+                plugin_name=inst.plugin_name,
+                config_hash=inst.config_hash,
+                payload={"phase": "reconfigure",
+                         "config_keys": sorted(validated_config or {})},
+            ))
         # CR-2 + CR-10: persist only for the default instance (persistence is
         # per-plugin, not per-instance).
         if inst.instance_id == inst.plugin_name:
