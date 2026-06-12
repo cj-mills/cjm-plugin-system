@@ -72,51 +72,51 @@ graph LR
     utils_hashing["utils.hashing<br/>Content Hashing Utilities"]
     utils_validation["utils.validation<br/>Configuration Validation"]
 
+    bootstrap --> core_manager
     bootstrap --> core_scheduling
     bootstrap --> core_queue
-    bootstrap --> core_manager
-    cli --> core_platform
     cli --> core_metadata
     cli --> core_manifest_format
     cli --> core_config
+    cli --> core_platform
     core_capability --> core_errors
     core_empirical_store --> utils_hashing
     core_interface --> core_capability
     core_interface --> core
-    core_interface --> core_wire
     core_interface --> core_interface
+    core_interface --> core_wire
     core_manager --> core_metadata
-    core_manager --> core_manifest_format
     core_manager --> core_empirical_store
+    core_manager --> core_adapter_manifest
     core_manager --> core_errors
+    core_manager --> core_config
     core_manager --> core_scheduling
+    core_manager --> core_manifest_format
+    core_manager --> core__telemetry
+    core_manager --> core_config_store
     core_manager --> core_proxy
     core_manager --> core_secret_store
-    core_manager --> core_config_store
-    core_manager --> core_adapter_manifest
-    core_manager --> core_config
-    core_manager --> core__telemetry
-    core_manager --> core_capability
     core_manager --> utils_validation
-    core_manifest_format --> utils_hashing
+    core_manager --> core_capability
     core_manifest_format --> core_metadata
+    core_manifest_format --> utils_hashing
     core_platform --> core_config
     core_ports --> core_errors
     core_proxy --> core_errors
-    core_proxy --> core_platform
     core_proxy --> core_config
+    core_proxy --> core_platform
     core_proxy --> core_wire
     core_proxy --> core_capability
     core_queue --> core_errors
     core_queue --> core_ports
     core_queue --> core__telemetry
     core_scheduling --> core_metadata
-    core_worker --> core_errors
     core_worker --> core_capability
-    core_worker --> core_wire
     core_worker --> core_platform
-    utils_cache_paths --> utils_hashing
+    core_worker --> core_errors
+    core_worker --> core_wire
     utils_cache_paths --> core_empirical_store
+    utils_cache_paths --> utils_hashing
     utils_validation --> core_errors
 ```
 
@@ -1383,6 +1383,20 @@ def regenerate_manifest(
 ```
 
 ``` python
+def _generate_adapter_manifest(
+    """
+    Introspect a task-adapter impl in-env and write its adapter manifest (CR-17 pt 2).
+    
+    The non-typer core shared by the `generate-adapter-manifest` command and
+    `install-all`'s per-plugin `adapters:` entries (stage 6 J10 -- the I6/J8
+    install-pipeline gap: adapter installation + registration ride the SAME
+    pipeline as capability installation, never manual afterthoughts).
+    Raises ValueError on a malformed target and CalledProcessError when the
+    in-env introspection fails; callers decide the exit posture.
+    """
+```
+
+``` python
 def generate_adapter_manifest(
     env_name: str = typer.Argument(..., help="Conda env containing the adapter impl (the tool's worker env)"),
     target: str = typer.Argument(..., help="Adapter impl spec 'module:ClassName'"),
@@ -1396,6 +1410,9 @@ def generate_adapter_manifest(
     compatibility matching works against UNLOADED capabilities with zero
     protocol imports host-side. Written to the same manifests dir capability
     manifests live in; `discover_manifests()` routes by the `unit` key.
+    
+    Thin typer wrapper over `_generate_adapter_manifest` (stage 6 J10:
+    install-all runs the same core for per-plugin `adapters:` entries).
     """
 ```
 
@@ -1411,7 +1428,16 @@ def install_all(
     plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
     force:bool=typer.Option(False, help="Force recreation of environments")
 ) -> None
-    "Install and register all plugins defined in plugins.yaml."
+    """
+    Install and register all plugins defined in plugins.yaml.
+    
+    Per-plugin `adapters:` entries ride the same pipeline (stage 6 J10; closes
+    the I6/J8 manual-step gap): each entry's `lib` is pip-installed into the
+    worker env alongside the interface libs, and each `impl`
+    ('module:ClassName') gets its adapter manifest generated right after the
+    capability manifest -- INSTALL puts code in envs, REGISTRATION is per-unit
+    manifests (pass-2 Thread 3), one command does both.
+    """
 ```
 
 ``` python
