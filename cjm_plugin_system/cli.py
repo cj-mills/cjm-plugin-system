@@ -611,25 +611,23 @@ def regenerate_manifest(
     
     typer.echo(f"✓ Regenerated manifest at {out_path}")
 
-# %% ../nbs/cli.ipynb #276fc997
-@app.command("generate-adapter-manifest")
-def generate_adapter_manifest(
-    env_name: str = typer.Argument(..., help="Conda env containing the adapter impl (the tool's worker env)"),
-    target: str = typer.Argument(..., help="Adapter impl spec 'module:ClassName'"),
-):
-    """CR-17 pt 2 (stage 4): introspect a task-adapter impl in-env and write its adapter manifest.
+# %% ../nbs/cli.ipynb #432ce6a0ea19
+def _generate_adapter_manifest(
+    env_name: str,        # Conda env containing the adapter impl (the tool's worker env)
+    target: str,          # Adapter impl spec 'module:ClassName'
+    manifests_dir: Path,  # Manifest output directory
+) -> Path:  # The written adapter-manifest path
+    """Introspect a task-adapter impl in-env and write its adapter manifest (CR-17 pt 2).
 
-    The adapter manifest is the REGISTRATION unit (pass-2 Thread 3): task_name
-    + required_tool_protocol members (names + parameter lists + signatures)
-    recorded IN-ENV where the protocol is importable, so host-side
-    compatibility matching works against UNLOADED capabilities with zero
-    protocol imports host-side. Written to the same manifests dir capability
-    manifests live in; `discover_manifests()` routes by the `unit` key.
+    The non-typer core shared by the `generate-adapter-manifest` command and
+    `install-all`'s per-plugin `adapters:` entries (stage 6 J10 -- the I6/J8
+    install-pipeline gap: adapter installation + registration ride the SAME
+    pipeline as capability installation, never manual afterthoughts).
+    Raises ValueError on a malformed target and CalledProcessError when the
+    in-env introspection fails; callers decide the exit posture.
     """
-    cfg = get_config()
     if ":" not in target:
-        typer.echo("target must be 'module:ClassName'", err=True)
-        raise typer.Exit(1)
+        raise ValueError(f"adapter target must be 'module:ClassName', got {target!r}")
     module_name, class_name = target.rsplit(":", 1)
     introspection_script = f"""
 import inspect, json
@@ -695,24 +693,49 @@ print(json.dumps({{
         data = json.loads(out[start:end])
         data["generated_at"] = datetime.now(timezone.utc).isoformat()
         data["conda_env"] = env_name
-        cfg.manifests_dir.mkdir(parents=True, exist_ok=True)
-        out_file = cfg.manifests_dir / f"adapter-{data['task_name']}-{class_name}.json"
+        manifests_dir.mkdir(parents=True, exist_ok=True)
+        out_file = manifests_dir / f"adapter-{data['task_name']}-{class_name}.json"
         with open(out_file, "w") as f:
             json.dump(data, f, indent=2)
         typer.echo(f"Adapter manifest written: {out_file}")
         typer.echo(f"  task: {data['task_name']}  protocol: {data['required_tool_protocol']}")
         typer.echo(f"  methods: {len(data['protocol_members']['methods'])}  "
                    f"properties: {len(data['protocol_members']['properties'])}")
-    except subprocess.CalledProcessError as e:
-        typer.echo(f"Adapter introspection failed in env {env_name}:", err=True)
-        typer.echo(e.stderr or e.stdout or "", err=True)
-        raise typer.Exit(1)
+        return out_file
     finally:
         try:
             os.unlink(introspection_path)
         except OSError:
             pass
 
+# %% ../nbs/cli.ipynb #276fc997
+@app.command("generate-adapter-manifest")
+def generate_adapter_manifest(
+    env_name: str = typer.Argument(..., help="Conda env containing the adapter impl (the tool's worker env)"),
+    target: str = typer.Argument(..., help="Adapter impl spec 'module:ClassName'"),
+):
+    """CR-17 pt 2 (stage 4): introspect a task-adapter impl in-env and write its adapter manifest.
+
+    The adapter manifest is the REGISTRATION unit (pass-2 Thread 3): task_name
+    + required_tool_protocol members (names + parameter lists + signatures)
+    recorded IN-ENV where the protocol is importable, so host-side
+    compatibility matching works against UNLOADED capabilities with zero
+    protocol imports host-side. Written to the same manifests dir capability
+    manifests live in; `discover_manifests()` routes by the `unit` key.
+
+    Thin typer wrapper over `_generate_adapter_manifest` (stage 6 J10:
+    install-all runs the same core for per-plugin `adapters:` entries).
+    """
+    cfg = get_config()
+    try:
+        _generate_adapter_manifest(env_name, target, cfg.manifests_dir)
+    except ValueError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1)
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"Adapter introspection failed in env {env_name}:", err=True)
+        typer.echo(e.stderr or e.stdout or "", err=True)
+        raise typer.Exit(1)
 
 # %% ../nbs/cli.ipynb #d448fe11
 def _conda_env_exists_configured(
@@ -761,7 +784,15 @@ def install_all(
     plugins_path:str=typer.Option("plugins.yaml", "--plugins", help="Path to plugins.yaml file"),
     force:bool=typer.Option(False, help="Force recreation of environments")
 ) -> None:
-    """Install and register all plugins defined in plugins.yaml."""
+    """Install and register all plugins defined in plugins.yaml.
+
+    Per-plugin `adapters:` entries ride the same pipeline (stage 6 J10; closes
+    the I6/J8 manual-step gap): each entry's `lib` is pip-installed into the
+    worker env alongside the interface libs, and each `impl`
+    ('module:ClassName') gets its adapter manifest generated right after the
+    capability manifest -- INSTALL puts code in envs, REGISTRATION is per-unit
+    manifests (pass-2 Thread 3), one command does both.
+    """
     cfg = get_config()
     
     # Check runtime availability
@@ -827,6 +858,13 @@ def install_all(
                 libs = " ".join(plugin['interface_libs'])
                 run_cmd(f"{base_pip_cmd} {libs}")
 
+            # Adapter impl libraries ride the same env install (J10)
+            adapter_entries = plugin.get('adapters') or []
+            adapter_libs = [a['lib'] for a in adapter_entries
+                            if isinstance(a, dict) and a.get('lib')]
+            if adapter_libs:
+                run_cmd(f"{base_pip_cmd} {' '.join(adapter_libs)}")
+
             if 'package' in plugin:
                 run_cmd(f"{base_pip_cmd} {plugin['package']}")
 
@@ -836,6 +874,25 @@ def install_all(
             # conda_env step is no longer needed.
             pkg_source = plugin['package']
             _generate_manifest(env_name, pkg_source, manifest_dir)
+
+            # 5. Generate adapter manifests (registration units) for any
+            # adapter impls this worker env carries. Failure is LOUD -- a
+            # half-registered adapter is the silent-inert pattern (G11/I6).
+            for entry in adapter_entries:
+                impl = entry.get('impl') if isinstance(entry, dict) else None
+                if not impl:
+                    typer.echo(f"{name}: adapters entry missing 'impl' "
+                               f"('module:ClassName'): {entry!r}", err=True)
+                    raise typer.Exit(code=1)
+                try:
+                    _generate_adapter_manifest(env_name, impl, manifest_dir)
+                except (ValueError, subprocess.CalledProcessError) as e:
+                    detail = ""
+                    if isinstance(e, subprocess.CalledProcessError):
+                        detail = (e.stderr or e.stdout or "").strip()
+                    typer.echo(f"Adapter manifest generation FAILED for {impl} "
+                               f"in {env_name}: {detail or e}", err=True)
+                    raise typer.Exit(code=1)
 
         print("\n All operations complete.")
     
@@ -1086,6 +1143,9 @@ def estimate_size(
         pip_packages: List[str] = []
         if 'interface_libs' in plugin:
             pip_packages.extend(plugin['interface_libs'])
+        for entry in plugin.get('adapters') or []:
+            if isinstance(entry, dict) and entry.get('lib'):
+                pip_packages.append(entry['lib'])
         if 'package' in plugin:
             pip_packages.append(plugin['package'])
         
@@ -1703,6 +1763,27 @@ def _validate_plugins_yaml_dict(
         
         if "interface_libs" in plugin and not isinstance(plugin["interface_libs"], list):
             errors.append(f"{prefix}: 'interface_libs' must be a list when present")
+
+        # Adapter entries (stage 6 J10): each names the impl to register and,
+        # optionally, the library that provides it (pip-installed into the env)
+        if "adapters" in plugin:
+            adapters = plugin["adapters"]
+            if not isinstance(adapters, list):
+                errors.append(f"{prefix}: 'adapters' must be a list when present")
+            else:
+                for j, entry in enumerate(adapters):
+                    aprefix = f"{prefix}.adapters[{j}]"
+                    if not isinstance(entry, dict):
+                        errors.append(f"{aprefix}: must be a mapping, got {type(entry).__name__}")
+                        continue
+                    impl = entry.get("impl")
+                    if not impl or not isinstance(impl, str):
+                        errors.append(f"{aprefix}: required field 'impl' is missing or not a string")
+                    elif ":" not in impl:
+                        errors.append(f"{aprefix}: 'impl' must be 'module:ClassName', got {impl!r}")
+                    lib = entry.get("lib")
+                    if lib is not None and not isinstance(lib, str):
+                        errors.append(f"{aprefix}: 'lib' must be a string when present")
     
     return errors
 

@@ -92,6 +92,12 @@ plugins:
     interface_libs:
       - "git+https://github.com/cj-mills/cjm-plugin-system.git"
       - "git+https://github.com/cj-mills/cjm-graph-plugin-system.git"
+    # Adapter impls this worker env carries (stage-6 J10: install-all
+    # pip-installs `lib` into the env + generates the adapter manifest --
+    # the I6/J8 manual steps now ride the pipeline)
+    adapters:
+      - lib: "git+https://github.com/cj-mills/cjm-graph-storage-adapter-interface.git"
+        impl: "cjm_graph_storage_adapter_interface.generic:GenericGraphStorageAdapter"
 
 
   # ----------------------------------------------------------------
