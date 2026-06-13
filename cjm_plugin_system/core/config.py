@@ -67,6 +67,8 @@ class SubstrateConfig:
     drift_detection:bool=True # Run /config_schema hash compare on every load_plugin
     empirical_tracking:bool=True # Record ResourceSample after every execute_plugin*
     prefetch_stall_threshold_seconds:float=60.0 # CR-4 / Session A: stall detection threshold for proxy.prefetch
+    diagnostics_retention_days:float=30.0 # CR-14 follow-up: age-based diagnostics retention; <=0 disables the startup sweep
+    diagnostics_retention_max_mb:Optional[float]=None # CR-14 follow-up: diagnostics.db size budget (None = no size-based deletion)
 
 # %% ../../nbs/core/config.ipynb #cjm-config
 @dataclass
@@ -159,6 +161,16 @@ def _load_from_yaml(
         prefetch_stall_threshold_seconds=float(substrate_data.get(
             "prefetch_stall_threshold_seconds", 60.0
         )),
+        # CR-14 follow-up: diagnostics retention policy (journal is NEVER
+        # auto-deleted — only the disposable class has a policy at all).
+        diagnostics_retention_days=float(substrate_data.get(
+            "diagnostics_retention_days", 30.0
+        )),
+        diagnostics_retention_max_mb=(
+            float(substrate_data["diagnostics_retention_max_mb"])
+            if substrate_data.get("diagnostics_retention_max_mb") is not None
+            else None
+        ),
     )
 
     # Parse top-level config

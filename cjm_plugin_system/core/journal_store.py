@@ -10,6 +10,7 @@ __all__ = ['LIVENESS_EVENT_TYPES', 'SubstrateEventType', 'JournalEvent', 'Journa
 # %% ../../nbs/core/journal_store.ipynb #exports
 import json
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ class SubstrateEventType(str, Enum):
     GRAPH_EXTENDED = "graph_extended"      # Graph mutation account from the storage adapter (reserved)
     RUN_STARTED = "run_started"            # Host-tier: a core run began (links run manifests to the journal)
     RUN_FINISHED = "run_finished"          # Host-tier: a core run ended
+    VERIFY_OUTCOME = "verify_outcome"      # Host-tier: a core's skeptical-lens verify result (I14: outcomes are rows, not log lines)
 
 
 # %% ../../nbs/core/journal_store.ipynb #liveness-types
@@ -175,6 +177,15 @@ class LocalJournalStore:
         """`db_path=None` uses `~/.cjm/journal.db`; PluginManager passes
         `cfg.journal_db_path` (project-scoped) automatically."""
         self.db_path = Path(db_path) if db_path is not None else Path.home() / ".cjm" / "journal.db"
+        # Persistent lock-protected connection (stage-7 stress part-1 catch):
+        # per-call open/close to a WAL DB costs ~16 ms — the close runs a WAL
+        # checkpoint — which broke the ratified "synchronous tiny WAL INSERTs"
+        # latency claim 25x over. One connection per store instance +
+        # synchronous=NORMAL (the standard WAL pairing) restores sub-ms
+        # appends; the lock serializes intra-process threads, WAL coordinates
+        # cross-process writers.
+        self._lock = threading.Lock()
+        self._connection: Optional[sqlite3.Connection] = None
 
     _SELECT_COLS = (
         "seq, event_id, ts, event_type, run_id, job_id, composition_id, "
@@ -210,16 +221,27 @@ class LocalJournalStore:
 @patch
 @contextmanager
 def _conn(self: LocalJournalStore) -> Iterator[sqlite3.Connection]:
-    """Open a connection, creating parent dirs + schema + WAL on demand."""
-    self.db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(self.db_path, timeout=10.0)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.executescript(_JOURNAL_SCHEMA)
-        yield conn
-    finally:
-        conn.close()
+    """Yield the persistent connection under the instance lock (lazy init:
+    parent dirs + WAL + schema on first use).
+
+    Stage-7 stress catch: the previous per-call connect/close shape paid a
+    WAL checkpoint on every close (~16 ms/append — 25x over the design's
+    latency claim). `synchronous=NORMAL` is the standard WAL pairing
+    (durable to process crash; an OS/power crash may lose only the most
+    recent commits — the wedge gate covers append FAILURES, which stay
+    loud). `check_same_thread=False` + the lock makes any-thread use safe.
+    """
+    with self._lock:
+        if self._connection is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.db_path, timeout=10.0,
+                                   check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript(_JOURNAL_SCHEMA)
+            self._connection = conn
+        yield self._connection
 
 
 # %% ../../nbs/core/journal_store.ipynb #m-append

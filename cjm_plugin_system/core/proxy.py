@@ -38,7 +38,7 @@ from cjm_plugin_system.core.errors import (
 )
 from .capability import ToolCapability
 from cjm_plugin_system.core.wire import (
-    ENVELOPE_BODY_KEY, FileBackedDTO, get_call_envelope, wire_decode,
+    ACCOUNTS_HEADER, ENVELOPE_BODY_KEY, FileBackedDTO, get_call_envelope, wire_decode,
 )
 from cjm_plugin_system.core.journal_store import (
     JournalEvent, JournalStore, LocalJournalStore, SubstrateEventType,
@@ -459,6 +459,51 @@ def _prepare_payload(
 RemotePluginProxy._maybe_serialize_input = _maybe_serialize_input
 RemotePluginProxy._prepare_payload = _prepare_payload
 
+# %% ../../nbs/core/proxy.ipynb #c4b5e58d
+def _harvest_worker_accounts(
+    self,
+    resp,  # The worker's httpx response (any status — error paths report too)
+) -> None:
+    """CR-14 follow-up: journal in-worker accounts off the response header.
+
+    The host-writes-the-row half of the account contract (`wire.
+    record_account` / worker `_accounts_headers`): workers RECORD accounts
+    during a call span; the proxy journals them ON RECEIPT with
+    `worker_reported=True` + the receiving-side identity (the proxy-side
+    call envelope + this spawn's worker session). Called on every unary
+    response BEFORE the status checks so a `_job_error` 500's accounts
+    (e.g. a save that succeeded before a later crash) are kept.
+
+    Header absent (old workers, account-less calls) = no-op. A failure here
+    logs at ERROR and never breaks the call — the result is the contract;
+    and a wedged journal store also fails the queue's own emission for the
+    same job, so the wedge gate still fires loudly.
+    """
+    raw = resp.headers.get(ACCOUNTS_HEADER)
+    if not raw:
+        return
+    try:
+        env = get_call_envelope()
+        for acct in json.loads(raw):
+            self.journal.append(JournalEvent(
+                event_type=str(acct.get("event_type") or "worker_account"),
+                run_id=env.run_id if env is not None else None,
+                job_id=env.job_id if env is not None else None,
+                composition_id=env.composition_id if env is not None else None,
+                node_id=env.node_id if env is not None else None,
+                actor=env.actor if env is not None else None,
+                plugin_name=self.name,
+                worker_session_id=self.worker_session_id,
+                worker_reported=True,
+                payload=acct.get("payload") or {},
+            ))
+    except Exception:
+        _logger.error(
+            "failed to journal worker accounts for %s (session %s)",
+            self.name, self.worker_session_id, exc_info=True)
+
+RemotePluginProxy._harvest_worker_accounts = _harvest_worker_accounts
+
 # %% ../../nbs/core/proxy.ipynb #async-methods
 async def execute_async(
     self,
@@ -639,6 +684,9 @@ def execute_with_oom_check(self, *args, **kwargs) -> Any:
         self._check_worker_death()
         raise  # Worker still alive — propagate the original transport fault
     
+    # CR-14 follow-up: journal worker-reported accounts BEFORE status checks
+    # (a _job_error 500's pre-failure accounts are kept).
+    self._harvest_worker_accounts(resp)
     if resp.status_code == 409:
         # CR-4: cooperative cancellation surfaced by worker
         raise PluginCancelledError(self.name)
@@ -658,6 +706,7 @@ async def execute_async_with_oom_check(self, *args, **kwargs) -> Any:
         self._check_worker_death()
         raise
     
+    self._harvest_worker_accounts(resp)  # CR-14 follow-up (see sync variant)
     if resp.status_code == 409:
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
@@ -708,6 +757,7 @@ def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
             httpx.ReadError, httpx.WriteError):
         self._check_worker_death()
         raise
+    self._harvest_worker_accounts(resp)  # CR-14 follow-up: TASK_ACCOUNT et al
     if resp.status_code == 409:
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:
@@ -725,6 +775,7 @@ async def execute_task_async(self, task_name: str, method: str, **kwargs) -> Any
             httpx.ReadError, httpx.WriteError):
         self._check_worker_death()
         raise
+    self._harvest_worker_accounts(resp)  # CR-14 follow-up: TASK_ACCOUNT et al
     if resp.status_code == 409:
         raise PluginCancelledError(self.name)
     if resp.status_code != 200:

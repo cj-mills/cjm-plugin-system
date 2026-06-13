@@ -6,8 +6,8 @@ Docs: https://cj-mills.github.io/cjm-plugin-systemcli.html.md"""
 
 # %% auto #0
 __all__ = ['app', 'main', 'setup_runtime', 'run_cmd', 'regenerate_manifest', 'generate_adapter_manifest', 'install_all',
-           'setup_host', 'estimate_size', 'list_plugins', 'remove_plugin', 'validate_file', 'set_secret',
-           'list_secrets']
+           'setup_host', 'estimate_size', 'list_plugins', 'logs_command', 'retention_command', 'remove_plugin',
+           'validate_file', 'set_secret', 'list_secrets']
 
 # %% ../nbs/cli.ipynb #8385ac8c
 import json
@@ -1346,6 +1346,165 @@ def list_plugins(
         
         typer.echo("")
 
+# %% ../nbs/cli.ipynb #d8f1bc72
+def _fmt_short(value: Optional[str], width: int = 8) -> str:
+    """First `width` chars of an id, or '-' for None (display only)."""
+    return (value or "-")[:width]
+
+
+def _compact_payload(payload: Dict[str, Any], max_len: int = 160) -> str:
+    """One-line payload rendering; the bulky job_snapshot collapses to its status."""
+    d = dict(payload or {})
+    snap = d.get("job_snapshot")
+    if isinstance(snap, dict):
+        d["job_snapshot"] = f"<snapshot:{snap.get('status', '?')}>"
+    s = json.dumps(d, default=str, sort_keys=True)
+    return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
+@app.command("logs")
+def logs_command(
+    job:Annotated[Optional[str], typer.Option("--job", help="Filter to one queue job id (exact)")]=None,
+    run:Annotated[Optional[str], typer.Option("--run", help="Filter to one host run id (implies --journal)")]=None,
+    session:Annotated[Optional[str], typer.Option("--session", help="Filter to one worker session id")]=None,
+    level:Annotated[Optional[str], typer.Option("--level", help="Diagnostics level filter (e.g. WARNING)")]=None,
+    journal:Annotated[bool, typer.Option("--journal", help="Show the journal (account-of-action) instead of diagnostics records")]=False,
+    chunks:Annotated[bool, typer.Option("--chunks", help="Show raw stream chunks (death-rattle floor)")]=False,
+    limit:Annotated[int, typer.Option("--limit", "-n", help="Most recent N entries (0 = all)")]=50,
+    follow:Annotated[bool, typer.Option("--follow", "-f", help="Poll for new entries (Ctrl-C to stop)")]=False,
+) -> None:
+    """Tail / follow the observability stores (CR-14).
+
+    Default view: structured diagnostics records (worker logger output,
+    EXACTLY job-stamped via the call envelope). `--chunks`: the raw stream
+    pump. `--journal`: the durable account-of-action (job lifecycle, worker
+    spawn/death, admission, config, runs, worker-reported accounts).
+    `--follow` polls the store's seq cursor — exact, no byte offsets.
+    """
+    from cjm_plugin_system.core.diagnostics_store import LocalDiagnosticsStore
+    from cjm_plugin_system.core.journal_store import LocalJournalStore
+
+    if run and not journal:
+        journal = True  # run correlation lives on journal rows
+    if journal and chunks:
+        typer.echo("--journal and --chunks are different views; pick one.", err=True)
+        raise typer.Exit(code=1)
+
+    cfg = get_config()
+    lim = None if limit == 0 else limit
+
+    if journal:
+        store = LocalJournalStore(cfg.journal_db_path)
+        db = cfg.journal_db_path
+
+        def fetch(after_seq=None, lim_=lim):
+            return store.query(job_id=job, run_id=run, worker_session_id=session,
+                               after_seq=after_seq, limit=lim_,
+                               descending=(after_seq is None))
+
+        def render(ev):
+            line = (f"{ev.ts:%Y-%m-%d %H:%M:%S} {ev.event_type:<22} "
+                    f"[job={_fmt_short(ev.job_id)} run={ev.run_id or '-'}] "
+                    f"{ev.plugin_instance_id or ev.plugin_name or '-'}"
+                    f"{' (worker)' if ev.worker_reported else ''} "
+                    f"{_compact_payload(ev.payload)}")
+            return line
+    elif chunks:
+        dstore = LocalDiagnosticsStore(cfg.diagnostics_db_path)
+        db = cfg.diagnostics_db_path
+
+        def fetch(after_seq=None, lim_=lim):
+            return dstore.query_chunks(worker_session_id=session,
+                                       after_seq=after_seq, limit=lim_,
+                                       descending=(after_seq is None))
+
+        def render(c):
+            return f"{c.ts:%Y-%m-%d %H:%M:%S} [{_fmt_short(c.worker_session_id)}] {c.content}"
+    else:
+        dstore = LocalDiagnosticsStore(cfg.diagnostics_db_path)
+        db = cfg.diagnostics_db_path
+
+        def fetch(after_seq=None, lim_=lim):
+            return dstore.query_records(job_id=job, worker_session_id=session,
+                                        level=level.upper() if level else None,
+                                        after_seq=after_seq, limit=lim_,
+                                        descending=(after_seq is None))
+
+        def render(r):
+            line = (f"{r.ts:%Y-%m-%d %H:%M:%S} {r.level:<8} "
+                    f"[{_fmt_short(r.worker_session_id)}|{_fmt_short(r.job_id)}] "
+                    f"{r.logger_name}: {r.message}")
+            if r.exc_text:
+                line += "\n" + "\n".join("    " + l for l in r.exc_text.splitlines())
+            return line
+
+    if not db.exists():
+        typer.echo(f"No store at {db} (nothing has run here yet).")
+        raise typer.Exit(code=0)
+
+    rows = fetch()
+    rows = list(reversed(rows))  # newest-first fetch -> chronological display
+    for row in rows:
+        typer.echo(render(row))
+    if not follow:
+        return
+
+    import time as _time
+    cursor = max((r.seq or 0) for r in rows) if rows else 0
+    typer.echo(f"-- following {db.name} (Ctrl-C to stop) --", err=True)
+    try:
+        while True:
+            _time.sleep(1.0)
+            new = fetch(after_seq=cursor, lim_=None)
+            for row in new:
+                typer.echo(render(row))
+                cursor = max(cursor, row.seq or 0)
+    except KeyboardInterrupt:
+        pass
+
+# %% ../nbs/cli.ipynb #5b449bb3
+@app.command("retention")
+def retention_command(
+    max_age_days:Annotated[Optional[float], typer.Option(
+        "--max-age-days", help="Delete diagnostics rows older than this (overrides cjm.yaml)")]=None,
+    max_total_mb:Annotated[Optional[float], typer.Option(
+        "--max-total-mb", help="Delete oldest rows until diagnostics.db is under this budget")]=None,
+) -> None:
+    """Apply the diagnostics retention policy now (CR-14).
+
+    The explicit half of the invocation policy (PluginManager's startup
+    sweep is the automatic half). Defaults come from `cjm.yaml`'s
+    `substrate.diagnostics_retention_days` / `diagnostics_retention_max_mb`.
+    The JOURNAL is never touched — it has no retention surface by design.
+    """
+    from cjm_plugin_system.core.diagnostics_store import LocalDiagnosticsStore
+
+    cfg = get_config()
+    sub = cfg.substrate
+    days = max_age_days if max_age_days is not None else float(
+        getattr(sub, "diagnostics_retention_days", 0.0) or 0.0)
+    budget = max_total_mb if max_total_mb is not None else getattr(
+        sub, "diagnostics_retention_max_mb", None)
+    if days <= 0 and budget is None:
+        typer.echo("Retention disabled (diagnostics_retention_days <= 0, no "
+                   "size budget). Pass --max-age-days / --max-total-mb or set "
+                   "the cjm.yaml substrate policy.")
+        raise typer.Exit(code=0)
+    db = cfg.diagnostics_db_path
+    if not db.exists():
+        typer.echo(f"No diagnostics store at {db}; nothing to do.")
+        raise typer.Exit(code=0)
+
+    store = LocalDiagnosticsStore(db)
+    before_mb = db.stat().st_size / (1024 * 1024)
+    deleted = store.apply_retention(
+        max_age_days=days if days > 0 else None, max_total_mb=budget)
+    typer.echo(
+        f"diagnostics retention: deleted {deleted['records_deleted']} record(s) "
+        f"+ {deleted['chunks_deleted']} chunk(s) "
+        f"(db {before_mb:.1f} MB; freed pages reuse before the file shrinks). "
+        f"Journal untouched.")
+
 # %% ../nbs/cli.ipynb #hl18n81zioc
 @app.command("remove")
 def remove_plugin(
@@ -1837,32 +1996,84 @@ def _collect_manifest_warnings(
                     )
     return warnings
 
+# %% ../nbs/cli.ipynb #fb28940b
+def _lint_plugin_logging(
+    path: Path  # A plugin .py file or package directory to scan
+) -> tuple:  # (errors, warnings) — lists of human-readable findings
+    """T23 (CR-14): lint plugin source for `logging.basicConfig` calls.
+
+    The substrate installs the worker\'s root handler
+    (`install_worker_diagnostics`) before plugin code runs. A plugin calling
+    `logging.basicConfig(force=True)` DESTROYS that handler (every
+    subsequent record silently bypasses the diagnostics store) -> ERROR.
+    A plain `basicConfig` call is a no-op once a handler exists — a fragile
+    pre-CR-14 idiom that suggests the plugin expects to own process logging
+    -> WARNING. Directories scan their tree, skipping hidden dirs and
+    `tests_manual`/`_proc` (host-side scripts own their own logging).
+    """
+    import re
+    errors: List[str] = []
+    warnings: List[str] = []
+    files = [path] if path.is_file() else sorted(
+        f for f in path.rglob("*.py")
+        if not any(part.startswith(".") or part in ("tests_manual", "_proc")
+                   for part in f.relative_to(path).parts))
+    for f in files:
+        try:
+            lines = f.read_text(errors="replace").splitlines()
+        except OSError as e:
+            warnings.append(f"{f}: unreadable ({e})")
+            continue
+        for i, line in enumerate(lines, 1):
+            code = line.split("#", 1)[0]
+            if "logging.basicConfig" not in code:
+                continue
+            # The call may span lines; inspect a small forward window.
+            window = " ".join(l.split("#", 1)[0] for l in lines[i - 1:i + 4])
+            if re.search(r"force\s*=\s*True", window):
+                errors.append(
+                    f"{f}:{i}: logging.basicConfig(force=True) destroys the "
+                    f"substrate diagnostics handler (CR-14) — use module "
+                    f"loggers / self.logger and let the worker own config")
+            else:
+                warnings.append(
+                    f"{f}:{i}: logging.basicConfig is a no-op under the "
+                    f"substrate handler (workers are configured by "
+                    f"install_worker_diagnostics) — remove it")
+    return errors, warnings
+
 # %% ../nbs/cli.ipynb #fn-detect-manifest-format
 def _detect_manifest_format(
     path: Path  # File to inspect
 ) -> Optional[str]:  # 'manifest' | 'plugins_yaml' | None
-    """Auto-detect file format from extension."""
+    """Auto-detect format: extension for files; directories lint as source."""
+    if path.is_dir():
+        return "source"
     suffix = path.suffix.lower()
     if suffix == ".json":
         return "manifest"
     if suffix in (".yaml", ".yml"):
         return "plugins_yaml"
+    if suffix == ".py":
+        return "source"
     return None
 
 # %% ../nbs/cli.ipynb #babd0a83
 @app.command("validate")
 def validate_file(
-    path:Path=typer.Argument(..., help="Manifest JSON or plugins.yaml to validate"),
+    path:Path=typer.Argument(..., help="Manifest JSON, plugins.yaml, or plugin source (.py / package dir) to validate"),
     format:Optional[str]=typer.Option(
         None, "--format", "-f",
-        help="Override format detection: 'manifest' or 'plugins_yaml'",
+        help="Override format detection: 'manifest', 'plugins_yaml', or 'source'",
     ),
 ) -> None:
-    """SG-6: validate a manifest JSON or plugins.yaml file's structure.
+    """SG-6 + T23: validate a manifest / plugins.yaml / plugin source.
     
-    Auto-detects format from the file extension (`.json` → manifest,
-    `.yaml`/`.yml` → plugins.yaml). Exits non-zero with a list of validation
-    errors if any check fails.
+    Auto-detects format from the path (`.json` → manifest, `.yaml`/`.yml` →
+    plugins.yaml, `.py` or a directory → source lint). The source lint is
+    the CR-14 `logging.basicConfig` gate: `force=True` is an ERROR (it
+    destroys the substrate diagnostics handler), a plain call is a WARNING.
+    Exits non-zero with a list of validation errors if any check fails.
     """
     if not path.exists():
         typer.echo(f"File not found: {path}", err=True)
@@ -1872,7 +2083,7 @@ def validate_file(
     if fmt is None:
         typer.echo(
             f"Cannot detect format from extension {path.suffix!r}. "
-            f"Pass --format manifest or --format plugins_yaml.",
+            f"Pass --format manifest, plugins_yaml, or source.",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1890,6 +2101,9 @@ def validate_file(
                 data = yaml.safe_load(f)
             errors = _validate_plugins_yaml_dict(data)
             kind = "plugins.yaml"
+        elif fmt == "source":
+            errors, warnings = _lint_plugin_logging(path)
+            kind = "plugin source"
         else:
             typer.echo(f"Unknown format: {fmt!r}", err=True)
             raise typer.Exit(code=1)

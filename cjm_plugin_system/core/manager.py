@@ -143,6 +143,12 @@ class PluginManager:
         self.diagnostics_store: DiagnosticsStore = diagnostics_store or LocalDiagnosticsStore(
             (_data_dir / "diagnostics.db") if _data_dir is not None else None
         )
+        # CR-14 follow-up: retention is INVOKED, not just implemented (the
+        # G11 inert-API lesson — an API nobody calls is inert). A daemon
+        # thread sweeps the diagnostics store at host startup per the
+        # cfg.substrate policy; `cjm-ctl retention` is the explicit operator
+        # invocation. The journal is never swept.
+        self._start_diagnostics_retention_sweep()
 
         # CR-7: empirical resource tracking. The store is lazy-init'd only when
         # cfg.substrate.empirical_tracking is True (default). Hosts that want
@@ -183,6 +189,48 @@ class PluginManager:
         # for instances whose `max_concurrent_requests` was set at load time.
         # Sync execute_plugin is NOT gated — sync callers can't await a semaphore.
         self._concurrent_limiters: Dict[str, asyncio.Semaphore] = {}
+
+# %% ../../nbs/core/manager.ipynb #a57149cd
+def _start_diagnostics_retention_sweep(self) -> None:
+    """CR-14 follow-up: host-startup diagnostics retention sweep.
+
+    The invocation half of the retention policy (`cjm-ctl retention` is the
+    other): fire-and-forget daemon thread so `__init__` stays fast (slow-init
+    discipline) and a large backlog never delays plugin loading. Disabled
+    when `cfg.substrate.diagnostics_retention_days <= 0` and no size budget
+    is set. Best-effort: a sweep failure logs at WARNING — the diagnostics
+    class is disposable; the JOURNAL has no retention surface at all.
+    """
+    try:
+        sub = get_config().substrate
+        days = float(getattr(sub, "diagnostics_retention_days", 0.0) or 0.0)
+        max_mb = getattr(sub, "diagnostics_retention_max_mb", None)
+    except Exception:
+        return
+    if days <= 0 and max_mb is None:
+        return
+    store = self.diagnostics_store
+    if not hasattr(store, "apply_retention"):
+        return  # custom sink without a retention surface
+
+    def _sweep() -> None:
+        try:
+            deleted = store.apply_retention(
+                max_age_days=days if days > 0 else None,
+                max_total_mb=max_mb,
+            )
+            if deleted.get("records_deleted") or deleted.get("chunks_deleted"):
+                self.logger.info(
+                    f"diagnostics retention sweep: {deleted} "
+                    f"(policy: {days}d / {max_mb} MB)")
+        except Exception as e:
+            self.logger.warning(f"diagnostics retention sweep failed: {e}")
+
+    import threading
+    threading.Thread(target=_sweep, name="cjm-diagnostics-retention",
+                     daemon=True).start()
+
+PluginManager._start_diagnostics_retention_sweep = _start_diagnostics_retention_sweep
 
 # %% ../../nbs/core/manager.ipynb #pm-fn-register_system_monitor
 def register_system_monitor(

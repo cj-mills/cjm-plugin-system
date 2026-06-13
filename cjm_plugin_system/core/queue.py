@@ -34,7 +34,7 @@ from cjm_plugin_system.core.ports import (
     new_composition_run, resolve_node_kwargs,
 )
 from cjm_plugin_system.core.journal_store import (
-    JournalEvent, JournalStore, LIVENESS_EVENT_TYPES,
+    JournalEvent, JournalStore, LIVENESS_EVENT_TYPES, SubstrateEventType,
 )
 from .diagnostics_store import DiagnosticRecord, DiagnosticsStore
 from .wire import CallEnvelope, reset_call_envelope, set_call_envelope
@@ -146,6 +146,11 @@ class Job:
     `composition_id` / `node_id` are set when the job is a lazily-created
     member of a composition (CR-16) — they ride every JobEvent so
     `events_for_composition` subscribers see member lifecycle events.
+
+    `run_id` / `actor` (CR-14 follow-up) are host-tier correlation tags:
+    cores pass their run-manifest id + initiating actor at submit so every
+    journal row for this job links back to the run record (run manifest ↔
+    journal linkage) and carries who/what initiated it.
     """
     id: str  # Unique job identifier (UUID)
     plugin_instance_id: str  # Target plugin instance (per CR-10)
@@ -164,6 +169,8 @@ class Job:
     node_id: Optional[str] = None  # Composition node this job executes (stage 3)
     task_name: Optional[str] = None  # Task-channel address: adapter task (stage 4, CR-17 pt 2)
     method: Optional[str] = None  # Task-channel address: adapter method (stage 4)
+    run_id: Optional[str] = None  # Host-tier run correlation (CR-14 follow-up; core run manifests)
+    actor: Optional[str] = None  # Who/what initiated the work (CR-14 follow-up)
     cancel_requested_at: Optional[datetime] = None  # When cancel was requested (Stage 4)
     cancel_phase: Optional[CancelPhase] = None  # Active cancel phase (Stage 4)
     block_reason: Optional[str] = None  # Why the scheduler is blocking (Stage 4)
@@ -200,12 +207,17 @@ class JobEvent:
     `payload` is a per-event-type structured dict (e.g., STATE_TRANSITION carries
     `{"from": "pending", "to": "running"}`; COMPOSITION_ADVANCED carries
     `{"completed_node": ..., "enqueued_nodes": [...]}`).
+
+    `run_id` / `actor` (CR-14 follow-up) ride from the Job so journal rows
+    written by the single emission path carry the host-tier correlation.
     """
     type: JobEventType
     job_id: str
     plugin_instance_id: str
     composition_id: Optional[str] = None
     node_id: Optional[str] = None
+    run_id: Optional[str] = None  # Host-tier run correlation (CR-14 follow-up)
+    actor: Optional[str] = None  # Who/what initiated (CR-14 follow-up)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     payload: Dict[str, Any] = field(default_factory=dict)
 
@@ -317,6 +329,14 @@ class JobQueue:
             diagnostics if diagnostics is not None else getattr(deps, 'diagnostics_store', None))
         self._journal_wedged = False
 
+        # CR-14 follow-up: queue-scoped run context. A host whose queue
+        # lifetime IS one run (the cores' CLI shape) sets this once via
+        # `set_run_context`; submit-time `run_id=`/`actor=` and
+        # `Composition.run_id/actor` override per call. Long-lived-queue
+        # hosts (GUIs) leave it unset and pass per-submit tags instead.
+        self.default_run_id: Optional[str] = None
+        self.default_actor: Optional[str] = None
+
         # State
         self._pending: List[Job] = []  # Priority heap
         self._running: Dict[str, Job] = {}  # In-flight jobs by id (stage 3: multi-lane)
@@ -352,6 +372,21 @@ class JobQueue:
         self._processor_task: Optional[asyncio.Task] = None
         self._running_flag = False
         self._cancel_requested: Set[str] = set()  # Job IDs pending cancellation
+
+    def set_run_context(
+        self,
+        run_id: Optional[str] = None,  # Host-tier run correlation for subsequent submits
+        actor: Optional[str] = None,   # Who/what initiated the run
+    ) -> None:
+        """Set the queue-scoped default run context (CR-14 follow-up).
+
+        Every subsequent submit without explicit `run_id`/`actor` inherits
+        these — the one-queue-per-run CLI cores call this once after
+        generating their run-manifest id, and every journal row for the run
+        links back to it. Call again (or with None) to change/clear.
+        """
+        self.default_run_id = run_id
+        self.default_actor = actor
 
     # REMOVE-AFTER-OVERHAUL: backward-compat alias for `self.manager`. The
     # SG-13 regression test + any host inspection still expects a `.manager`
@@ -411,6 +446,8 @@ async def submit(
     priority: int = 0,  # Higher = more urgent
     task: Optional[str] = None,  # Task-channel address: adapter task name (stage 4)
     method: Optional[str] = None,  # Task-channel address: adapter method (set with task)
+    run_id: Optional[str] = None,  # Host-tier run correlation (CR-14 follow-up; reserved name, never a plugin kwarg)
+    actor: Optional[str] = None,  # Who/what initiated (CR-14 follow-up; reserved name)
     **kwargs
 ) -> str:  # Returns job_id
     """Submit a job to the queue.
@@ -427,7 +464,10 @@ async def submit(
     moves the job pending → running.
 
     CR-14: refuses loudly when the journal is wedged (see
-    `_check_journal_wedge`).
+    `_check_journal_wedge`). `run_id`/`actor` join `priority`/`task`/
+    `method` as reserved keyword names (they never reach plugin kwargs):
+    cores pass their run-manifest id + initiating actor so every journal
+    row for this job carries the host-tier correlation.
     """
     # CR-2: late import to avoid pulling errors module into queue's import
     # path during library load (keeps the worker.py-via-queue.py import
@@ -456,6 +496,8 @@ async def submit(
         priority=priority,
         task_name=task,
         method=method,
+        run_id=run_id if run_id is not None else self.default_run_id,
+        actor=actor if actor is not None else self.default_actor,
     )
     return await self._enqueue_job(job)
 
@@ -703,6 +745,32 @@ def _subscriber_keys_for(event: JobEvent) -> List[str]:
     return keys
 
 
+def _journal_append_guarded(
+    self,
+    event: JournalEvent,  # Pre-built journal event (caller fills identity/payload)
+) -> None:
+    """Append to the journal under the wedge-gate failure contract (CR-14).
+
+    The ONE place the named-tension resolution lives: an append failure logs
+    at ERROR and wedges the queue (new submissions refuse via
+    `_check_journal_wedge`) instead of raising into dispatch/finalization
+    paths — raising there would leak lanes and corrupt in-flight state,
+    while continuing silently would drop the audit trail. No-op without a
+    configured journal. Used by `_publish_event` (job events) and by the
+    direct substrate-event emissions (ADMISSION_DECIDED).
+    """
+    if self._journal is None:
+        return
+    try:
+        self._journal.append(event)
+    except Exception:
+        self._journal_wedged = True
+        self.logger.error(
+            "JOURNAL APPEND FAILED for %s on job %s — queue WEDGED: new "
+            "submissions will refuse until the journal is writable again.",
+            event.event_type, event.job_id, exc_info=True)
+
+
 def _publish_event(
     self,
     event: JobEvent,  # Event to emit
@@ -716,33 +784,25 @@ def _publish_event(
     - liveness-class events (PROGRESS_CHANGED / RESOURCE_SNAPSHOT) fan out
       only; their final values ride the terminal STATE_TRANSITION row.
 
-    The named-tension resolution (stage-7 ratified design #13): a journal
-    append failure here logs at ERROR and WEDGES the queue (`submit` /
-    `submit_composition` refuse loudly) instead of raising — raising inside
-    `_execute_job`'s finalization would leak lanes and corrupt in-flight
-    state, while continuing silently would drop the audit trail.
+    Journal failures follow the wedge-gate contract — see
+    `_journal_append_guarded`.
 
     Fan-out: slow subscribers backpressure themselves via `asyncio.QueueFull`
     drop — publisher never blocks. Each subscriber tracks `dropped_count` so
     operators / future telemetry can surface backpressure visibility.
     """
-    if self._journal is not None and event.type.value not in LIVENESS_EVENT_TYPES:
-        try:
-            self._journal.append(JournalEvent(
-                event_type=event.type.value,
-                ts=event.timestamp,
-                job_id=event.job_id,
-                composition_id=event.composition_id,
-                node_id=event.node_id,
-                plugin_instance_id=event.plugin_instance_id,
-                payload=event.payload,
-            ))
-        except Exception:
-            self._journal_wedged = True
-            self.logger.error(
-                "JOURNAL APPEND FAILED for %s on job %s — queue WEDGED: new "
-                "submissions will refuse until the journal is writable again.",
-                event.type.value, event.job_id, exc_info=True)
+    if event.type.value not in LIVENESS_EVENT_TYPES:
+        self._journal_append_guarded(JournalEvent(
+            event_type=event.type.value,
+            ts=event.timestamp,
+            run_id=event.run_id,
+            job_id=event.job_id,
+            composition_id=event.composition_id,
+            node_id=event.node_id,
+            plugin_instance_id=event.plugin_instance_id,
+            actor=event.actor,
+            payload=event.payload,
+        ))
 
     for key in _subscriber_keys_for(event):
         # `self._subscribers` is a defaultdict but we use `.get` to avoid
@@ -827,6 +887,7 @@ async def all_events(self) -> AsyncIterator[JobEvent]:
         yield evt
 
 
+JobQueue._journal_append_guarded = _journal_append_guarded
 JobQueue._publish_event = _publish_event
 JobQueue._subscribe = _subscribe
 JobQueue.events = events
@@ -971,6 +1032,9 @@ async def _start_ready_nodes(
     fail-fast housekeeping applies) rather than raising to the caller — by
     the time bindings resolve, the composition is mid-flight and the failure
     must flow through the same path as a member-job failure.
+
+    CR-14 follow-up: member Jobs inherit the composition's `run_id`/`actor`
+    correlation tags so every member's journal rows link to the host run.
     """
     started: List[str] = []
     for nid in run.ready_nodes():
@@ -998,6 +1062,10 @@ async def _start_ready_nodes(
             node_id=nid,
             task_name=node.task_name,
             method=node.method,
+            run_id=(run.composition.run_id if run.composition.run_id is not None
+                    else self.default_run_id),
+            actor=(run.composition.actor if run.composition.actor is not None
+                   else self.default_actor),
         )
         run.record_started(nid, member.id)
         await self._enqueue_job(member)
@@ -1040,6 +1108,8 @@ async def _advance_composition(
                 plugin_instance_id=completed_job.plugin_instance_id,
                 composition_id=run.id,
                 node_id=completed_job.node_id,
+                run_id=completed_job.run_id,
+                actor=completed_job.actor,
                 payload={
                     "completed_node": completed_job.node_id,
                     "enqueued_nodes": started,
@@ -1315,6 +1385,8 @@ def _on_manager_retry(
         plugin_instance_id=running.plugin_instance_id,
         composition_id=running.composition_id,
         node_id=running.node_id,
+        run_id=running.run_id,
+        actor=running.actor,
         payload={
             "attempt": attempt,  # 1-based retry number (1=first retry, etc.)
             "exception_repr": repr(exception),
@@ -1370,6 +1442,8 @@ def _job_snapshot(job: Job) -> Dict[str, Any]:
         "node_id": job.node_id,
         "task_name": job.task_name,
         "method": job.method,
+        "run_id": job.run_id,
+        "actor": job.actor,
         "error": asdict(job.error) if job.error is not None else None,
     }
 
@@ -1416,6 +1490,8 @@ def _job_from_snapshot(snap: Dict[str, Any]) -> Job:
         node_id=snap.get("node_id"),
         task_name=snap.get("task_name"),
         method=snap.get("method"),
+        run_id=snap.get("run_id"),
+        actor=snap.get("actor"),
         error=error,
     )
 
@@ -1448,6 +1524,8 @@ def _emit_state_transition(
         plugin_instance_id=job.plugin_instance_id,
         composition_id=job.composition_id,
         node_id=job.node_id,
+        run_id=job.run_id,
+        actor=job.actor,
         payload=payload,
     ))
 
@@ -1474,6 +1552,8 @@ def _emit_cancel_phase(
         plugin_instance_id=job.plugin_instance_id,
         composition_id=job.composition_id,
         node_id=job.node_id,
+        run_id=job.run_id,
+        actor=job.actor,
         payload={
             "from": prev_phase.value if prev_phase is not None else None,
             "to": new_phase.value,
@@ -1505,6 +1585,8 @@ def _emit_block_reason(
         plugin_instance_id=job.plugin_instance_id,
         composition_id=job.composition_id,
         node_id=job.node_id,
+        run_id=job.run_id,
+        actor=job.actor,
         payload={"from": prev_reason, "to": new_reason},
     ))
 
@@ -1649,6 +1731,14 @@ async def _process_loop(self) -> None:
     the highest-priority admissible job under the lock, and launch it as an
     independent task tracked in `_running_tasks` (awaited by `stop`). The
     pre-stage-3 loop executed one job at a time inline.
+
+    CR-14 follow-up: each ADMIT is journaled as an ADMISSION_DECIDED row —
+    emitted AFTER the lock releases (sqlite I/O never rides the locked fast
+    path; the decision detail is recovered from the admission ledgers the
+    pop updated synchronously). Blocked jobs are NOT journaled per scan —
+    the scan loop re-evaluates them on every pass and would spam rows; the
+    reserved BLOCK_REASON_CHANGED transition channel is the place block
+    visibility lands when the scheduler-coordination wiring happens.
     """
     while self._running_flag:
         await self._job_available.wait()
@@ -1672,6 +1762,25 @@ async def _process_loop(self) -> None:
 
         task = asyncio.create_task(self._execute_job(job))
         self._running_tasks[job.id] = task
+
+        # CR-14 follow-up: the admission decision is an account-of-action.
+        # Pure journal row (no bus fan-out — it is not a JobEventType);
+        # wedge-gate failure contract applies.
+        self._journal_append_guarded(JournalEvent(
+            event_type=SubstrateEventType.ADMISSION_DECIDED.value,
+            job_id=job.id,
+            run_id=job.run_id,
+            composition_id=job.composition_id,
+            node_id=job.node_id,
+            plugin_instance_id=job.plugin_instance_id,
+            actor=job.actor,
+            payload={
+                "exclusive": job.id in self._running_exclusive,
+                "gpu_reserved_mb": self._gpu_reservations.get(job.id, 0.0),
+                "lanes_in_use": len(self._running),
+                "stats_available": bool(stats),
+            },
+        ))
 
 JobQueue._process_loop = _process_loop
 
@@ -1794,11 +1903,14 @@ async def _execute_with_cancellation(
     # asyncio.create_task copies the CURRENT context, so the identity flows
     # through deps (manager) into the proxy's payload construction and onto
     # the wire, with the reset landing immediately after creation (no other
-    # code in THIS task sees it).
+    # code in THIS task sees it). run_id/actor ride from the Job (CR-14
+    # follow-up) so in-worker diagnostics carry the host-tier correlation.
     token = set_call_envelope(CallEnvelope(
         job_id=job.id,
+        run_id=job.run_id,
         composition_id=job.composition_id,
         node_id=job.node_id,
+        actor=job.actor,
     ))
     try:
         # Start execution. Task-addressed jobs (stage 4, CR-17 pt 2) route via
@@ -1866,6 +1978,9 @@ async def _poll_progress(
     updates). CR-6 Stage 3: also emits RESOURCE_SNAPSHOT events every
     `resource_snapshot_cadence_polls` iterations; snapshot is also stored
     on `job.last_resource_snapshot` for synchronous inspection.
+
+    Liveness-class events (never journaled) still carry run_id/actor so
+    live-tail subscribers see the same tag shape as journal-class events.
     """
     last_progress = job.progress
     last_message = job.status_message
@@ -1892,6 +2007,8 @@ async def _poll_progress(
                         plugin_instance_id=job.plugin_instance_id,
                         composition_id=job.composition_id,
                         node_id=job.node_id,
+                        run_id=job.run_id,
+                        actor=job.actor,
                         payload={"progress": new_progress, "status_message": new_message},
                     ))
                     last_progress = new_progress
@@ -1909,6 +2026,8 @@ async def _poll_progress(
                         plugin_instance_id=job.plugin_instance_id,
                         composition_id=job.composition_id,
                         node_id=job.node_id,
+                        run_id=job.run_id,
+                        actor=job.actor,
                         payload={"snapshot": asdict(snapshot)},
                     ))
 

@@ -92,10 +92,17 @@ class Composition:
     members run to completion, transitive dependents are skipped, and the
     composition lands `failed`. `fail_fast=False` is best-effort: independent
     members continue; only transitive dependents of the failure are skipped.
+
+    `run_id` / `actor` (CR-14 follow-up) are host-tier correlation tags
+    stamped onto every lazily-created member Job (the `submit(run_id=,
+    actor=)` analog for compositions) — NOT the composition run's own id,
+    which the queue assigns at submit.
     """
     nodes: List[CompositionNode]  # The invocation nodes (order = readability + ready-scan order)
     fail_fast: bool = True  # Halt independent pending members on first failure
     priority: int = 0  # Composition-level priority (per-node override possible)
+    run_id: Optional[str] = None  # Host-tier run correlation for member Jobs (CR-14 follow-up)
+    actor: Optional[str] = None  # Who/what initiated the work (CR-14 follow-up)
 
 # %% ../../nbs/core/ports.ipynb #ports-validation-error
 class CompositionValidationError(ValueError):

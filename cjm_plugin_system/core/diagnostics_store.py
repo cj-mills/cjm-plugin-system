@@ -12,6 +12,7 @@ __all__ = ['DiagnosticRecord', 'StreamChunk', 'DiagnosticsStore', 'LocalDiagnost
 import logging
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -134,22 +135,35 @@ class LocalDiagnosticsStore:
         """`db_path=None` uses `~/.cjm/diagnostics.db`; workers receive the
         host's path via the `CJM_DIAGNOSTICS_DB` env var at spawn."""
         self.db_path = Path(db_path) if db_path is not None else Path.home() / ".cjm" / "diagnostics.db"
+        # Persistent lock-protected connection (stage-7 stress part-1 catch;
+        # see LocalJournalStore._conn): per-call open/close paid a WAL
+        # checkpoint per append. Worker log handlers append on the hot path.
+        self._lock = threading.Lock()
+        self._connection: Optional[sqlite3.Connection] = None
 
 
 # %% ../../nbs/core/diagnostics_store.ipynb #m-conn
 @patch
 @contextmanager
 def _conn(self: LocalDiagnosticsStore) -> Iterator[sqlite3.Connection]:
-    """Open a connection, creating parent dirs + schema + WAL on demand."""
-    self.db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(self.db_path, timeout=10.0)
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=10000")
-        conn.executescript(_DIAGNOSTICS_SCHEMA)
-        yield conn
-    finally:
-        conn.close()
+    """Yield the persistent connection under the instance lock (lazy init:
+    parent dirs + WAL + schema on first use).
+
+    Same shape + rationale as `LocalJournalStore._conn` (stage-7 stress
+    catch: per-call close = WAL checkpoint = ~16 ms/append). Disposable
+    class on the WORKER hot path — `synchronous=NORMAL` is plenty.
+    """
+    with self._lock:
+        if self._connection is None:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(self.db_path, timeout=10.0,
+                                   check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=10000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            conn.executescript(_DIAGNOSTICS_SCHEMA)
+            self._connection = conn
+        yield self._connection
 
 
 # %% ../../nbs/core/diagnostics_store.ipynb #m-append-record

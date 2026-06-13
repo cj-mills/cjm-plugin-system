@@ -41,8 +41,10 @@ from .diagnostics_store import install_worker_diagnostics
 install_worker_diagnostics()
 
 from .capability import derive_structural_surface
+from .journal_store import SubstrateEventType
 from cjm_plugin_system.core.wire import (
-    CallEnvelope, ENVELOPE_BODY_KEY, set_call_envelope, wire_encode,
+    ACCOUNTS_HEADER, CallEnvelope, ENVELOPE_BODY_KEY, begin_account_capture,
+    drain_accounts, record_account, set_call_envelope, wire_encode,
 )
 
 # %% ../../nbs/core/worker.ipynb #encoder
@@ -436,10 +438,29 @@ def _apply_call_envelope(
     would lose the identity (Starlette's iterate_in_threadpool copies the
     request task's context per chunk). An absent envelope leaves the var
     None — records stay honestly unattributed.
+
+    CR-14 follow-up: also begins a fresh account-capture span (same no-reset
+    semantics) so in-worker substrate-family accounts (TASK_ACCOUNT /
+    RESULT_SAVED / CACHE_HIT) accumulate per call and ride back on the
+    response header — see `_accounts_headers`.
     """
     env_wire = data.get(ENVELOPE_BODY_KEY)
     if env_wire:
         set_call_envelope(CallEnvelope.from_wire(env_wire))
+    begin_account_capture()
+
+
+def _accounts_headers() -> Dict[str, str]:
+    """Drain the call span's recorded accounts into the response header dict.
+
+    Empty dict when nothing was recorded (header absent — old hosts and
+    account-less calls see byte-identical responses). ASCII JSON
+    (`ensure_ascii` default) keeps the header latin-1-safe.
+    """
+    accounts = drain_accounts()
+    if not accounts:
+        return {}
+    return {ACCOUNTS_HEADER: json.dumps(accounts, default=str)}
 
 
 def _register_task_endpoints(
@@ -459,6 +480,11 @@ def _register_task_endpoints(
     `contextvars.copy_context()` (run_in_executor does NOT copy context by
     itself) — the diagnostics handler stamps every plugin log record with
     exact job identity, replacing the timestamp-window heuristic.
+
+    CR-14 follow-up: the unary paths (/execute, /task) return recorded
+    accounts on the `X-CJM-Accounts` response header (success AND the
+    `_job_error` 500 — a failed call still reports the accounts recorded
+    before the failure). The host journals them with `worker_reported=True`.
     """
     @app.post("/execute")
     async def execute(request: Request) -> Any:
@@ -481,7 +507,7 @@ def _register_task_endpoints(
         data = await request.json()
         args = data.get("args", [])
         kwargs = data.get("kwargs", {})
-        _apply_call_envelope(data)  # CR-14: job identity for this call span
+        _apply_call_envelope(data)  # CR-14: job identity + account span for this call
         
         # CR-4: reset cancellation flag before invoking execute() so stale
         # state from a previous job doesn't immediately raise.
@@ -503,7 +529,8 @@ def _register_task_endpoints(
             # EnhancedJSONEncoder still flattens unregistered dataclasses
             # and datetimes exactly as before.
             json_str = json.dumps(wire_encode(result), cls=EnhancedJSONEncoder)
-            return json.loads(json_str)
+            return JSONResponse(content=json.loads(json_str),
+                                headers=_accounts_headers())
         except PluginCancelledError as e:
             # CR-4: cooperative cancellation surfaces as 409 Conflict so the
             # proxy can distinguish "operator cancelled" from "real plugin
@@ -526,7 +553,8 @@ def _register_task_endpoints(
             )
             body = json.loads(json.dumps({"_job_error": job_error},
                                          cls=EnhancedJSONEncoder))
-            return JSONResponse(status_code=500, content=body)
+            return JSONResponse(status_code=500, content=body,
+                                headers=_accounts_headers())
 
     _adapters = adapters or {}
 
@@ -541,12 +569,17 @@ def _register_task_endpoints(
         DTOs cross the boundary in the tagged envelope); failures carry the
         same `{"_job_error": ...}` 500 body as /execute (G7 typed unary error
         channel) so CR-7 retry sees typed categories from day one.
+
+        CR-14 follow-up: the worker itself records a TASK_ACCOUNT for every
+        adapter dispatch (zero plugin cooperation — derived at the substrate
+        boundary): task, method, ok, duration. On failure the account carries
+        ok=False + the JobError category, riding the same 500's header.
         """
         data = await request.json()
         task = data.get("task")
         method_name = data.get("method") or ""
         kwargs = data.get("kwargs", {})
-        _apply_call_envelope(data)  # CR-14: job identity for this call span
+        _apply_call_envelope(data)  # CR-14: job identity + account span for this call
         adapter = _adapters.get(task)
         if adapter is None:
             raise HTTPException(
@@ -566,12 +599,18 @@ def _register_task_endpoints(
         if hasattr(plugin_instance, "_cancel_requested"):
             plugin_instance._cancel_requested = False
         plugin_instance._last_api_usage = None
+        _t0 = time.monotonic()
         try:
             loop = asyncio.get_event_loop()
             ctx = contextvars.copy_context()  # CR-14: carry identity into the executor
             result = await loop.run_in_executor(None, lambda: ctx.run(lambda: fn(**kwargs)))
             json_str = json.dumps(wire_encode(result), cls=EnhancedJSONEncoder)
-            return json.loads(json_str)
+            record_account(SubstrateEventType.TASK_ACCOUNT.value, {
+                "task": task, "method": method_name, "ok": True,
+                "duration_s": round(time.monotonic() - _t0, 3),
+            })
+            return JSONResponse(content=json.loads(json_str),
+                                headers=_accounts_headers())
         except PluginCancelledError as e:
             raise HTTPException(status_code=409, detail=str(e))
         except HTTPException:
@@ -582,9 +621,15 @@ def _register_task_endpoints(
             job_error = map_bare_exception_to_job_error(
                 e, plugin_name=getattr(plugin_instance, "name", "unknown"),
             )
+            record_account(SubstrateEventType.TASK_ACCOUNT.value, {
+                "task": task, "method": method_name, "ok": False,
+                "duration_s": round(time.monotonic() - _t0, 3),
+                "error_category": job_error.category,
+            })
             body = json.loads(json.dumps({"_job_error": job_error},
                                          cls=EnhancedJSONEncoder))
-            return JSONResponse(status_code=500, content=body)
+            return JSONResponse(status_code=500, content=body,
+                                headers=_accounts_headers())
 
     @app.post("/execute_stream")
     async def execute_stream(request: Request) -> StreamingResponse:
@@ -608,6 +653,11 @@ def _register_task_endpoints(
         response iteration runs in this request task after the endpoint
         returns, and each chunk's threadpool hop copies the task context,
         so the plugin's in-stream logger calls stay job-stamped.
+
+        CR-14 follow-up honest limit: accounts do NOT ride this path —
+        response headers are sent before execution ends. A terminal sentinel
+        chunk (the `_job_error` dialect) is the seam-admitted carrier if a
+        streaming adopter ever needs them.
         """
         data = await request.json()
         args = data.get("args", [])
