@@ -12,27 +12,29 @@ pip install cjm_plugin_system
 ## Project Structure
 
     nbs/
-    ├── core/ (20)
-    │   ├── adapter.ipynb           # The typed-task half of the capability-unit fracture (pass-2 Thread 3) —
-    │   ├── adapter_manifest.ipynb  # The ADAPTER unit's registration manifest + the surface-based compatibility matcher (CR-17 pt 2, stage 4). Pass-2 Thread 3: registration/discovery = per-unit manifests generated in-env and found by `discover_manifests()`; compatibility is DERIVED, not declared — the capability records only its structural surface, the adapter declares its protocol (recorded here as member names + parameter lists), and the substrate matches manifest-vs-manifest. Works against UNLOADED capabilities with zero protocol imports host-side.
-    │   ├── capability.ipynb        # The tool-capability interface — the manage-the-tool half of the capability-unit fracture (pass-2 Thread 3)
-    │   ├── config.ipynb            # Project-level configuration for paths, runtime settings, and environment management
-    │   ├── config_store.ipynb      # Persistent storage for per-plugin configuration (with enabled flag)
-    │   ├── empirical_store.ipynb   # Persistent store for empirically-observed resource usage per (instance_id, config_hash) pair. CR-7's data foundation — `record_sample` is called from `PluginManager.execute_plugin*` finally blocks; aggregates feed eviction-candidate selection + future UI hints + cost-aware retry decisions.
-    │   ├── errors.ipynb            # Typed exception hierarchy + JobError dataclass + default classification of bare Python exceptions. The substrate's CR-5 implementation per the 2026-05-19 substrate audit.
-    │   ├── interface.ipynb         # REMOVE-AFTER-OVERHAUL(option-c-cascade): class-identical legacy import
-    │   ├── manager.ipynb           # Plugin discovery, loading, and lifecycle management system
-    │   ├── manifest_format.ipynb   # Typed parser + writer for the nested v2.0 manifest layout per the 2026-05-19 substrate audit's CR-8. Substrate manifests transitioned from a flat top-level JSON object to a four-section nested layout: `install` (deployment-specific facts populated at install time), `code` (code-derived facts refreshed by `cjm-ctl regenerate-manifest`), `drift_tracking` (a config_schema hash that records the witness shape so live-vs-stored comparisons can detect drift), and `overrides` (an operator-supplied overlay placeholder).
-    │   ├── metadata.ipynb          # Data structures for plugin metadata
-    │   ├── platform.ipynb          # Cross-platform utilities for process management, path handling, and system detection
-    │   ├── ports.ipynb             # Capability compositions as DAGs of invocation nodes with typed input/output
-    │   ├── proxy.ipynb             # Bridge between Host application and isolated Worker processes
-    │   ├── queue.ipynb             # Resource-aware job queue for sequential plugin execution with cancellation support
-    │   ├── scheduling.ipynb        # Resource scheduling policies for plugin execution
-    │   ├── secret_store.ipynb      # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
-    │   ├── telemetry.ipynb         # Shared GPU/CPU attribution helpers used by both `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and `PluginManager._record_sample_safe` (CR-7).
-    │   ├── wire.ipynb              # Typed data transfer at the worker boundary — the zero-copy `FileBackedDTO`
-    │   └── worker.ipynb            # FastAPI server that runs inside isolated plugin environments
+    ├── core/ (22)
+    │   ├── adapter.ipynb            # The typed-task half of the capability-unit fracture (pass-2 Thread 3) —
+    │   ├── adapter_manifest.ipynb   # The ADAPTER unit's registration manifest + the surface-based compatibility matcher (CR-17 pt 2, stage 4). Pass-2 Thread 3: registration/discovery = per-unit manifests generated in-env and found by `discover_manifests()`; compatibility is DERIVED, not declared — the capability records only its structural surface, the adapter declares its protocol (recorded here as member names + parameter lists), and the substrate matches manifest-vs-manifest. Works against UNLOADED capabilities with zero protocol imports host-side.
+    │   ├── capability.ipynb         # The tool-capability interface — the manage-the-tool half of the capability-unit fracture (pass-2 Thread 3)
+    │   ├── config.ipynb             # Project-level configuration for paths, runtime settings, and environment management
+    │   ├── config_store.ipynb       # Persistent storage for per-plugin configuration (with enabled flag)
+    │   ├── diagnostics_store.ipynb  # CR-14 (stage 7): the disposable diagnostic-narrative class. Worker-written structured log records (substrate handler stamps contextvars identity — authors never supply attribution) + the host-pumped raw stream chunks (the zero-cooperation death-rattle floor). Retention is a QUERY, not file mechanics. Design ledger: `claude-docs/stage-7-evidence.md`.
+    │   ├── empirical_store.ipynb    # Persistent store for empirically-observed resource usage per (instance_id, config_hash) pair. CR-7's data foundation — `record_sample` is called from `PluginManager.execute_plugin*` finally blocks; aggregates feed eviction-candidate selection + future UI hints + cost-aware retry decisions.
+    │   ├── errors.ipynb             # Typed exception hierarchy + JobError dataclass + default classification of bare Python exceptions. The substrate's CR-5 implementation per the 2026-05-19 substrate audit.
+    │   ├── interface.ipynb          # REMOVE-AFTER-OVERHAUL(option-c-cascade): class-identical legacy import
+    │   ├── journal_store.ipynb      # CR-14 (stage 7): the durable account-of-action. One substrate-derived, host-written, never-auto-deleted SQLite store of typed observability events — the operational half of the attempted-vs-happened asymmetry (the graph records what HAPPENED; the journal records what was ATTEMPTED, including everything the graph by design refuses to contain: failures, refusals, retries, admission decisions, worker lifecycle). Design ledger: `claude-docs/stage-7-evidence.md`.
+    │   ├── manager.ipynb            # Plugin discovery, loading, and lifecycle management system
+    │   ├── manifest_format.ipynb    # Typed parser + writer for the nested v2.0 manifest layout per the 2026-05-19 substrate audit's CR-8. Substrate manifests transitioned from a flat top-level JSON object to a four-section nested layout: `install` (deployment-specific facts populated at install time), `code` (code-derived facts refreshed by `cjm-ctl regenerate-manifest`), `drift_tracking` (a config_schema hash that records the witness shape so live-vs-stored comparisons can detect drift), and `overrides` (an operator-supplied overlay placeholder).
+    │   ├── metadata.ipynb           # Data structures for plugin metadata
+    │   ├── platform.ipynb           # Cross-platform utilities for process management, path handling, and system detection
+    │   ├── ports.ipynb              # Capability compositions as DAGs of invocation nodes with typed input/output
+    │   ├── proxy.ipynb              # Bridge between Host application and isolated Worker processes
+    │   ├── queue.ipynb              # Resource-aware job queue for sequential plugin execution with cancellation support
+    │   ├── scheduling.ipynb         # Resource scheduling policies for plugin execution
+    │   ├── secret_store.ipynb       # CR-12: project-local secret storage for API-based plugins (file-backed, 0600)
+    │   ├── telemetry.ipynb          # Shared GPU/CPU attribution helpers used by both `JobQueue._sample_resource_snapshot` (CR-6 Stage 3) and `PluginManager._record_sample_safe` (CR-7).
+    │   ├── wire.ipynb               # Typed data transfer at the worker boundary — the zero-copy `FileBackedDTO`
+    │   └── worker.ipynb             # FastAPI server that runs inside isolated plugin environments
     ├── utils/ (3)
     │   ├── cache_paths.ipynb  # Per-(input-content, config) deterministic cache directories for plugin outputs
     │   ├── hashing.ipynb      # Shared cryptographic hashing primitives for content integrity verification
@@ -40,7 +42,7 @@ pip install cjm_plugin_system
     ├── bootstrap.ipynb  # One-call factory that assembles a PluginManager + JobQueue + plugin bindings — closes the demo-app boilerplate duplication audited across 5 substrate consumers.
     └── cli.ipynb        # CLI tool for declarative plugin management
 
-Total: 25 notebooks across 2 directories
+Total: 27 notebooks across 2 directories
 
 ## Module Dependencies
 
@@ -53,9 +55,11 @@ graph LR
     core_capability["core.capability<br/>Tool Capability"]
     core_config["core.config<br/>Configuration"]
     core_config_store["core.config_store<br/>Plugin Config Store"]
+    core_diagnostics_store["core.diagnostics_store<br/>Diagnostics Store"]
     core_empirical_store["core.empirical_store<br/>Empirical Resource Tracking"]
     core_errors["core.errors<br/>Plugin Error Taxonomy"]
     core_interface["core.interface<br/>Plugin Interface (compat shim)"]
+    core_journal_store["core.journal_store<br/>Journal Store"]
     core_manager["core.manager<br/>Plugin Manager"]
     core_manifest_format["core.manifest_format<br/>Manifest Format (v2.0)"]
     core_metadata["core.metadata<br/>Plugin Metadata"]
@@ -73,54 +77,64 @@ graph LR
     utils_validation["utils.validation<br/>Configuration Validation"]
 
     bootstrap --> core_manager
-    bootstrap --> core_scheduling
     bootstrap --> core_queue
+    bootstrap --> core_scheduling
+    cli --> core_platform
     cli --> core_metadata
     cli --> core_manifest_format
     cli --> core_config
-    cli --> core_platform
     core_capability --> core_errors
+    core_diagnostics_store --> core_wire
     core_empirical_store --> utils_hashing
     core_interface --> core_capability
     core_interface --> core
     core_interface --> core_interface
     core_interface --> core_wire
-    core_manager --> core_metadata
     core_manager --> core_empirical_store
+    core_manager --> core_metadata
+    core_manager --> core__telemetry
+    core_manager --> utils_validation
+    core_manager --> core_journal_store
+    core_manager --> core_scheduling
+    core_manager --> core_secret_store
+    core_manager --> core_manifest_format
+    core_manager --> core_config_store
+    core_manager --> core_diagnostics_store
     core_manager --> core_adapter_manifest
     core_manager --> core_errors
     core_manager --> core_config
-    core_manager --> core_scheduling
-    core_manager --> core_manifest_format
-    core_manager --> core__telemetry
-    core_manager --> core_config_store
-    core_manager --> core_proxy
-    core_manager --> core_secret_store
-    core_manager --> utils_validation
     core_manager --> core_capability
+    core_manager --> core_proxy
     core_manifest_format --> core_metadata
     core_manifest_format --> utils_hashing
     core_platform --> core_config
     core_ports --> core_errors
+    core_proxy --> core_platform
+    core_proxy --> core_journal_store
+    core_proxy --> core_wire
+    core_proxy --> core_diagnostics_store
     core_proxy --> core_errors
     core_proxy --> core_config
-    core_proxy --> core_platform
-    core_proxy --> core_wire
     core_proxy --> core_capability
     core_queue --> core_errors
-    core_queue --> core_ports
     core_queue --> core__telemetry
+    core_queue --> core_journal_store
+    core_queue --> core_ports
+    core_queue --> core_wire
+    core_queue --> core_diagnostics_store
     core_scheduling --> core_metadata
+    core_worker --> core_wire
+    core_worker --> core_errors
+    core_worker --> core_journal_store
+    core_worker --> core_diagnostics_store
     core_worker --> core_capability
     core_worker --> core_platform
-    core_worker --> core_errors
-    core_worker --> core_wire
     utils_cache_paths --> core_empirical_store
     utils_cache_paths --> utils_hashing
     utils_validation --> core_errors
 ```
 
-*46 cross-module dependencies detected*
+*56 cross-module dependencies detected*
 
 ## CLI Reference
 
@@ -156,9 +170,12 @@ graph LR
     │ estimate-size              Estimate disk space required for plugin           │
     │                            environments.                                     │
     │ list                       List installed plugins from manifest directory.   │
+    │ logs                       Tail / follow the observability stores (CR-14).   │
+    │ retention                  Apply the diagnostics retention policy now        │
+    │                            (CR-14).                                          │
     │ remove                     Remove a plugin's manifest and conda environment. │
-    │ validate                   SG-6: validate a manifest JSON or plugins.yaml    │
-    │                            file's structure.                                 │
+    │ validate                   SG-6 + T23: validate a manifest / plugins.yaml /  │
+    │                            plugin source.                                    │
     │ set-secret                 Store a plugin secret in the project-local        │
     │                            SecretStore (CR-12).                              │
     │ list-secrets               List the secret KEY NAMES stored for a plugin —   │
@@ -1256,6 +1273,8 @@ from cjm_plugin_system.cli import (
     setup_host,
     estimate_size,
     list_plugins,
+    logs_command,
+    retention_command,
     remove_plugin,
     validate_file,
     set_secret,
@@ -1550,6 +1569,61 @@ def list_plugins(
 ```
 
 ``` python
+def _fmt_short(value: Optional[str], width: int = 8) -> str:
+    """First `width` chars of an id, or '-' for None (display only)."""
+    return (value or "-")[:width]
+    "First `width` chars of an id, or '-' for None (display only)."
+```
+
+``` python
+def _compact_payload(payload: Dict[str, Any], max_len: int = 160) -> str:
+    """One-line payload rendering; the bulky job_snapshot collapses to its status."""
+    d = dict(payload or {})
+    snap = d.get("job_snapshot")
+    if isinstance(snap, dict)
+    "One-line payload rendering; the bulky job_snapshot collapses to its status."
+```
+
+``` python
+def logs_command(
+    job:Annotated[Optional[str], typer.Option("--job", help="Filter to one queue job id (exact)")]=None,
+    run:Annotated[Optional[str], typer.Option("--run", help="Filter to one host run id (implies --journal)")]=None,
+    session:Annotated[Optional[str], typer.Option("--session", help="Filter to one worker session id")]=None,
+    level:Annotated[Optional[str], typer.Option("--level", help="Diagnostics level filter (e.g. WARNING)")]=None,
+    journal:Annotated[bool, typer.Option("--journal", help="Show the journal (account-of-action) instead of diagnostics records")]=False,
+    chunks:Annotated[bool, typer.Option("--chunks", help="Show raw stream chunks (death-rattle floor)")]=False,
+    limit:Annotated[int, typer.Option("--limit", "-n", help="Most recent N entries (0 = all)")]=50,
+    follow:Annotated[bool, typer.Option("--follow", "-f", help="Poll for new entries (Ctrl-C to stop)")]=False,
+) -> None
+    """
+    Tail / follow the observability stores (CR-14).
+    
+    Default view: structured diagnostics records (worker logger output,
+    EXACTLY job-stamped via the call envelope). `--chunks`: the raw stream
+    pump. `--journal`: the durable account-of-action (job lifecycle, worker
+    spawn/death, admission, config, runs, worker-reported accounts).
+    `--follow` polls the store's seq cursor — exact, no byte offsets.
+    """
+```
+
+``` python
+def retention_command(
+    max_age_days:Annotated[Optional[float], typer.Option(
+        "--max-age-days", help="Delete diagnostics rows older than this (overrides cjm.yaml)")]=None,
+    max_total_mb:Annotated[Optional[float], typer.Option(
+        "--max-total-mb", help="Delete oldest rows until diagnostics.db is under this budget")]=None,
+) -> None
+    """
+    Apply the diagnostics retention policy now (CR-14).
+    
+    The explicit half of the invocation policy (PluginManager's startup
+    sweep is the automatic half). Defaults come from `cjm.yaml`'s
+    `substrate.diagnostics_retention_days` / `diagnostics_retention_max_mb`.
+    The JOURNAL is never touched — it has no retention surface by design.
+    """
+```
+
+``` python
 def remove_plugin(
     plugin_name:str=typer.Argument(..., help="Name of the plugin to remove"),
     plugins_path:Optional[str]=typer.Option(None, "--plugins", help="Path to plugins.yaml for env name lookup"),
@@ -1658,26 +1732,46 @@ def _collect_manifest_warnings(
 ```
 
 ``` python
+def _lint_plugin_logging(
+    path: Path  # A plugin .py file or package directory to scan
+) -> tuple:  # (errors, warnings) — lists of human-readable findings
+    """
+    T23 (CR-14): lint plugin source for `logging.basicConfig` calls.
+    
+    The substrate installs the worker's root handler
+    (`install_worker_diagnostics`) before plugin code runs. A plugin calling
+    `logging.basicConfig(force=True)` DESTROYS that handler (every
+    subsequent record silently bypasses the diagnostics store) -> ERROR.
+    A plain `basicConfig` call is a no-op once a handler exists — a fragile
+    pre-CR-14 idiom that suggests the plugin expects to own process logging
+    -> WARNING. Directories scan their tree, skipping hidden dirs and
+    `tests_manual`/`_proc` (host-side scripts own their own logging).
+    """
+```
+
+``` python
 def _detect_manifest_format(
     path: Path  # File to inspect
 ) -> Optional[str]:  # 'manifest' | 'plugins_yaml' | None
-    "Auto-detect file format from extension."
+    "Auto-detect format: extension for files; directories lint as source."
 ```
 
 ``` python
 def validate_file(
-    path:Path=typer.Argument(..., help="Manifest JSON or plugins.yaml to validate"),
+    path:Path=typer.Argument(..., help="Manifest JSON, plugins.yaml, or plugin source (.py / package dir) to validate"),
     format:Optional[str]=typer.Option(
         None, "--format", "-f",
-        help="Override format detection: 'manifest' or 'plugins_yaml'",
+        help="Override format detection: 'manifest', 'plugins_yaml', or 'source'",
     ),
 ) -> None
     """
-    SG-6: validate a manifest JSON or plugins.yaml file's structure.
+    SG-6 + T23: validate a manifest / plugins.yaml / plugin source.
     
-    Auto-detects format from the file extension (`.json` → manifest,
-    `.yaml`/`.yml` → plugins.yaml). Exits non-zero with a list of validation
-    errors if any check fails.
+    Auto-detects format from the path (`.json` → manifest, `.yaml`/`.yml` →
+    plugins.yaml, `.py` or a directory → source lint). The source lint is
+    the CR-14 `logging.basicConfig` gate: `force=True` is an ERROR (it
+    destroys the substrate diagnostics handler), a plain call is a WARNING.
+    Exits non-zero with a list of validation errors if any check fails.
     """
 ```
 
@@ -1846,6 +1940,8 @@ class SubstrateConfig:
     drift_detection: bool = True  # Run /config_schema hash compare on every load_plugin
     empirical_tracking: bool = True  # Record ResourceSample after every execute_plugin*
     prefetch_stall_threshold_seconds: float = 60.0  # CR-4 / Session A: stall detection threshold for proxy.prefetch
+    diagnostics_retention_days: float = 30.0  # CR-14 follow-up: age-based diagnostics retention; <=0 disables the startup sweep
+    diagnostics_retention_max_mb: Optional[float]  # CR-14 follow-up: diagnostics.db size budget (None = no size-based deletion)
 ```
 
 ``` python
@@ -1872,16 +1968,24 @@ class CJMConfig:
             return self.data_dir / "data"
     
         @property
-        def logs_dir(self) -> Path: # Directory containing plugin logs
+        def journal_db_path(self) -> Path: # Journal store (CR-14: durable account-of-action)
         "Directory for plugin runtime data (databases, caches)."
     
-    def logs_dir(self) -> Path: # Directory containing plugin logs
-            """Directory containing plugin logs."""
-            return self.data_dir / "logs"
+    def journal_db_path(self) -> Path: # Journal store (CR-14: durable account-of-action)
+            """Journal store path — the precious, host-written observability record."""
+            return self.data_dir / "journal.db"
+    
+        @property
+        def diagnostics_db_path(self) -> Path: # Diagnostics store (CR-14: disposable narrative)
+        "Journal store path — the precious, host-written observability record."
+    
+    def diagnostics_db_path(self) -> Path: # Diagnostics store (CR-14: disposable narrative)
+            """Diagnostics store path — worker records + raw stream chunks; retention-managed."""
+            return self.data_dir / "diagnostics.db"
     
         @property
         def conda_binary_path(self) -> Optional[Path]: # Path to conda/micromamba binary or None
-        "Directory containing plugin logs."
+        "Diagnostics store path — worker records + raw stream chunks; retention-managed."
     
     def conda_binary_path(self) -> Optional[Path]: # Path to conda/micromamba binary or None
             """Get the configured binary path for the current platform."""
@@ -2040,6 +2144,296 @@ class LocalPluginConfigStore:
 
 ``` python
 _SCHEMA = '\nCREATE TABLE IF NOT EXISTS plugin_configs (\n    plugin_name TEXT PRIMARY KEY,\n    config_json TEXT NOT NULL,\n    enabled INTEGER NOT NULL DEFAULT 1,\n    updated_at REAL NOT NULL\n)\n'
+```
+
+### Diagnostics Store (`diagnostics_store.ipynb`)
+
+> CR-14 (stage 7): the disposable diagnostic-narrative class.
+> Worker-written structured log records (substrate handler stamps
+> contextvars identity — authors never supply attribution) + the
+> host-pumped raw stream chunks (the zero-cooperation death-rattle
+> floor). Retention is a QUERY, not file mechanics. Design ledger:
+> `claude-docs/stage-7-evidence.md`.
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.diagnostics_store import (
+    DiagnosticRecord,
+    StreamChunk,
+    DiagnosticsStore,
+    LocalDiagnosticsStore,
+    DiagnosticsLogHandler,
+    install_worker_diagnostics,
+    normalize_stream_line
+)
+```
+
+#### Functions
+
+``` python
+@patch
+@contextmanager
+def _conn(self: LocalDiagnosticsStore) -> Iterator[sqlite3.Connection]:
+    """Yield the persistent connection under the instance lock (lazy init:
+    parent dirs + WAL + schema on first use).
+
+    Same shape + rationale as `LocalJournalStore._conn` (stage-7 stress
+    catch: per-call close = WAL checkpoint = ~16 ms/append). Disposable
+    class on the WORKER hot path — `synchronous=NORMAL` is plenty.
+    """
+    with self._lock
+    """
+    Yield the persistent connection under the instance lock (lazy init:
+    parent dirs + WAL + schema on first use).
+    
+    Same shape + rationale as `LocalJournalStore._conn` (stage-7 stress
+    catch: per-call close = WAL checkpoint = ~16 ms/append). Disposable
+    class on the WORKER hot path — `synchronous=NORMAL` is plenty.
+    """
+```
+
+``` python
+@patch
+def append_record(
+    self: LocalDiagnosticsStore,
+    record: DiagnosticRecord,  # Structured record to persist
+) -> int:  # Store-assigned seq
+    "Persist one structured record."
+```
+
+``` python
+@patch
+def append_chunk(
+    self: LocalDiagnosticsStore,
+    chunk: StreamChunk,  # Raw stream line to persist
+) -> int:  # Store-assigned seq
+    "Persist one raw stream line."
+```
+
+``` python
+@patch
+def query_records(
+    self: LocalDiagnosticsStore,
+    job_id: Optional[str] = None,  # EXACT job correlation (stamped at write)
+    worker_session_id: Optional[str] = None,  # Session scope
+    level: Optional[str] = None,  # Level name filter
+    after_seq: Optional[int] = None,  # Tail cursor
+    limit: Optional[int] = None,  # Max rows
+    descending: bool = False,  # True = newest first
+) -> List[DiagnosticRecord]:  # Matching records, seq-ordered
+    "Filtered structured-record read."
+```
+
+``` python
+@patch
+def query_chunks(
+    self: LocalDiagnosticsStore,
+    worker_session_id: Optional[str] = None,  # Session scope
+    after_seq: Optional[int] = None,  # Tail cursor
+    limit: Optional[int] = None,  # Max rows
+    descending: bool = False,  # True = newest first
+) -> List[StreamChunk]:  # Matching chunks, seq-ordered
+    "Raw stream read, session-scoped."
+```
+
+``` python
+@patch
+def apply_retention(
+    self: LocalDiagnosticsStore,
+    max_age_days: Optional[float] = None,  # Delete rows older than this
+    max_total_mb: Optional[float] = None,  # Delete oldest rows until DB under budget
+) -> Dict[str, int]:  # {'records_deleted': n, 'chunks_deleted': m}
+    """
+    Retention as a QUERY (the CR-14 reframe's mechanical payoff).
+    
+    Age first, then size: oldest rows (both tables, interleaved by ts)
+    deleted in batches until the DB file is under budget. Safe against
+    concurrent writers (WAL; each batch is its own transaction).
+    """
+```
+
+``` python
+def install_worker_diagnostics() -> Optional[DiagnosticsLogHandler]:
+    """Configure worker-process logging (replaces the old `basicConfig`).
+
+    Env contract (injected by the proxy at spawn):
+    - `CJM_DIAGNOSTICS_DB`: diagnostics store path -> install the handler.
+    - `CJM_WORKER_SESSION_ID`: spawn-scoped session id stamped on records.
+    - `CJM_LOG_LEVEL`: operator level control (default INFO) — the old
+      worker hardcoded INFO with no surface.
+
+    Without `CJM_DIAGNOSTICS_DB` (standalone/dev import) falls back to the
+    pre-CR-14 stdout `basicConfig` so nothing changes for direct runs.
+    Returns the installed handler (None on fallback).
+    """
+    level_name = os.environ.get("CJM_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    db_path = os.environ.get("CJM_DIAGNOSTICS_DB")
+    if not db_path
+    """
+    Configure worker-process logging (replaces the old `basicConfig`).
+    
+    Env contract (injected by the proxy at spawn):
+    - `CJM_DIAGNOSTICS_DB`: diagnostics store path -> install the handler.
+    - `CJM_WORKER_SESSION_ID`: spawn-scoped session id stamped on records.
+    - `CJM_LOG_LEVEL`: operator level control (default INFO) — the old
+      worker hardcoded INFO with no surface.
+    
+    Without `CJM_DIAGNOSTICS_DB` (standalone/dev import) falls back to the
+    pre-CR-14 stdout `basicConfig` so nothing changes for direct runs.
+    Returns the installed handler (None on fallback).
+    """
+```
+
+``` python
+def normalize_stream_line(
+    raw: str,  # One decoded line (may contain \r progress frames)
+) -> Optional[str]:  # Final frame, or None when nothing durable remains
+    "Collapse CR progress frames to the final frame; drop empty results."
+```
+
+#### Classes
+
+``` python
+@dataclass
+class DiagnosticRecord:
+    "One structured worker log record (CR-14 diagnostics class)."
+    
+    message: str  # record.getMessage() result
+    level: str = 'INFO'  # Logging level name
+    logger_name: str = ''  # Logger hierarchy name (restored — flat logs dropped it)
+    ts: datetime = field(...)  # tz-aware UTC
+    worker_session_id: Optional[str]  # Spawn-scoped session
+    job_id: Optional[str]  # EXACT correlation via contextvars (None outside a call span)
+    exc_text: Optional[str]  # Formatted traceback when the record carried exc_info
+    seq: Optional[int]  # Store-assigned cursor
+```
+
+``` python
+@dataclass
+class StreamChunk:
+    "One raw stdout/stderr line the host pump captured (death-rattle floor)."
+    
+    content: str  # Decoded line content (tqdm CR-frames collapsed to final frame)
+    ts: datetime = field(...)  # Capture time (host clock)
+    worker_session_id: Optional[str]  # Session attribution (the honest unit)
+    stream: str = 'stdout'  # Source stream (stderr merged into stdout today)
+    seq: Optional[int]  # Store-assigned cursor
+```
+
+``` python
+@runtime_checkable
+class DiagnosticsStore(Protocol):
+    "Protocol for the disposable diagnostic-narrative store (CR-14)."
+    
+    def append_record(self, record: DiagnosticRecord) -> int:
+            """Persist one structured record; returns seq."""
+            ...
+    
+        def append_chunk(self, chunk: StreamChunk) -> int
+        "Persist one structured record; returns seq."
+    
+    def append_chunk(self, chunk: StreamChunk) -> int:
+            """Persist one raw stream line; returns seq."""
+            ...
+    
+        def query_records(
+            self,
+            job_id: Optional[str] = None,
+            worker_session_id: Optional[str] = None,
+            level: Optional[str] = None,
+            after_seq: Optional[int] = None,
+            limit: Optional[int] = None,
+            descending: bool = False,
+        ) -> List[DiagnosticRecord]
+        "Persist one raw stream line; returns seq."
+    
+    def query_records(
+            self,
+            job_id: Optional[str] = None,
+            worker_session_id: Optional[str] = None,
+            level: Optional[str] = None,
+            after_seq: Optional[int] = None,
+            limit: Optional[int] = None,
+            descending: bool = False,
+        ) -> List[DiagnosticRecord]
+        "Filtered structured-record read; `job_id` is EXACT (stamped, not sliced)."
+    
+    def query_chunks(
+            self,
+            worker_session_id: Optional[str] = None,
+            after_seq: Optional[int] = None,
+            limit: Optional[int] = None,
+            descending: bool = False,
+        ) -> List[StreamChunk]
+        "Raw stream read, session-scoped."
+    
+    def apply_retention(
+            self,
+            max_age_days: Optional[float] = None,
+            max_total_mb: Optional[float] = None,
+        ) -> Dict[str, int]
+        "Delete old rows by age and/or size budget; returns deleted counts."
+```
+
+``` python
+class LocalDiagnosticsStore:
+    def __init__(self, db_path: Optional[Path] = None):
+        """`db_path=None` uses `~/.cjm/diagnostics.db`; workers receive the
+        host's path via the `CJM_DIAGNOSTICS_DB` env var at spawn."""
+        self.db_path = Path(db_path) if db_path is not None else Path.home() / ".cjm" / "diagnostics.db"
+        # Persistent lock-protected connection (stage-7 stress part-1 catch;
+        # see LocalJournalStore._conn): per-call open/close paid a WAL
+    """
+    SQLite-backed default `DiagnosticsStore` (CR-14).
+    
+    Many concurrent writers (workers + the host pump) -> WAL +
+    busy_timeout + per-call connections (no long-held handles; safe
+    from any thread). Disposable class: retention deletes are routine.
+    """
+    
+    def __init__(self, db_path: Optional[Path] = None):
+            """`db_path=None` uses `~/.cjm/diagnostics.db`; workers receive the
+            host's path via the `CJM_DIAGNOSTICS_DB` env var at spawn."""
+            self.db_path = Path(db_path) if db_path is not None else Path.home() / ".cjm" / "diagnostics.db"
+            # Persistent lock-protected connection (stage-7 stress part-1 catch;
+            # see LocalJournalStore._conn): per-call open/close paid a WAL
+        "`db_path=None` uses `~/.cjm/diagnostics.db`; workers receive the
+host's path via the `CJM_DIAGNOSTICS_DB` env var at spawn."
+```
+
+``` python
+class DiagnosticsLogHandler:
+    def __init__(
+        self,
+        store: DiagnosticsStore,  # Sink (LocalDiagnosticsStore in-process)
+        worker_session_id: Optional[str] = None,  # Spawn-scoped session id
+    )
+    """
+    Worker-side logging handler writing `DiagnosticRecord`s (CR-14).
+    
+    Thread-safe via per-call connections (the worker runs plugin execute
+    in an executor thread; contextvars propagate via copy_context at the
+    endpoint). Never raises into application code.
+    """
+    
+    def __init__(
+            self,
+            store: DiagnosticsStore,  # Sink (LocalDiagnosticsStore in-process)
+            worker_session_id: Optional[str] = None,  # Spawn-scoped session id
+        )
+    
+    def emit(self, record: logging.LogRecord) -> None:
+            """Write one record; job identity from the call-envelope contextvar."""
+            try
+        "Write one record; job identity from the call-envelope contextvar."
+```
+
+#### Variables
+
+``` python
+_DIAGNOSTICS_SCHEMA = "\nCREATE TABLE IF NOT EXISTS records (\n    seq INTEGER PRIMARY KEY AUTOINCREMENT,\n    ts TEXT NOT NULL,\n    worker_session_id TEXT,\n    job_id TEXT,\n    level TEXT NOT NULL DEFAULT 'INFO',\n    logger_name TEXT NOT NULL DEFAULT '',\n    message TEXT NOT NULL,\n    exc_text TEXT\n);\nCREATE INDEX IF NOT EXISTS idx_records_job ON records (job_id);\nCREATE INDEX IF NOT EXISTS idx_records_session ON records (worker_session_id);\nCREATE INDEX IF NOT EXISTS idx_records_ts ON records (ts);\nCREATE TABLE IF NOT EXISTS stream_chunks (\n    seq INTEGER PRIMARY KEY AUTOINCREMENT,\n    ts TEXT NOT NULL,\n    worker_session_id TEXT,\n    stream TEXT NOT NULL DEFAULT 'stdout',\n    content TEXT NOT NULL\n);\nCREATE INDEX IF NOT EXISTS idx_chunks_session ON stream_chunks (worker_session_id);\nCREATE INDEX IF NOT EXISTS idx_chunks_ts ON stream_chunks (ts);\n"
 ```
 
 ### Empirical Resource Tracking (`empirical_store.ipynb`)
@@ -2691,6 +3085,250 @@ def hash_dict_canonical(
     """
 ```
 
+### Journal Store (`journal_store.ipynb`)
+
+> CR-14 (stage 7): the durable account-of-action. One substrate-derived,
+> host-written, never-auto-deleted SQLite store of typed observability
+> events — the operational half of the attempted-vs-happened asymmetry
+> (the graph records what HAPPENED; the journal records what was
+> ATTEMPTED, including everything the graph by design refuses to
+> contain: failures, refusals, retries, admission decisions, worker
+> lifecycle). Design ledger: `claude-docs/stage-7-evidence.md`.
+
+#### Import
+
+``` python
+from cjm_plugin_system.core.journal_store import (
+    LIVENESS_EVENT_TYPES,
+    SubstrateEventType,
+    JournalEvent,
+    JournalStore,
+    LocalJournalStore
+)
+```
+
+#### Functions
+
+``` python
+@patch
+@contextmanager
+def _conn(self: LocalJournalStore) -> Iterator[sqlite3.Connection]:
+    """Yield the persistent connection under the instance lock (lazy init:
+    parent dirs + WAL + schema on first use).
+
+    Stage-7 stress catch: the previous per-call connect/close shape paid a
+    WAL checkpoint on every close (~16 ms/append — 25x over the design's
+    latency claim). `synchronous=NORMAL` is the standard WAL pairing
+    (durable to process crash; an OS/power crash may lose only the most
+    recent commits — the wedge gate covers append FAILURES, which stay
+    loud). `check_same_thread=False` + the lock makes any-thread use safe.
+    """
+    with self._lock
+    """
+    Yield the persistent connection under the instance lock (lazy init:
+    parent dirs + WAL + schema on first use).
+    
+    Stage-7 stress catch: the previous per-call connect/close shape paid a
+    WAL checkpoint on every close (~16 ms/append — 25x over the design's
+    latency claim). `synchronous=NORMAL` is the standard WAL pairing
+    (durable to process crash; an OS/power crash may lose only the most
+    recent commits — the wedge gate covers append FAILURES, which stay
+    loud). `check_same_thread=False` + the lock makes any-thread use safe.
+    """
+```
+
+``` python
+@patch
+def append(
+    self: LocalJournalStore,
+    event: JournalEvent,  # Event to persist
+) -> int:  # Store-assigned seq (cursor)
+    """
+    Persist one event; sets and returns `event.seq`.
+    
+    LOUD by contract: sqlite errors propagate (the audit trail never
+    degrades silently — ratified design #13). One tiny WAL INSERT;
+    synchronous on purpose (G4: the dispatch fast path must stay
+    predictable; at substrate event volume this is microseconds).
+    """
+```
+
+``` python
+@patch
+def query(
+    self: LocalJournalStore,
+    job_id: Optional[str] = None,  # Filter: job correlation
+    run_id: Optional[str] = None,  # Filter: host-tier run
+    composition_id: Optional[str] = None,  # Filter: composition
+    plugin_instance_id: Optional[str] = None,  # Filter: instance
+    worker_session_id: Optional[str] = None,  # Filter: worker session
+    event_type: Optional[str] = None,  # Filter: one vocabulary value
+    after_seq: Optional[int] = None,  # Tail cursor: rows with seq > this
+    since_ts: Optional[datetime] = None,  # Filter: ts >= (isoformat compare)
+    until_ts: Optional[datetime] = None,  # Filter: ts <= (isoformat compare)
+    limit: Optional[int] = None,  # Max rows
+    descending: bool = False,  # True = newest first
+) -> List[JournalEvent]:  # Matching events, seq-ordered
+    "Filtered read; all filters AND-combined."
+```
+
+``` python
+@patch
+def count(
+    self: LocalJournalStore,
+    event_type: Optional[str] = None,  # Optional per-type count
+) -> int:  # Row count
+    "Total journal rows (volume regression checks)."
+```
+
+``` python
+@patch
+def terminal_state_events(
+    self: LocalJournalStore,
+    limit: Optional[int] = None,  # Most recent N (None = all)
+) -> List[JournalEvent]:  # Terminal STATE_TRANSITION rows, newest first
+    """
+    The durable job history (`_history` migration rider): terminal
+    STATE_TRANSITION rows whose payload carries the job snapshot.
+    """
+```
+
+#### Classes
+
+``` python
+class SubstrateEventType(str, Enum):
+    """
+    Journal vocabulary beyond the job-scoped `JobEventType` set (CR-14).
+    
+    Reserved up front (emission progressive). Job-scoped types stay in
+    `core.queue.JobEventType`; both serialize to plain strings in the
+    journal's `event_type` column — the journal is vocabulary-tolerant
+    by design (unknown types round-trip; the P5/P6 tolerant-unknown law).
+    """
+```
+
+``` python
+@dataclass
+class JournalEvent:
+    """
+    One durable observability record (CR-14).
+    
+    The journal never duplicates what manifests / capability DBs / the graph
+    already record — graph-touching payloads carry REFERENCES (node ids +
+    content hashes, verifiable via the CR-19 machinery), never content.
+    `worker_reported=True` marks payloads that originated in-worker and rode
+    a wire envelope; the HOST still wrote the row (single-writer-class rule).
+    """
+    
+    event_type: str  # JobEventType.value or SubstrateEventType.value (vocabulary-tolerant)
+    event_id: str = field(...)  # Generated occurrence id (EventRef anchor)
+    ts: datetime = field(...)  # Substrate-stamped, tz-aware UTC
+    run_id: Optional[str]  # Host-tier run correlation (core run manifests)
+    job_id: Optional[str]  # Queue job correlation
+    composition_id: Optional[str]  # Stage-3 composition correlation
+    node_id: Optional[str]  # Composition node correlation
+    plugin_instance_id: Optional[str]  # CR-10 instance correlation
+    plugin_name: Optional[str]  # Denormalized for filtering
+    config_hash: Optional[str]  # Effective config at event time (CR-7 keying)
+    task_name: Optional[str]  # Task-channel address (stage 4)
+    method: Optional[str]  # Task-channel method (stage 4)
+    worker_session_id: Optional[str]  # Spawn-scoped worker session (replaces ctime markers)
+    actor: Optional[str]  # Who/what initiated (operator / agent / host id)
+    worker_reported: bool = False  # Payload originated in-worker (rode the wire); host wrote the row
+    payload: Dict[str, Any] = field(...)  # Per-event-type structured detail
+    seq: Optional[int]  # Store-assigned cursor (rowid); None until appended
+```
+
+``` python
+@runtime_checkable
+class JournalStore(Protocol):
+    """
+    Protocol for the durable account-of-action (CR-14).
+    
+    Implementations MUST raise on append failure (loud, never silent —
+    the audit trail does not degrade quietly) and MUST NOT expose a
+    delete/retention surface (precious class).
+    """
+    
+    def append(self, event: JournalEvent) -> int:
+            """Persist one event; returns the store-assigned seq (cursor)."""
+            ...
+    
+        def query(
+            self,
+            job_id: Optional[str] = None,
+            run_id: Optional[str] = None,
+            composition_id: Optional[str] = None,
+            plugin_instance_id: Optional[str] = None,
+            worker_session_id: Optional[str] = None,
+            event_type: Optional[str] = None,
+            after_seq: Optional[int] = None,
+            since_ts: Optional[datetime] = None,
+            until_ts: Optional[datetime] = None,
+            limit: Optional[int] = None,
+            descending: bool = False,
+        ) -> List[JournalEvent]
+        "Persist one event; returns the store-assigned seq (cursor)."
+    
+    def query(
+            self,
+            job_id: Optional[str] = None,
+            run_id: Optional[str] = None,
+            composition_id: Optional[str] = None,
+            plugin_instance_id: Optional[str] = None,
+            worker_session_id: Optional[str] = None,
+            event_type: Optional[str] = None,
+            after_seq: Optional[int] = None,
+            since_ts: Optional[datetime] = None,
+            until_ts: Optional[datetime] = None,
+            limit: Optional[int] = None,
+            descending: bool = False,
+        ) -> List[JournalEvent]
+        "Filtered read; all filters AND-combined; `after_seq` is the tail cursor."
+    
+    def count(self, event_type: Optional[str] = None) -> int:
+            """Total rows (optionally per type) — volume regression checks."""
+            ...
+    
+        def terminal_state_events(self, limit: Optional[int] = None) -> List[JournalEvent]
+        "Total rows (optionally per type) — volume regression checks."
+    
+    def terminal_state_events(self, limit: Optional[int] = None) -> List[JournalEvent]
+        "STATE_TRANSITION rows whose payload `to` is terminal — the durable
+job history (the `_history` migration rider)."
+```
+
+``` python
+class LocalJournalStore:
+    def __init__(self, db_path: Optional[Path] = None):
+        """`db_path=None` uses `~/.cjm/journal.db`; PluginManager passes
+        `cfg.journal_db_path` (project-scoped) automatically."""
+        self.db_path = Path(db_path) if db_path is not None else Path.home() / ".cjm" / "journal.db"
+        # Persistent lock-protected connection (stage-7 stress part-1 catch)
+    """
+    SQLite-backed default `JournalStore` (CR-14).
+    
+    WAL + busy_timeout for multi-process host writers; per-call
+    connections (sibling-store convention). `append` raises on failure
+    (loud) — callers never wrap it in a silent try/except.
+    """
+    
+    def __init__(self, db_path: Optional[Path] = None):
+            """`db_path=None` uses `~/.cjm/journal.db`; PluginManager passes
+            `cfg.journal_db_path` (project-scoped) automatically."""
+            self.db_path = Path(db_path) if db_path is not None else Path.home() / ".cjm" / "journal.db"
+            # Persistent lock-protected connection (stage-7 stress part-1 catch)
+        "`db_path=None` uses `~/.cjm/journal.db`; PluginManager passes
+`cfg.journal_db_path` (project-scoped) automatically."
+```
+
+#### Variables
+
+``` python
+LIVENESS_EVENT_TYPES: frozenset
+_JOURNAL_SCHEMA = "\nCREATE TABLE IF NOT EXISTS journal (\n    seq INTEGER PRIMARY KEY AUTOINCREMENT,\n    event_id TEXT NOT NULL UNIQUE,\n    ts TEXT NOT NULL,\n    event_type TEXT NOT NULL,\n    run_id TEXT,\n    job_id TEXT,\n    composition_id TEXT,\n    node_id TEXT,\n    plugin_instance_id TEXT,\n    plugin_name TEXT,\n    config_hash TEXT,\n    task_name TEXT,\n    method TEXT,\n    worker_session_id TEXT,\n    actor TEXT,\n    worker_reported INTEGER NOT NULL DEFAULT 0,\n    payload TEXT NOT NULL DEFAULT '{}'\n);\nCREATE INDEX IF NOT EXISTS idx_journal_job ON journal (job_id);\nCREATE INDEX IF NOT EXISTS idx_journal_run ON journal (run_id);\nCREATE INDEX IF NOT EXISTS idx_journal_comp ON journal (composition_id);\nCREATE INDEX IF NOT EXISTS idx_journal_type_ts ON journal (event_type, ts);\nCREATE INDEX IF NOT EXISTS idx_journal_instance_ts ON journal (plugin_instance_id, ts);\nCREATE INDEX IF NOT EXISTS idx_journal_wsession ON journal (worker_session_id);\n"
+```
+
 ### Plugin Manager (`manager.ipynb`)
 
 > Plugin discovery, loading, and lifecycle management system
@@ -2705,6 +3343,30 @@ from cjm_plugin_system.core.manager import (
 ```
 
 #### Functions
+
+``` python
+def _start_diagnostics_retention_sweep(self) -> None:
+    """CR-14 follow-up: host-startup diagnostics retention sweep.
+
+    The invocation half of the retention policy (`cjm-ctl retention` is the
+    other): fire-and-forget daemon thread so `__init__` stays fast (slow-init
+    discipline) and a large backlog never delays plugin loading. Disabled
+    when `cfg.substrate.diagnostics_retention_days <= 0` and no size budget
+    is set. Best-effort: a sweep failure logs at WARNING — the diagnostics
+    class is disposable; the JOURNAL has no retention surface at all.
+    """
+    try
+    """
+    CR-14 follow-up: host-startup diagnostics retention sweep.
+    
+    The invocation half of the retention policy (`cjm-ctl retention` is the
+    other): fire-and-forget daemon thread so `__init__` stays fast (slow-init
+    discipline) and a large backlog never delays plugin loading. Disabled
+    when `cfg.substrate.diagnostics_retention_days <= 0` and no size budget
+    is set. Best-effort: a sweep failure logs at WARNING — the diagnostics
+    class is disposable; the JOURNAL has no retention surface at all.
+    """
+```
 
 ``` python
 def register_system_monitor(
@@ -3579,12 +4241,18 @@ def disable_plugin(
 ```
 
 ``` python
-def get_plugin_logs(
-    self,
-    plugin_name:str, # Name of the plugin
-    lines:int=50 # Number of lines to return
-) -> str: # Log content
-    "Read the last N lines of the plugin's log file."
+def get_plugin_diagnostics(
+    """
+    Render a plugin's recent diagnostics as text (CR-14; replaces
+    `get_plugin_logs` — the flat `.cjm/logs/*.log` files no longer exist).
+    
+    A convenience TEXT projection over the diagnostics store for operator /
+    UI display: structured records (level + logger name + exact job id when
+    stamped) merged with the raw stream chunks (prints / tqdm final frames /
+    death rattles) from this plugin's worker sessions, ordered by time.
+    Programmatic consumers query the stores directly
+    (`manager.diagnostics_store` / `JobQueue.get_job_diagnostics`).
+    """
 ```
 
 ``` python
@@ -3854,7 +4522,9 @@ class PluginManager:
         empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
         secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
         max_retries:int=1, # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
-        sysmon_plugin_name:Optional[str]=None # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
+        sysmon_plugin_name:Optional[str]=None, # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
+        journal_store:Optional[JournalStore]=None, # CR-14: durable account-of-action; lazy LocalJournalStore at <data_dir>/journal.db
+        diagnostics_store:Optional[DiagnosticsStore]=None # CR-14: disposable diagnostic narrative; lazy LocalDiagnosticsStore at <data_dir>/diagnostics.db
     )
     "Manages plugin discovery, loading, and lifecycle via process isolation."
     
@@ -3867,7 +4537,9 @@ class PluginManager:
             empirical_store:Optional[EmpiricalResourceStore]=None, # CR-7: resource-usage tracking backend; lazy LocalEmpiricalResourceStore when cfg.substrate.empirical_tracking
             secret_store:Optional[SecretStore]=None, # CR-12: secret backend; lazy LocalSecretStore default (project-local <data_dir>/secrets)
             max_retries:int=1, # CR-7: how many reactive retries to attempt on PluginResourceError (default 1 — one retry after eviction)
-            sysmon_plugin_name:Optional[str]=None # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
+            sysmon_plugin_name:Optional[str]=None, # MonitorPlugin (CR-3) name for GPU subtree attribution; default-None records skip GPU attribution (compute axis only)
+            journal_store:Optional[JournalStore]=None, # CR-14: durable account-of-action; lazy LocalJournalStore at <data_dir>/journal.db
+            diagnostics_store:Optional[DiagnosticsStore]=None # CR-14: disposable diagnostic narrative; lazy LocalDiagnosticsStore at <data_dir>/diagnostics.db
         )
         "Initialize the plugin manager."
 ```
@@ -4915,11 +5587,18 @@ class Composition:
     members run to completion, transitive dependents are skipped, and the
     composition lands `failed`. `fail_fast=False` is best-effort: independent
     members continue; only transitive dependents of the failure are skipped.
+    
+    `run_id` / `actor` (CR-14 follow-up) are host-tier correlation tags
+    stamped onto every lazily-created member Job (the `submit(run_id=,
+    actor=)` analog for compositions) — NOT the composition run's own id,
+    which the queue assigns at submit.
     """
     
     nodes: List[CompositionNode]  # The invocation nodes (order = readability + ready-scan order)
     fail_fast: bool = True  # Halt independent pending members on first failure
     priority: int = 0  # Composition-level priority (per-node override possible)
+    run_id: Optional[str]  # Host-tier run correlation for member Jobs (CR-14 follow-up)
+    actor: Optional[str]  # Who/what initiated the work (CR-14 follow-up)
 ```
 
 ``` python
@@ -5037,27 +5716,46 @@ def _bind_listen_socket(self:RemotePluginProxy) -> Tuple[socket.socket, int]
 ```
 
 ``` python
+def _pump_stream(
+    """
+    Pump a worker's raw output to the diagnostics store (CR-14).
+    
+    The zero-cooperation death-rattle floor: captures everything the worker
+    process writes outside the structured handler — bare prints, native-lib
+    output, tqdm, argparse/startup failures BEFORE logging exists, and the
+    final traceback of a hard crash. Runs as a daemon thread; ends at EOF
+    (worker exit). Attribution is the worker SESSION, never a job — raw
+    streams cannot be job-attributed honestly under same-worker concurrency
+    (the stage-3 lesson that killed the timestamp-window heuristic).
+    
+    tqdm CR-frames collapse to their final frame via `normalize_stream_line`
+    (liveness telemetry is not durable). Failures degrade to dropping chunks
+    (diagnostics are the disposable class) — never to breaking the worker.
+    """
+```
+
+``` python
 @patch
 def _start_process(self:RemotePluginProxy) -> None:
-    """Launch the worker subprocess."""
+    """Launch the worker subprocess (CR-14: PIPE-captured + journaled).
+
+    Replaces the pre-CR-14 fd-inherited flat log file (`.cjm/logs/<name>.log`
+    + ctime session markers): raw output goes through `_pump_stream` into the
+    diagnostics store; structured worker logging writes the diagnostics store
+    DIRECTLY via the env contract below; the spawn itself is a journal event.
+    """
     python_path = self.manifest['python_path']
-
-    # 1. Setup Log Directory using config
     cfg = get_config()
-    log_dir = cfg.logs_dir
-    log_dir.mkdir(parents=True, exist_ok=True)
 
-    # 2. Open Log File (Append mode)
-    # We keep the file handle open as long as the process runs
-    self.log_path = log_dir / f"{self.name}.log"
-    self.log_file = open(self.log_path, "a") # Close this in cleanup()
-
-    # Write a header so we know a new session started
-    self.log_file.write(f"\n--- Starting {self.name} at {time.ctime()} ---\n")
-    self.log_file.flush()
-
-    # SG-4: prefer FD inheritance over bind-then-close. `pass_fds` is
-    "Launch the worker subprocess."
+    # CR-14: spawn-scoped worker session id — ties WORKER_SPAWNED/READY/DIED
+    """
+    Launch the worker subprocess (CR-14: PIPE-captured + journaled).
+    
+    Replaces the pre-CR-14 fd-inherited flat log file (`.cjm/logs/<name>.log`
+    + ctime session markers): raw output goes through `_pump_stream` into the
+    diagnostics store; structured worker logging writes the diagnostics store
+    DIRECTLY via the env contract below; the spawn itself is a journal event.
+    """
 ```
 
 ``` python
@@ -5111,7 +5809,35 @@ def _prepare_payload(
     args: tuple, # Positional arguments
     kwargs: dict # Keyword arguments
 ) -> Dict[str, Any]: # JSON-serializable payload
-    "Prepare arguments for HTTP transmission."
+    """
+    Prepare arguments for HTTP transmission.
+    
+    CR-14: attaches the current call envelope (set by the JobQueue around
+    each job's execution via the `wire` contextvar) as a TOP-LEVEL body key.
+    Never inside kwargs — plugin signatures never see it; old workers ignore
+    unknown top-level keys. Envelope-less calls (direct proxy use) simply
+    produce unattributed worker records.
+    """
+```
+
+``` python
+def _harvest_worker_accounts(
+    """
+    CR-14 follow-up: journal in-worker accounts off the response header.
+    
+    The host-writes-the-row half of the account contract (`wire.
+    record_account` / worker `_accounts_headers`): workers RECORD accounts
+    during a call span; the proxy journals them ON RECEIPT with
+    `worker_reported=True` + the receiving-side identity (the proxy-side
+    call envelope + this spawn's worker session). Called on every unary
+    response BEFORE the status checks so a `_job_error` 500's accounts
+    (e.g. a save that succeeded before a later crash) are kept.
+    
+    Header absent (old workers, account-less calls) = no-op. A failure here
+    logs at ERROR and never breaks the call — the result is the contract;
+    and a wedged journal store also fails the queue's own emission for the
+    same job, so the wedge gate still fires loudly.
+    """
 ```
 
 ``` python
@@ -5245,6 +5971,21 @@ async def execute_async_with_oom_check(self, *args, **kwargs) -> Any:
 ```
 
 ``` python
+def _prepare_task_payload(
+    self,
+    task_name: str,  # Adapter task address
+    method: str,  # Adapter method name
+    kwargs: dict,  # Task method kwargs
+) -> Dict[str, Any]:  # JSON-serializable /task body
+    """
+    Build the /task body (CR-17 pt 2) + the CR-14 call envelope rider.
+    
+    Same envelope semantics as `_prepare_payload`: top-level key, never
+    inside kwargs.
+    """
+```
+
+``` python
 def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
     """Invoke a typed task-adapter method in-worker (CR-17 pt 2; sync).
 
@@ -5253,8 +5994,8 @@ def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
     by design. Built ONCE with the CR-7 Track-A worker-death check inside —
     no later wrapper supersedes it (the G7a last-assignment-wins lesson).
     """
-    payload = {
-        "task": task_name,
+    payload = self._prepare_task_payload(task_name, method, kwargs)
+    try
     """
     Invoke a typed task-adapter method in-worker (CR-17 pt 2; sync).
     
@@ -5268,8 +6009,8 @@ def execute_task(self, task_name: str, method: str, **kwargs) -> Any:
 ``` python
 async def execute_task_async(self, task_name: str, method: str, **kwargs) -> Any:
     """Invoke a typed task-adapter method in-worker (CR-17 pt 2; async). Same semantics."""
-    payload = {
-        "task": task_name,
+    payload = self._prepare_task_payload(task_name, method, kwargs)
+    try
     "Invoke a typed task-adapter method in-worker (CR-17 pt 2; async). Same semantics."
 ```
 
@@ -5583,7 +6324,9 @@ class RemotePluginProxy:
         self,
         manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
         extra_env:Optional[Dict[str, str]]=None, # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
-        adapter_specs:Optional[List[str]]=None # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
+        adapter_specs:Optional[List[str]]=None, # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
+        journal:Optional[JournalStore]=None, # CR-14: journal sink for worker-lifecycle events; lazy LocalJournalStore at cfg.journal_db_path when None
+        diagnostics:Optional[DiagnosticsStore]=None # CR-14: diagnostics sink (raw-stream pump + worker env contract); lazy LocalDiagnosticsStore when None
     )
     "Proxy that forwards plugin calls to an isolated Worker subprocess."
     
@@ -5591,7 +6334,9 @@ class RemotePluginProxy:
             self,
             manifest:Dict[str, Any], # Plugin manifest with python_path, module, class, etc.
             extra_env:Optional[Dict[str, str]]=None, # CR-12: resolved worker-env overlay (secrets + visible overrides) injected at spawn
-            adapter_specs:Optional[List[str]]=None # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
+            adapter_specs:Optional[List[str]]=None, # CR-17 pt 2: host-matched adapter impl specs ("module:ClassName") bound in-worker at spawn
+            journal:Optional[JournalStore]=None, # CR-14: journal sink for worker-lifecycle events; lazy LocalJournalStore at cfg.journal_db_path when None
+            diagnostics:Optional[DiagnosticsStore]=None # CR-14: diagnostics sink (raw-stream pump + worker env contract); lazy LocalDiagnosticsStore when None
         )
         "Initialize proxy and start the worker process."
     
@@ -5607,13 +6352,10 @@ class RemotePluginProxy:
             """Plugin version."""
             return self.manifest.get('version', '0.0.0')
     
-    
-    
-    
-    
-        def initialize(
+        def _journal_event(
             self,
-            config:Optional[Dict[str, Any]]=None # Configuration dictionary
+            event_type:str, # SubstrateEventType value
+            payload:Optional[Dict[str, Any]]=None # Per-event structured detail
         ) -> None
         "Plugin version."
     
@@ -5686,6 +6428,28 @@ async def _enqueue_job(
 ```
 
 ``` python
+def _check_journal_wedge(self) -> None:
+    """CR-14 wedge gate: refuse new work after a journal-append failure.
+
+    The loud half of the named-tension resolution — a wedged journal must
+    never silently drop the audit trail, and the refusal happens at the
+    operational boundary (new submissions) rather than mid-finalization
+    (which would leak lanes). Clears only by constructing a new queue /
+    fixing the journal and resetting `_journal_wedged` deliberately.
+    """
+    if self._journal_wedged
+    """
+    CR-14 wedge gate: refuse new work after a journal-append failure.
+    
+    The loud half of the named-tension resolution — a wedged journal must
+    never silently drop the audit trail, and the refusal happens at the
+    operational boundary (new submissions) rather than mid-finalization
+    (which would leak lanes). Clears only by constructing a new queue /
+    fixing the journal and resetting `_journal_wedged` deliberately.
+    """
+```
+
+``` python
 async def submit(
     self,
     plugin_instance_id: str,  # Target plugin instance (per CR-10)
@@ -5693,6 +6457,8 @@ async def submit(
     priority: int = 0,  # Higher = more urgent
     task: Optional[str] = None,  # Task-channel address: adapter task name (stage 4)
     method: Optional[str] = None,  # Task-channel address: adapter method (set with task)
+    run_id: Optional[str] = None,  # Host-tier run correlation (CR-14 follow-up; reserved name, never a plugin kwarg)
+    actor: Optional[str] = None,  # Who/what initiated (CR-14 follow-up; reserved name)
     **kwargs
 ) -> str:  # Returns job_id
     """
@@ -5708,6 +6474,12 @@ async def submit(
     already in `pending` state at construction — there's no transition
     to publish. The first STATE_TRANSITION fires when the processor loop
     moves the job pending → running.
+    
+    CR-14: refuses loudly when the journal is wedged (see
+    `_check_journal_wedge`). `run_id`/`actor` join `priority`/`task`/
+    `method` as reserved keyword names (they never reach plugin kwargs):
+    cores pass their run-manifest id + initiating actor so every journal
+    row for this job carries the host-tier correlation.
     """
 ```
 
@@ -5819,60 +6591,41 @@ def get_stats(self) -> QueueStats:  # Aggregate counts
 ```
 
 ``` python
-def _parse_log_timestamp(line: str) -> Optional[datetime]:
-    """Parse the leading timestamp from a worker log line.
-
-    Returns naive datetime (no tzinfo) in local time — caller is responsible
-    for tz alignment with the job's UTC timestamps. Returns None for
-    continuation lines (no parseable leading timestamp), blank lines, etc.
-    """
-    m = _LOG_TS_PATTERN.match(line)
-    if not m
-    """
-    Parse the leading timestamp from a worker log line.
-    
-    Returns naive datetime (no tzinfo) in local time — caller is responsible
-    for tz alignment with the job's UTC timestamps. Returns None for
-    continuation lines (no parseable leading timestamp), blank lines, etc.
-    """
-```
-
-``` python
-def _slice_log_by_job_window(
-    raw: str,  # Full log content
-    started_at: datetime,  # Job's UTC start time
-    completed_at: Optional[datetime],  # Job's UTC end time (None if still running)
-    max_lines: int,  # Max lines to return
-) -> str:  # Sliced log content
-    """
-    Slice log content by a job's execution window.
-    
-    Worker logs are local-time naive; job timestamps are UTC. We convert
-    the job's UTC times to local-time-naive for comparison. Continuation
-    lines (no parseable timestamp) are associated with the most recent
-    timestamped line — included if that timestamp was in the window.
-    
-    Best-effort: if `started_at` is None (job never ran) or no lines have
-    parseable timestamps, returns the raw tail unchanged.
-    """
-```
-
-``` python
-def get_job_logs(
+def get_job_diagnostics(
     self,
-    job_id: str,  # Job to get logs for
-    lines: int = 100  # Max lines to return
-) -> str:  # Log content scoped to this job's execution window
+    job_id: str,  # Job whose diagnostic records to read
+    limit: Optional[int] = 200,  # Max records (None = all)
+    after_seq: Optional[int] = None,  # Tail cursor for follow-style reads
+) -> List[DiagnosticRecord]:  # Job-stamped records, oldest first
     """
-    Get logs for a job, scoped to its (started_at, completed_at) window.
+    EXACT per-job diagnostics (CR-14; replaces `get_job_logs`).
     
-    CR-6 Stage 3: replaces the legacy whole-plugin-log behavior. The
-    substrate over-fetches the plugin log (lines * 5) and slices by the
-    job's execution window — the job-monitor library's `--- Starting` marker
-    heuristic in `_filter_current_session` becomes obsolete in cascade.
+    Records were stamped with the job id IN THE WORKER via the call-envelope
+    contextvar — no timestamp windows, no over-fetch, correct under stage-3
+    same-worker concurrency and across multi-instance plugins (both of which
+    the deleted `_slice_log_by_job_window` heuristic got wrong). Follow-style
+    consumers poll with `after_seq` (the LOG_APPENDED replacement).
     
-    Falls back gracefully when timestamps are unparseable or the job's
-    window isn't known: returns the raw tail.
+    Returns [] when no diagnostics store is configured.
+    """
+```
+
+``` python
+def get_history_from_journal(
+    self,
+    limit: Optional[int] = None,  # Most recent N terminal jobs (None = all)
+) -> List[Job]:  # Rehydrated job records, most recent first
+    """
+    Durable job history (the CR-14 `_history` migration rider).
+    
+    Rehydrates Job records from terminal STATE_TRANSITION journal rows —
+    restart-surviving and unbounded, unlike the in-memory `get_history`
+    working set (`max_history` eviction). Rehydrated Jobs are RECORDS:
+    args/kwargs/result are not journaled (results live in capability DBs;
+    parameters in run manifests) — identity, timing, status, error,
+    composition/task fields are present.
+    
+    Falls back to the in-memory history when no journal is configured.
     """
 ```
 
@@ -5894,15 +6647,43 @@ def _subscriber_keys_for(event: JobEvent) -> List[str]:
 ```
 
 ``` python
-def _publish_event(
+def _journal_append_guarded(
     self,
-    event: JobEvent,  # Event to fan out
+    event: JournalEvent,  # Pre-built journal event (caller fills identity/payload)
 ) -> None
     """
-    Fan out an event to all matching subscribers (CR-6).
+    Append to the journal under the wedge-gate failure contract (CR-14).
     
-    Slow subscribers backpressure themselves via `asyncio.QueueFull` drop —
-    publisher never blocks. Each subscriber tracks `dropped_count` so
+    The ONE place the named-tension resolution lives: an append failure logs
+    at ERROR and wedges the queue (new submissions refuse via
+    `_check_journal_wedge`) instead of raising into dispatch/finalization
+    paths — raising there would leak lanes and corrupt in-flight state,
+    while continuing silently would drop the audit trail. No-op without a
+    configured journal. Used by `_publish_event` (job events) and by the
+    direct substrate-event emissions (ADMISSION_DECIDED).
+    """
+```
+
+``` python
+def _publish_event(
+    self,
+    event: JobEvent,  # Event to emit
+) -> None
+    """
+    The SINGLE emission path (CR-14: journal-primary).
+    
+    Class routing at the one place every event passes through:
+    - journal-class events (everything except `LIVENESS_EVENT_TYPES`)
+      become durable journal rows FIRST, then fan out to live subscribers —
+      emitting IS writing the record; the bus is a live tail of the journal.
+    - liveness-class events (PROGRESS_CHANGED / RESOURCE_SNAPSHOT) fan out
+      only; their final values ride the terminal STATE_TRANSITION row.
+    
+    Journal failures follow the wedge-gate contract — see
+    `_journal_append_guarded`.
+    
+    Fan-out: slow subscribers backpressure themselves via `asyncio.QueueFull`
+    drop — publisher never blocks. Each subscriber tracks `dropped_count` so
     operators / future telemetry can surface backpressure visibility.
     """
 ```
@@ -5932,6 +6713,9 @@ async def events(
     
     Yields events as they fire. Multiple concurrent subscribers to the same
     job_id each get their own independent stream — useful for multi-tab UIs.
+    Late subscribers catch up exactly via the journal: query
+    `journal.query(job_id=..., after_seq=cursor)` then follow live — the
+    bus is a tail of the journal, not the record itself (CR-14).
     """
 ```
 
@@ -5980,6 +6764,9 @@ async def submit_composition(
     matching the sequence-era precedent. Member Jobs are created LAZILY —
     only dependency-free nodes have Jobs at submit; downstream nodes get
     their kwargs materialized from upstream results at advancement time.
+    
+    CR-14: refuses loudly when the journal is wedged (the same gate as
+    `submit`).
     
     Consumers wait via `wait_for_composition`, observe via
     `events_for_composition`, inspect via `get_composition`.
@@ -6038,6 +6825,9 @@ async def _start_ready_nodes(
     fail-fast housekeeping applies) rather than raising to the caller — by
     the time bindings resolve, the composition is mid-flight and the failure
     must flow through the same path as a member-job failure.
+    
+    CR-14 follow-up: member Jobs inherit the composition's `run_id`/`actor`
+    correlation tags so every member's journal rows link to the host run.
     """
 ```
 
@@ -6208,6 +6998,45 @@ def _signal_job_completed(self, job_id: str) -> None:
 ```
 
 ``` python
+def _job_snapshot(job: Job) -> Dict[str, Any]:
+    """Serialize a job's RECORD fields for the terminal journal row (CR-14).
+
+    Deliberately excludes args/kwargs/result: results live in capability DBs,
+    parameters in run manifests — the journal never duplicates what better
+    homes already record (the attempted-vs-happened rule). The error rides as
+    the JobError dict (failures are exactly what the journal exists to keep).
+    """
+    return {
+        "id": job.id,
+    """
+    Serialize a job's RECORD fields for the terminal journal row (CR-14).
+    
+    Deliberately excludes args/kwargs/result: results live in capability DBs,
+    parameters in run manifests — the journal never duplicates what better
+    homes already record (the attempted-vs-happened rule). The error rides as
+    the JobError dict (failures are exactly what the journal exists to keep).
+    """
+```
+
+``` python
+def _job_from_snapshot(snap: Dict[str, Any]) -> Job:
+    """Rehydrate a Job RECORD from a terminal-row snapshot (CR-14).
+
+    Tolerant on both directions: unknown snapshot keys are ignored; a
+    JobError dict that no longer matches the current JobError fields
+    degrades to None rather than failing the history read.
+    """
+    def _dt(v)
+    """
+    Rehydrate a Job RECORD from a terminal-row snapshot (CR-14).
+    
+    Tolerant on both directions: unknown snapshot keys are ignored; a
+    JobError dict that no longer matches the current JobError fields
+    degrades to None rather than failing the history read.
+    """
+```
+
+``` python
 def _emit_state_transition(
     self,
     job: Job,
@@ -6218,6 +7047,10 @@ def _emit_state_transition(
     
     Centralized so every transition site (start, completed, failed, cancelled,
     or future cancel-phase-driven transitions) carries identical tag context.
+    
+    CR-14: TERMINAL transitions carry the job snapshot in the payload — the
+    durable journal row becomes the job's record of existence (the `_history`
+    migration rider: `get_history_from_journal` rehydrates from these).
     """
 ```
 
@@ -6323,6 +7156,14 @@ async def _process_loop(self) -> None:
     the highest-priority admissible job under the lock, and launch it as an
     independent task tracked in `_running_tasks` (awaited by `stop`). The
     pre-stage-3 loop executed one job at a time inline.
+
+    CR-14 follow-up: each ADMIT is journaled as an ADMISSION_DECIDED row —
+    emitted AFTER the lock releases (sqlite I/O never rides the locked fast
+    path; the decision detail is recovered from the admission ledgers the
+    pop updated synchronously). Blocked jobs are NOT journaled per scan —
+    the scan loop re-evaluates them on every pass and would spam rows; the
+    reserved BLOCK_REASON_CHANGED transition channel is the place block
+    visibility lands when the scheduler-coordination wiring happens.
     """
     while self._running_flag
     """
@@ -6334,6 +7175,14 @@ async def _process_loop(self) -> None:
     the highest-priority admissible job under the lock, and launch it as an
     independent task tracked in `_running_tasks` (awaited by `stop`). The
     pre-stage-3 loop executed one job at a time inline.
+    
+    CR-14 follow-up: each ADMIT is journaled as an ADMISSION_DECIDED row —
+    emitted AFTER the lock releases (sqlite I/O never rides the locked fast
+    path; the decision detail is recovered from the admission ledgers the
+    pop updated synchronously). Blocked jobs are NOT journaled per scan —
+    the scan loop re-evaluates them on every pass and would spam rows; the
+    reserved BLOCK_REASON_CHANGED transition channel is the place block
+    visibility lands when the scheduler-coordination wiring happens.
     """
 ```
 
@@ -6387,6 +7236,9 @@ async def _poll_progress(
     updates). CR-6 Stage 3: also emits RESOURCE_SNAPSHOT events every
     `resource_snapshot_cadence_polls` iterations; snapshot is also stored
     on `job.last_resource_snapshot` for synchronous inspection.
+    
+    Liveness-class events (never journaled) still carry run_id/actor so
+    live-tail subscribers see the same tag shape as journal-class events.
     """
 ```
 
@@ -6436,16 +7288,27 @@ class JobStatus(str, Enum):
 ``` python
 class JobEventType(str, Enum):
     """
-    Push-based job event types (CR-6; stage-3 composition rework).
+    Push-based job event types (CR-6; stage-3 composition rework; CR-14
+    journal-primary emission).
     
-    Emitted by JobQueue on a multi-subscriber event bus. Consumers subscribe
-    via `queue.events(job_id)` / `queue.events_for_composition(comp_id)` /
+    Emitted by JobQueue through the single emission path (`_publish_event`):
+    journal-class events become durable journal rows AND fan out to live
+    subscribers; liveness-class events (`LIVENESS_EVENT_TYPES` in
+    `core.journal_store`) fan out only — their final values ride the
+    terminal STATE_TRANSITION row. Consumers subscribe via
+    `queue.events(job_id)` / `queue.events_for_composition(comp_id)` /
     `queue.all_events()` and receive `JobEvent` instances asynchronously.
     
     COMPOSITION_ADVANCED replaced the retired SEQUENCE_ADVANCED at execution
     stage 3 (CR-16: compositions replace sequences outright): it fires when a
     member job's completion unlocks downstream composition nodes — payload
     carries the completed node id + the newly enqueued node ids.
+    
+    The reserved-never-emitted LOG_APPENDED was RETIRED at stage 7 (CR-14):
+    log-follow is a diagnostics-store cursor read (`get_job_diagnostics`),
+    not a push event — there are no log files or byte offsets anymore.
+    Non-job substrate events (worker lifecycle, config, runs) live in
+    `core.journal_store.SubstrateEventType`.
     """
 ```
 
@@ -6470,11 +7333,15 @@ class JobQueueDependencies(Protocol):
     can be tested in isolation (with a lightweight test double) and so a future
     extraction into a separate library has no API constraint locked in.
     
-    The first 5 methods are the CR-6 execute-path surface. The stage-3
-    additions (CR-16 multi-lane admission) are consumed DEFENSIVELY via
-    getattr — a deps implementation without them yields no admission
+    The first 4 methods are the CR-6 execute-path surface (CR-14 retired
+    `get_plugin_logs` — log retrieval is a diagnostics-store query now). The
+    stage-3 additions (CR-16 multi-lane admission) are consumed DEFENSIVELY
+    via getattr — a deps implementation without them yields no admission
     evidence, so every job runs exclusive = exact pre-stage-3 single-lane
-    behavior. Older test doubles keep working unchanged.
+    behavior. Older test doubles keep working unchanged. CR-14 also reads
+    `journal_store` / `diagnostics_store` ATTRIBUTES via getattr when the
+    queue isn't constructed with explicit stores — a deps without them
+    (test doubles) simply yields no journaling.
     """
     
     def get_plugin_meta(self, name_or_id: str) -> Optional[Any]: ...
@@ -6487,9 +7354,6 @@ class JobQueueDependencies(Protocol):
         def reload_plugin(self, name_or_id: str) -> Any: ...
     
     def reload_plugin(self, name_or_id: str) -> Any: ...
-        def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str: ...
-    
-    def get_plugin_logs(self, plugin_name: str, lines: int = 50) -> str: ...
         # Stage 3 (CR-16) admission surface
     
     def get_admission_profile(self, name_or_id: str) -> Optional[Dict[str, Any]]: ...
@@ -6517,6 +7381,11 @@ class Job:
     `composition_id` / `node_id` are set when the job is a lazily-created
     member of a composition (CR-16) — they ride every JobEvent so
     `events_for_composition` subscribers see member lifecycle events.
+    
+    `run_id` / `actor` (CR-14 follow-up) are host-tier correlation tags:
+    cores pass their run-manifest id + initiating actor at submit so every
+    journal row for this job links back to the run record (run manifest ↔
+    journal linkage) and carries who/what initiated it.
     """
     
     id: str  # Unique job identifier (UUID)
@@ -6536,6 +7405,8 @@ class Job:
     node_id: Optional[str]  # Composition node this job executes (stage 3)
     task_name: Optional[str]  # Task-channel address: adapter task (stage 4, CR-17 pt 2)
     method: Optional[str]  # Task-channel address: adapter method (stage 4)
+    run_id: Optional[str]  # Host-tier run correlation (CR-14 follow-up; core run manifests)
+    actor: Optional[str]  # Who/what initiated the work (CR-14 follow-up)
     cancel_requested_at: Optional[datetime]  # When cancel was requested (Stage 4)
     cancel_phase: Optional[CancelPhase]  # Active cancel phase (Stage 4)
     block_reason: Optional[str]  # Why the scheduler is blocking (Stage 4)
@@ -6567,6 +7438,9 @@ class JobEvent:
     `payload` is a per-event-type structured dict (e.g., STATE_TRANSITION carries
     `{"from": "pending", "to": "running"}`; COMPOSITION_ADVANCED carries
     `{"completed_node": ..., "enqueued_nodes": [...]}`).
+    
+    `run_id` / `actor` (CR-14 follow-up) ride from the Job so journal rows
+    written by the single emission path carry the host-tier correlation.
     """
     
     type: JobEventType
@@ -6574,6 +7448,8 @@ class JobEvent:
     plugin_instance_id: str
     composition_id: Optional[str]
     node_id: Optional[str]
+    run_id: Optional[str]  # Host-tier run correlation (CR-14 follow-up)
+    actor: Optional[str]  # Who/what initiated (CR-14 follow-up)
     timestamp: datetime = field(...)
     payload: Dict[str, Any] = field(...)
 ```
@@ -6635,33 +7511,13 @@ class ResourceSnapshot:
 ``` python
 class JobQueue:
     def __init__(
-        self,
-        deps: JobQueueDependencies,        # Substrate dependencies (PluginManager satisfies structurally)
-        max_history: int = 100,            # Max completed jobs to retain
-        cancel_timeout: float = 3.0,       # Seconds to wait for cooperative cancel
-        progress_poll_interval: float = 1.0,  # Seconds between progress polls
-        sysmon_plugin_name: Optional[str] = None,  # CR-3 MonitorPlugin instance for GPU stats (None = no GPU info)
-        resource_snapshot_cadence_polls: int = 4,  # Sample resources every Nth progress poll
-        max_concurrent_lanes: int = 4,     # Stage 3: max in-flight jobs (admission still gates each)
-        gpu_headroom_fraction: float = 0.9,  # Stage 3: blunt GPU admission margin (budget = total * fraction)
-    )
     """
-    Resource-aware multi-lane job queue with push-based observability
-    (CR-6; stage-3 CR-16 rework: ready-set dispatch + resource-derived
+    Resource-aware multi-lane job queue with journal-primary observability
+    (CR-6 + CR-14; stage-3 CR-16 rework: ready-set dispatch + resource-derived
     admission + composition execution).
     """
     
     def __init__(
-            self,
-            deps: JobQueueDependencies,        # Substrate dependencies (PluginManager satisfies structurally)
-            max_history: int = 100,            # Max completed jobs to retain
-            cancel_timeout: float = 3.0,       # Seconds to wait for cooperative cancel
-            progress_poll_interval: float = 1.0,  # Seconds between progress polls
-            sysmon_plugin_name: Optional[str] = None,  # CR-3 MonitorPlugin instance for GPU stats (None = no GPU info)
-            resource_snapshot_cadence_polls: int = 4,  # Sample resources every Nth progress poll
-            max_concurrent_lanes: int = 4,     # Stage 3: max in-flight jobs (admission still gates each)
-            gpu_headroom_fraction: float = 0.9,  # Stage 3: blunt GPU admission margin (budget = total * fraction)
-        )
         "Initialize the job queue.
 
 Stage 3 (CR-16): the queue dispatches multiple admissible jobs
@@ -6669,15 +7525,27 @@ concurrently (`max_concurrent_lanes` is the operator safety valve);
 per-job admission derives from empirical resource records + live
 sysmon telemetry — see `_pop_next_admissible`. Worst case (no
 records, no sysmon) every job runs exclusive, which is exactly the
-pre-stage-3 single-lane behavior."
+pre-stage-3 single-lane behavior.
+
+CR-14 (stage 7): emission is journal-primary — `_publish_event`
+writes journal-class events as durable rows before fanning out to
+live subscribers. The stores default to the deps' (PluginManager's)
+stores via getattr, so the cores gain journaling with zero host
+changes; a deps without them (test doubles) yields no journaling."
+    
+    def set_run_context(
+            self,
+            run_id: Optional[str] = None,  # Host-tier run correlation for subsequent submits
+            actor: Optional[str] = None,   # Who/what initiated the run
+        ) -> None
+        "Set the queue-scoped default run context (CR-14 follow-up).
+
+Every subsequent submit without explicit `run_id`/`actor` inherits
+these — the one-queue-per-run CLI cores call this once after
+generating their run-manifest id, and every journal row for the run
+links back to it. Call again (or with None) to change/clear."
     
     def manager(self) -> JobQueueDependencies
-```
-
-#### Variables
-
-``` python
-_LOG_TS_PATTERN
 ```
 
 ### Scheduling (`scheduling.ipynb`)
@@ -7158,11 +8026,20 @@ SCHEMA_FORMAT = 'format'  # String format (email, uri, date, etc.)
 from cjm_plugin_system.core.wire import (
     WIRE_KIND_KEY,
     WIRE_DATA_KEY,
+    ENVELOPE_BODY_KEY,
+    ACCOUNTS_HEADER,
     FileBackedDTO,
     flat_from_dict,
     wire_type,
     wire_encode,
-    wire_decode
+    wire_decode,
+    CallEnvelope,
+    set_call_envelope,
+    reset_call_envelope,
+    get_call_envelope,
+    begin_account_capture,
+    record_account,
+    drain_accounts
 )
 ```
 
@@ -7230,6 +8107,78 @@ def wire_decode(
     """
 ```
 
+``` python
+def set_call_envelope(env: Optional[CallEnvelope]) -> contextvars.Token:
+    """Set the current call envelope; returns the token for `reset_call_envelope`."""
+    return _CALL_ENVELOPE.set(env)
+
+
+def reset_call_envelope(token: contextvars.Token) -> None
+    "Set the current call envelope; returns the token for `reset_call_envelope`."
+```
+
+``` python
+def reset_call_envelope(token: contextvars.Token) -> None:
+    """Restore the prior envelope (always pair with `set_call_envelope` in finally)."""
+    _CALL_ENVELOPE.reset(token)
+
+
+def get_call_envelope() -> Optional[CallEnvelope]
+    "Restore the prior envelope (always pair with `set_call_envelope` in finally)."
+```
+
+``` python
+def get_call_envelope() -> Optional[CallEnvelope]
+    "The current call envelope, or None outside any call span."
+```
+
+``` python
+def begin_account_capture() -> None:
+    """Start a fresh account list for the current call span (worker endpoint
+    entry; same no-reset semantics as the envelope — the ASGI request task's
+    context dies with the request)."""
+    _CALL_ACCOUNTS.set([])
+
+
+def record_account(
+    event_type: str,  # SubstrateEventType value (task_account / result_saved / cache_hit / ...)
+    payload: Optional[dict] = None,  # Structured detail (references + hashes, never content)
+) -> None
+    """
+    Start a fresh account list for the current call span (worker endpoint
+    entry; same no-reset semantics as the envelope — the ASGI request task's
+    context dies with the request).
+    """
+```
+
+``` python
+def record_account(
+    event_type: str,  # SubstrateEventType value (task_account / result_saved / cache_hit / ...)
+    payload: Optional[dict] = None,  # Structured detail (references + hashes, never content)
+) -> None
+    """
+    Record one substrate-family account for the current call span.
+    
+    Called by the worker itself and by interface-lib storage helpers.
+    Silent no-op outside a capture span (standalone runs, host imports) —
+    the envelope-less-call posture applied to accounts.
+    """
+```
+
+``` python
+def drain_accounts() -> list:
+    """Return + clear the current span's recorded accounts ([] outside a span
+    or when nothing was recorded). The worker response path calls this once
+    when building the response headers."""
+    lst = _CALL_ACCOUNTS.get()
+    if not lst
+    """
+    Return + clear the current span's recorded accounts ([] outside a span
+    or when nothing was recorded). The worker response path calls this once
+    when building the response headers.
+    """
+```
+
 #### Classes
 
 ``` python
@@ -7241,6 +8190,34 @@ class FileBackedDTO(Protocol):
         "Save the data to a temporary file and return the absolute path."
 ```
 
+``` python
+@dataclass
+class CallEnvelope:
+    """
+    Substrate-owned per-call identity + control block (CR-14 / CR-15).
+    
+    Travels as a top-level `"envelope"` key on every proxy→worker call body.
+    All fields optional — an envelope-less call (direct proxy use, old hosts)
+    simply yields unattributed records, never a failure.
+    """
+    
+    job_id: Optional[str]  # Queue job identity
+    run_id: Optional[str]  # Host-tier run correlation (core run manifests)
+    composition_id: Optional[str]  # Stage-3 composition correlation
+    node_id: Optional[str]  # Composition node correlation
+    actor: Optional[str]  # Who/what initiated (operator / agent / host id)
+    control: dict = field(...)  # Per-call flags (force/cache-bypass — the 4th CR-15 category)
+    
+    def to_wire(self) -> dict:
+            """Compact wire form: None fields dropped; empty control dropped."""
+            out = {}
+            for f in _dc_fields(self)
+        "Compact wire form: None fields dropped; empty control dropped."
+    
+    def from_wire(cls, d: dict) -> "CallEnvelope"
+        "Tolerant decode: unknown keys ignored (forward compat)."
+```
+
 #### Variables
 
 ``` python
@@ -7248,6 +8225,10 @@ WIRE_KIND_KEY = '__wire__'
 WIRE_DATA_KEY = 'data'
 _WIRE_TYPES: Dict[str, type]
 _WIRE_KINDS: Dict[type, str]
+ENVELOPE_BODY_KEY = 'envelope'  # Top-level request-body key (never inside kwargs)
+_CALL_ENVELOPE: contextvars.ContextVar[Optional[CallEnvelope]]
+ACCOUNTS_HEADER = 'X-CJM-Accounts'  # Response header carrying recorded accounts (ASCII JSON)
+_CALL_ACCOUNTS: contextvars.ContextVar[Optional[list]]
 ```
 
 ### Universal Worker (`worker.ipynb`)
@@ -7345,6 +8326,47 @@ def _load_adapters(
 ```
 
 ``` python
+def _apply_call_envelope(
+    data: Dict[str, Any],  # The decoded request body
+) -> None
+    """
+    CR-14: decode the wire envelope into the worker-side contextvar.
+    
+    Set WITHOUT reset: ASGI handles each request in its own asyncio task, so
+    the context (and the var) dies with the request — and for
+    /execute_stream the response iteration runs in the SAME request task
+    AFTER the endpoint returns, which is exactly why a reset-before-return
+    would lose the identity (Starlette's iterate_in_threadpool copies the
+    request task's context per chunk). An absent envelope leaves the var
+    None — records stay honestly unattributed.
+    
+    CR-14 follow-up: also begins a fresh account-capture span (same no-reset
+    semantics) so in-worker substrate-family accounts (TASK_ACCOUNT /
+    RESULT_SAVED / CACHE_HIT) accumulate per call and ride back on the
+    response header — see `_accounts_headers`.
+    """
+```
+
+``` python
+def _accounts_headers() -> Dict[str, str]:
+    """Drain the call span's recorded accounts into the response header dict.
+
+    Empty dict when nothing was recorded (header absent — old hosts and
+    account-less calls see byte-identical responses). ASCII JSON
+    (`ensure_ascii` default) keeps the header latin-1-safe.
+    """
+    accounts = drain_accounts()
+    if not accounts
+    """
+    Drain the call span's recorded accounts into the response header dict.
+    
+    Empty dict when nothing was recorded (header absent — old hosts and
+    account-less calls see byte-identical responses). ASCII JSON
+    (`ensure_ascii` default) keeps the header latin-1-safe.
+    """
+```
+
+``` python
 def _register_task_endpoints(
     app,             # FastAPI app under construction
     plugin_instance, # The loaded plugin object
@@ -7357,6 +8379,17 @@ def _register_task_endpoints(
     through `wire_encode`, so results whose DTO classes are registered
     via `@wire_type` cross the boundary in the tagged envelope and arrive
     typed at the proxy; unregistered results serialize exactly as before.
+    
+    CR-14 (stage 7): each call decodes the per-call envelope into the
+    contextvar and carries it into the executor thread via
+    `contextvars.copy_context()` (run_in_executor does NOT copy context by
+    itself) — the diagnostics handler stamps every plugin log record with
+    exact job identity, replacing the timestamp-window heuristic.
+    
+    CR-14 follow-up: the unary paths (/execute, /task) return recorded
+    accounts on the `X-CJM-Accounts` response header (success AND the
+    `_job_error` 500 — a failed call still reports the accounts recorded
+    before the failure). The host journals them with `worker_reported=True`.
     """
 ```
 
